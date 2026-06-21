@@ -150,30 +150,35 @@ SELECT * FROM pgaadauth_create_principal_with_oid(
 
 ### 3. Grant the role its read-mostly + checks-CRUD privileges
 
-Connect to the **application database** (`synthwatch`) as the Entra admin and grant:
+Connect to the **application database** (`synthwatch`) as **`synthadmin`** — the migration role
+that owns every public table. Ownership is required for `GRANT ... ON ALL TABLES` and for
+`ALTER DEFAULT PRIVILEGES FOR ROLE synthadmin`; the Entra admin can only run these if it is a
+member of `synthadmin`. Then grant:
 
 ```sql
--- Read everything the API serves.
-GRANT SELECT ON checks, runs, run_steps, run_metrics, incidents TO "synthwatch-api";
+-- READ-ALL (strictly read-only). The API is read-mostly and the sla_availability() SQL function
+-- runs with the INVOKER's (the MI's) privileges, so the MI needs SELECT on every table the
+-- function joins. Rather than chase each new runner table (e.g. maintenance_windows, added by
+-- migration 0004 — a missing SELECT there 500'd every /api/sla window), grant read on all current
+-- tables/views + execute on all functions, and set DEFAULT PRIVILEGES so future runner tables are
+-- auto-readable. This closes that whole "permission denied" class without any write escalation.
+GRANT SELECT  ON ALL TABLES    IN SCHEMA public TO "synthwatch-api";
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO "synthwatch-api";
 
--- SLA: read the views and execute the function (don't reimplement).
-GRANT SELECT ON sla_availability_24h, sla_availability_7d, sla_availability_30d TO "synthwatch-api";
-GRANT EXECUTE ON FUNCTION sla_availability(timestamptz, timestamptz) TO "synthwatch-api";
+-- Future-proof: objects the runner creates later are auto-granted. DEFAULT PRIVILEGES apply to the
+-- role that CREATES the object, so they MUST target the migration/owning role (here `synthadmin`,
+-- which owns every public table). Run these AS synthadmin, or as a member of it via FOR ROLE:
+ALTER DEFAULT PRIVILEGES FOR ROLE synthadmin IN SCHEMA public GRANT SELECT  ON TABLES    TO "synthwatch-api";
+ALTER DEFAULT PRIVILEGES FOR ROLE synthadmin IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO "synthwatch-api";
 
--- The sla_availability() SQL function runs with the INVOKER's (the MI's) privileges, so the
--- MI also needs SELECT on every table the function reads. Beyond checks/runs (granted above),
--- it joins maintenance_windows (added by runner migration 0004 to exclude maintenance runs).
--- Without this grant, all /api/sla windows return HTTP 500 ("permission denied for table
--- maintenance_windows") even though the views/data are fine. If a future runner migration adds
--- another table to the SLA function, grant SELECT on it too.
-GRANT SELECT ON maintenance_windows TO "synthwatch-api";
-
--- Checks CRUD: create / edit / pause (UPDATE enabled) / hard delete (cascades).
+-- Checks CRUD: create / edit / pause (UPDATE enabled) / hard delete (cascades). This is the ONLY
+-- write the MI gets — no write on runs/run_steps/run_metrics/incidents, no superuser.
 GRANT INSERT, UPDATE, DELETE ON checks TO "synthwatch-api";
 -- 'id' is GENERATED ALWAYS AS IDENTITY, so no sequence grant is needed for inserts.
 ```
 
-After these three steps the Function App can read all monitoring data and manage `checks`
-with no secret of any kind.
+After these steps the Function App can read all monitoring data (now and for future runner
+tables), execute the SLA function, and manage `checks` — with no secret of any kind and no write
+access beyond `checks`.
 
 <!-- claude-review end-to-end validation: trivial docs touch, safe to merge. -->
