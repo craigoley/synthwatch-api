@@ -1,0 +1,19 @@
+# .NET build output
+bin/
+obj/
+out/
+
+# Azure Functions
+local.settings.json
+.azure/
+azure-functions-core-tools/
+
+# Rider / VS / VS Code
+.idea/
+.vs/
+*.user
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
