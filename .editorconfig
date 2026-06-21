@@ -1,17 +1,8 @@
 root = true
 
-[*.cs]
-# --- Pre-existing analyzer carve-outs (surfaced by AnalysisLevel=latest-recommended) ---
-# These are deliberately suppressed to keep the security-stack PR green; the real
-# remediation is tracked in a SEPARATE follow-up PR (do NOT leave them as warnings).
-#
-# CA1848: "use LoggerMessage delegates instead of LoggerExtensions.Log*". This is a
-# high-throughput hot-path logging optimization. The only logging call in this app is in
-# ExceptionHandlingMiddleware, which runs solely on the error path (cold). Low value here.
-# TODO(follow-up PR): adopt LoggerMessage source-gen delegates or formally accept this.
-dotnet_diagnostic.CA1848.severity = none
-
-# CA1862 etc. and all other rules remain at their latest-recommended severity.
+# Note: the former CA1848 suppression was removed — all logging now uses LoggerMessage
+# source-gen delegates (RequestLog / HealthLog / ExceptionLog), so the rule is satisfied,
+# not suppressed.
 
 [Functions/CorsPreflightFunction.cs]
 # CA1822: "member 'Handle' can be marked static". Kept as an instance method for

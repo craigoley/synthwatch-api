@@ -85,6 +85,8 @@ public class SlaFunctions
                 : Math.Round(100m * sumUp / sumCompleted, 4),
             InsufficientData: fleetInsufficient);
 
+        // SLA aggregates change slowly (windowed availability); cache a bit longer than /checks.
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
         return ApiResults.Ok(new
         {
             window = string.IsNullOrEmpty(window) ? "24h" : window,

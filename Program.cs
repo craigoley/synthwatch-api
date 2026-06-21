@@ -30,7 +30,9 @@ builder.Services.AddDbContext<SynthWatchDbContext>((sp, options) =>
     options.UseNpgsql(dataSource);
 });
 
-// Worker middleware: CORS (outer, decorates every response) then exception shielding (inner).
+// Worker middleware (outermost first): request logging (times whole pipeline + final status),
+// then CORS (decorates every response), then exception shielding (innermost).
+builder.UseMiddleware<RequestLoggingMiddleware>();
 builder.UseMiddleware<CorsMiddleware>();
 builder.UseMiddleware<ExceptionHandlingMiddleware>();
 
