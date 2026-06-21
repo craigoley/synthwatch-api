@@ -85,12 +85,19 @@ public record SlaDto(
     long CompletedRuns,
     long UpRuns,
     long DownRuns,
-    decimal? AvailabilityPct)
-{
-    public static SlaDto From(SlaAvailabilityRow r) => new(
-        r.CheckId, r.CheckName, r.Kind, r.WindowFrom, r.WindowTo,
-        r.CompletedRuns, r.UpRuns, r.DownRuns, r.AvailabilityPct);
-}
+    // availabilityPct is nulled when insufficientData is true, so consumers can't render a
+    // misleading precise % for a window the data doesn't actually span. Raw up/completed counts
+    // are kept regardless. insufficientData is additive (new field) — backward-compatible.
+    decimal? AvailabilityPct,
+    bool InsufficientData);
+
+/// <summary>Run-weighted fleet rollup for one window: SUM(up)/SUM(completed) across checks.</summary>
+public record SlaFleetDto(
+    long CompletedRuns,
+    long UpRuns,
+    long DownRuns,
+    decimal? AvailabilityPct,
+    bool InsufficientData);
 
 /// <summary>Generic paged envelope for list endpoints.</summary>
 public record PagedResult<T>(IReadOnlyList<T> Items, int Page, int PageSize, long Total);
