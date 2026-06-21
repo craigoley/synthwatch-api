@@ -150,7 +150,10 @@ SELECT * FROM pgaadauth_create_principal_with_oid(
 
 ### 3. Grant the role its read-mostly + checks-CRUD privileges
 
-Connect to the **application database** (`synthwatch`) as the Entra admin and grant:
+Connect to the **application database** (`synthwatch`) as **`synthadmin`** — the migration role
+that owns every public table. Ownership is required for `GRANT ... ON ALL TABLES` and for
+`ALTER DEFAULT PRIVILEGES FOR ROLE synthadmin`; the Entra admin can only run these if it is a
+member of `synthadmin`. Then grant:
 
 ```sql
 -- READ-ALL (strictly read-only). The API is read-mostly and the sla_availability() SQL function
