@@ -12,11 +12,13 @@ public record RunDto(
     int? HttpStatus,
     string? ErrorMessage,
     string? FailedStep,
-    string? ScreenshotUrl)
+    string? ScreenshotUrl,
+    // SSL: structured cert days-remaining for this run (null for non-ssl runs).
+    int? CertDaysRemaining)
 {
     public static RunDto From(Run r) => new(
         r.Id, r.CheckId, r.Status, r.StartedAt, r.FinishedAt, r.DurationMs,
-        r.HttpStatus, r.ErrorMessage, r.FailedStep, r.ScreenshotUrl);
+        r.HttpStatus, r.ErrorMessage, r.FailedStep, r.ScreenshotUrl, r.CertDaysRemaining);
 }
 
 public record RunStepDto(

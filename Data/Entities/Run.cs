@@ -28,6 +28,9 @@ public class Run
 
     public string? ScreenshotUrl { get; set; }
 
+    // SSL checks: measured cert days-remaining at run time. Nullable (null for non-ssl runs).
+    public int? CertDaysRemaining { get; set; }
+
     // Navigation (read-mostly).
     public Check? Check { get; set; }
     public List<RunStep> Steps { get; set; } = new();

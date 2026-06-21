@@ -50,6 +50,9 @@ public class Check
     // bigint — maps natively to long, no string trap.
     public long? PerfBudgetTransferBytes { get; set; }
 
+    // SSL: warn when the cert expires within this many days. int NOT NULL DEFAULT 30.
+    public int CertExpiryWarnDays { get; set; } = 30;
+
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();

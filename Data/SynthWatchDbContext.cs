@@ -48,6 +48,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.LighthouseFormFactor).HasColumnName("lighthouse_form_factor");
             e.Property(x => x.PerfBudgetLcpMs).HasColumnName("perf_budget_lcp_ms");
             e.Property(x => x.PerfBudgetTransferBytes).HasColumnName("perf_budget_transfer_bytes");
+            e.Property(x => x.CertExpiryWarnDays).HasColumnName("cert_expiry_warn_days");
         });
 
         modelBuilder.Entity<Run>(e =>
@@ -64,6 +65,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.ErrorMessage).HasColumnName("error_message");
             e.Property(x => x.FailedStep).HasColumnName("failed_step");
             e.Property(x => x.ScreenshotUrl).HasColumnName("screenshot_url");
+            e.Property(x => x.CertDaysRemaining).HasColumnName("cert_days_remaining");
             e.HasOne(x => x.Check).WithMany(c => c.Runs).HasForeignKey(x => x.CheckId);
             e.HasIndex(x => new { x.CheckId, x.StartedAt });
         });
