@@ -1,0 +1,71 @@
+name: Deploy API to Azure Functions
+
+# Build and deploy the .NET 10 isolated Function App (Flex Consumption, synthwatch-api in
+# synthwatch-rg / eastus2) on merge to main. Authentication is OIDC (azure/login federated
+# credential) — NO Azure secrets are stored in the repo; only the non-sensitive
+# client/tenant/subscription IDs are repo variables.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.cs'
+      - '**/*.csproj'
+      - 'host.json'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+# Never cancel a deploy mid-roll; serialize deploys to main instead.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+# Least privilege: id-token to mint the OIDC token for azure/login, read to checkout.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_FUNCTIONAPP_NAME: synthwatch-api
+  DOTNET_VERSION: '10.0.x'
+  PUBLISH_DIR: ./publish_output
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Build the prebuilt publish output the deploy step uploads (no remote/Oryx build).
+      - name: Publish (.NET 10 isolated, Release)
+        run: dotnet publish -c Release -o ${{ env.PUBLISH_DIR }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # functions-action uses the azure/login (RBAC) session — no publish profile/secret.
+      # v1.5.x supports Flex Consumption + dotnet-isolated.
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@bc63708cc6539760eea18d8a7de4ce8ef5fdf593 # v1.5.6
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: ${{ env.PUBLISH_DIR }}
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "### API deployed"
+            echo ""
+            echo "- **Function App:** \`${{ env.AZURE_FUNCTIONAPP_NAME }}\` (Flex Consumption, synthwatch-rg / eastus2)"
+            echo "- **Runtime:** .NET 10 isolated"
+            echo "- **Commit:** \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
