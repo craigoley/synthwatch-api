@@ -17,3 +17,6 @@ azure-functions-core-tools/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local publish output (CI publishes to ./publish_output)
+publish_output/
