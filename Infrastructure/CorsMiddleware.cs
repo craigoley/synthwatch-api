@@ -28,13 +28,17 @@ public sealed class CorsMiddleware : IFunctionsWorkerMiddleware
             return;
         }
 
+        // Always Vary on Origin: responses carry Cache-Control: public on some GETs, so the
+        // cache key must partition by Origin even when no allow header is added — otherwise a
+        // shared cache could serve an origin-less entry (no allow header) to an allowed origin.
+        http.Response.Headers["Vary"] = "Origin";
+
         var origin = http.Request.Headers.Origin.ToString();
         if (!string.IsNullOrEmpty(origin) && _allowedOrigins.Contains(origin.TrimEnd('/')))
         {
             var headers = http.Response.Headers;
-            // Echo the matched origin (per-origin response); Vary so caches don't cross origins.
+            // Echo the matched origin (per-origin response).
             headers["Access-Control-Allow-Origin"] = origin;
-            headers["Vary"] = "Origin";
             headers["Access-Control-Allow-Methods"] = "GET,POST,PATCH,DELETE,OPTIONS";
             headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization";
             headers["Access-Control-Max-Age"] = "600";
