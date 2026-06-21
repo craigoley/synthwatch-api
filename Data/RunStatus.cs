@@ -23,14 +23,6 @@ public static class RunStatus
     public const string Error = "error";
     public const string Running = "running";
 
-    /// <summary>Values permitted by <c>runs_status_check</c>.</summary>
-    public static readonly IReadOnlySet<string> RunValues =
-        new HashSet<string>(StringComparer.Ordinal) { Pass, Warn, Fail, Error, Running };
-
-    /// <summary>Values permitted by <c>run_steps_status_check</c> (no <c>warn</c>/<c>running</c>).</summary>
-    public static readonly IReadOnlySet<string> StepValues =
-        new HashSet<string>(StringComparer.Ordinal) { Pass, Fail, Error };
-
     // Health buckets. up/down/running match sla_availability(); the others are API-only states.
     public const string HealthUp = "up";
     public const string HealthDown = "down";
