@@ -16,7 +16,54 @@ public class ChecksFunctions
 
     public ChecksFunctions(SynthWatchDbContext db) => _db = db;
 
-    /// <summary>GET /api/checks — list with derived current status (from the latest run).</summary>
+    // Per-check dashboard-parity metrics, ported verbatim from the dashboard's old route
+    // handler (lateral joins on the runs_check_started_idx hot path). Parameterless — only
+    // NOW()/intervals/constants, no user input. json_agg is cast to text and deserialized in C#.
+    private const string MetricsSql = """
+        SELECT
+          c.id AS check_id,
+          stats.p50_ms,
+          stats.p95_ms,
+          COALESCE(stats.runs_24h, 0)          AS runs_24h,
+          COALESCE(oi.open_incident_count, 0)  AS open_incident_count,
+          oi.max_open_severity,
+          COALESCE(spark.points, '[]'::json)::text AS spark
+        FROM checks c
+        LEFT JOIN LATERAL (
+          SELECT
+            percentile_cont(0.5)  WITHIN GROUP (ORDER BY r.duration_ms) AS p50_ms,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY r.duration_ms) AS p95_ms,
+            COUNT(*)::int AS runs_24h
+          FROM runs r
+          WHERE r.check_id = c.id
+            AND r.started_at >= NOW() - INTERVAL '24 hours'
+            AND r.duration_ms IS NOT NULL
+        ) stats ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*)::int AS open_incident_count,
+            (
+              SELECT i2.severity FROM incidents i2
+              WHERE i2.check_id = c.id AND i2.resolved_at IS NULL
+              ORDER BY (i2.severity = 'critical') DESC, i2.opened_at DESC
+              LIMIT 1
+            ) AS max_open_severity
+          FROM incidents i
+          WHERE i.check_id = c.id AND i.resolved_at IS NULL
+        ) oi ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT json_agg(p ORDER BY p.t) AS points
+          FROM (
+            SELECT r.started_at AS t, r.duration_ms AS d, r.status AS s
+            FROM runs r
+            WHERE r.check_id = c.id
+            ORDER BY r.started_at DESC
+            LIMIT 30
+          ) p
+        ) spark ON TRUE
+        """;
+
+    /// <summary>GET /api/checks — list with derived current status + dashboard-parity metrics.</summary>
     [Function("ListChecks")]
     public async Task<IActionResult> ListChecks(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "checks")] HttpRequest req,
@@ -33,16 +80,17 @@ public class ChecksFunctions
             .ToListAsync(ct);
         var latestByCheck = latestRuns.ToDictionary(r => r.CheckId);
 
-        var openIncidentCheckIds = (await _db.Incidents.AsNoTracking()
-            .Where(i => i.Status == "open" && ids.Contains(i.CheckId))
-            .Select(i => i.CheckId)
-            .Distinct()
-            .ToListAsync(ct)).ToHashSet();
+        // Ported lateral-join metrics (p50/p95, runs24h, sparkline, open-incident rollup),
+        // one round-trip for all checks. Open-incident count also backs hasOpenIncident.
+        var metricRows = await _db.CheckMetrics.FromSqlRaw(MetricsSql).AsNoTracking().ToListAsync(ct);
+        var metricsByCheck = metricRows.ToDictionary(m => m.CheckId, m => new CheckMetricsDto(
+            m.P50Ms, m.P95Ms, m.Runs24h, m.OpenIncidentCount, m.MaxOpenSeverity,
+            JsonSerializer.Deserialize<List<SparkPoint>>(m.Spark) ?? new List<SparkPoint>()));
 
         var result = checks.Select(c => CheckSummaryDto.From(
             c,
             latestByCheck.GetValueOrDefault(c.Id),
-            openIncidentCheckIds.Contains(c.Id)));
+            metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty)));
 
         return ApiResults.Ok(result);
     }

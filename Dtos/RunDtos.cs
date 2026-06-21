@@ -65,11 +65,15 @@ public record IncidentDto(
     long? OpenedRunId,
     long? ResolvedRunId,
     int ConsecutiveFailures,
-    string? Summary)
+    string? Summary,
+    // Dashboard-parity: the incident's check name/kind (join to checks).
+    string CheckName,
+    string CheckKind)
 {
-    public static IncidentDto From(Incident i) => new(
+    public static IncidentDto From(Incident i, string checkName, string checkKind) => new(
         i.Id, i.CheckId, i.Status, i.Severity, i.OpenedAt, i.ResolvedAt,
-        i.OpenedRunId, i.ResolvedRunId, i.ConsecutiveFailures, i.Summary);
+        i.OpenedRunId, i.ResolvedRunId, i.ConsecutiveFailures, i.Summary,
+        checkName, checkKind);
 }
 
 public record SlaDto(

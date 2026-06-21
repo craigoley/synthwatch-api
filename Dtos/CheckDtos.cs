@@ -1,7 +1,17 @@
+using System.Text.Json.Serialization;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 
 namespace SynthWatch.Api.Dtos;
+
+/// <summary>
+/// One point in a check's recent-run sparkline. Field names (<c>t</c>/<c>d</c>/<c>s</c>) match
+/// the dashboard's <c>SparkPoint</c> shape exactly (ported from the old route's json_agg).
+/// </summary>
+public record SparkPoint(
+    [property: JsonPropertyName("t")] DateTimeOffset T,   // started_at (ISO)
+    [property: JsonPropertyName("d")] int? D,             // duration_ms
+    [property: JsonPropertyName("s")] string S);          // status
 
 /// <summary>A check plus its derived current status (from the latest run).</summary>
 public record CheckSummaryDto(
@@ -28,9 +38,18 @@ public record CheckSummaryDto(
     long? LastRunId,
     int? LastDurationMs,
     int? LastHttpStatus,
-    bool HasOpenIncident)
+    bool HasOpenIncident,
+    // Dashboard-parity fields (ported from the old TS route's lateral-join SQL). 24h latency
+    // percentiles over completed runs, the 24h completed-run count, a recent-run sparkline, and
+    // open-incident rollup (count + highest severity for pill coloring).
+    double? P50Ms,
+    double? P95Ms,
+    int Runs24h,
+    IReadOnlyList<SparkPoint> Spark,
+    int OpenIncidentCount,
+    string? MaxOpenSeverity)
 {
-    public static CheckSummaryDto From(Check c, Run? latest, bool hasOpenIncident) => new(
+    public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.IntervalSeconds, c.TimeoutMs, c.FailureThreshold, c.Severity, c.Enabled,
         c.LighthouseEnabled, c.LastRunAt, c.CreatedAt,
@@ -40,7 +59,26 @@ public record CheckSummaryDto(
         LastRunId: latest?.Id,
         LastDurationMs: latest?.DurationMs,
         LastHttpStatus: latest?.HttpStatus,
-        HasOpenIncident: hasOpenIncident);
+        HasOpenIncident: m.OpenIncidentCount > 0,
+        P50Ms: m.P50Ms,
+        P95Ms: m.P95Ms,
+        Runs24h: m.Runs24h,
+        Spark: m.Spark,
+        OpenIncidentCount: m.OpenIncidentCount,
+        MaxOpenSeverity: m.MaxOpenSeverity);
+}
+
+/// <summary>Per-check computed metrics (ported SQL), merged into the check summary by id.</summary>
+public record CheckMetricsDto(
+    double? P50Ms,
+    double? P95Ms,
+    int Runs24h,
+    int OpenIncidentCount,
+    string? MaxOpenSeverity,
+    IReadOnlyList<SparkPoint> Spark)
+{
+    public static readonly CheckMetricsDto Empty =
+        new(null, null, 0, 0, null, Array.Empty<SparkPoint>());
 }
 
 /// <summary>Full check view including its recent runs.</summary>

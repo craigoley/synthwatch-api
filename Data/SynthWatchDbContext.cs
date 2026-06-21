@@ -20,6 +20,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<RunMetric> RunMetrics => Set<RunMetric>();
     public DbSet<Incident> Incidents => Set<Incident>();
     public DbSet<SlaAvailabilityRow> SlaAvailability => Set<SlaAvailabilityRow>();
+    public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -136,6 +137,20 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.UpRuns).HasColumnName("up_runs");
             e.Property(x => x.DownRuns).HasColumnName("down_runs");
             e.Property(x => x.AvailabilityPct).HasColumnName("availability_pct");
+        });
+
+        // Keyless: read per-check parity metrics via the ported lateral-join raw SQL only.
+        modelBuilder.Entity<CheckMetricsRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.P50Ms).HasColumnName("p50_ms");
+            e.Property(x => x.P95Ms).HasColumnName("p95_ms");
+            e.Property(x => x.Runs24h).HasColumnName("runs_24h");
+            e.Property(x => x.OpenIncidentCount).HasColumnName("open_incident_count");
+            e.Property(x => x.MaxOpenSeverity).HasColumnName("max_open_severity");
+            e.Property(x => x.Spark).HasColumnName("spark");
         });
     }
 }
