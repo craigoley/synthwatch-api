@@ -68,6 +68,21 @@ The single allowed origin is the Vercel dashboard URL, configured via the
   connection string carries only host / database / username (= the MI principal name).
   **If a password were present, the managed-identity token would be ignored.**
 
+### Pending: structured SSL cert days-remaining (blocked on a runner change)
+
+The dashboard / status page / alert profiles need cert **days-remaining** as a typed field so
+they don't regex-parse prose. As of this writing the runner stores the measured value **only as
+text in `runs.error_message`** ("expires in N days"). The only structured cert column is
+`checks.cert_expiry_warn_days` (the per-check warn *threshold*, `int NOT NULL DEFAULT 30`) — a
+config input, **not** the measurement. `runs` has no days-remaining column, and `kind='ssl'` is
+allowed by the constraint but no ssl checks exist yet.
+
+We deliberately do **not** parse `error_message` in the API (fragile; breaks on wording changes).
+Sequencing: **(1) runner PR** adds a structured column (e.g. `runs.cert_days_remaining int NULL`,
+populated on ssl runs); **(2) API PR** then surfaces it additively as `certDaysRemaining`
+(`number | null`; null for non-ssl checks) on the check/run DTOs, leaving `error_message` as the
+human-readable text.
+
 ## Local development
 
 ```bash
