@@ -1,7 +1,7 @@
 namespace SynthWatch.Api.Data.Entities;
 
 /// <summary>
-/// Catalogue of monitored targets. Maps to the live <c>checks</c> table (20 columns).
+/// Catalogue of monitored targets. Maps to the live <c>checks</c> table (21 columns).
 /// The runner owns this schema; this API maps to it read-mostly and never migrates it.
 /// </summary>
 public class Check

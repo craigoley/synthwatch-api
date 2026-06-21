@@ -1,7 +1,7 @@
 namespace SynthWatch.Api.Data.Entities;
 
 /// <summary>
-/// One row per check execution. Maps to the live <c>runs</c> table (10 columns).
+/// One row per check execution. Maps to the live <c>runs</c> table (11 columns).
 /// </summary>
 public class Run
 {
