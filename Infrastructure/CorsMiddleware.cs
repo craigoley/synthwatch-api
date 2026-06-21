@@ -5,17 +5,17 @@ using Microsoft.Extensions.Options;
 namespace SynthWatch.Api.Infrastructure;
 
 /// <summary>
-/// Adds CORS headers scoped to the single configured dashboard origin. Preflight (OPTIONS)
-/// requests are answered by <c>CorsPreflightFunction</c>; this middleware decorates every
-/// HTTP response (including error responses) with the appropriate headers.
+/// Adds CORS headers when the request Origin matches one of the configured allowed origins
+/// (explicit list, never "*"). Preflight (OPTIONS) is answered by <c>CorsPreflightFunction</c>;
+/// this middleware decorates every HTTP response (including errors) with the right headers.
 /// </summary>
 public sealed class CorsMiddleware : IFunctionsWorkerMiddleware
 {
-    private readonly string _allowedOrigin;
+    private readonly IReadOnlySet<string> _allowedOrigins;
 
     public CorsMiddleware(IOptions<CorsOptions> options)
     {
-        _allowedOrigin = options.Value.AllowedOrigin?.TrimEnd('/') ?? "";
+        _allowedOrigins = options.Value.ResolveAllowed();
     }
 
     public async Task Invoke(FunctionContext context, FunctionExecutionDelegate next)
@@ -28,13 +28,17 @@ public sealed class CorsMiddleware : IFunctionsWorkerMiddleware
             return;
         }
 
+        // Always Vary on Origin: responses carry Cache-Control: public on some GETs, so the
+        // cache key must partition by Origin even when no allow header is added — otherwise a
+        // shared cache could serve an origin-less entry (no allow header) to an allowed origin.
+        http.Response.Headers["Vary"] = "Origin";
+
         var origin = http.Request.Headers.Origin.ToString();
-        if (!string.IsNullOrEmpty(_allowedOrigin) &&
-            string.Equals(origin.TrimEnd('/'), _allowedOrigin, StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrEmpty(origin) && _allowedOrigins.Contains(origin.TrimEnd('/')))
         {
             var headers = http.Response.Headers;
+            // Echo the matched origin (per-origin response).
             headers["Access-Control-Allow-Origin"] = origin;
-            headers["Vary"] = "Origin";
             headers["Access-Control-Allow-Methods"] = "GET,POST,PATCH,DELETE,OPTIONS";
             headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization";
             headers["Access-Control-Max-Age"] = "600";

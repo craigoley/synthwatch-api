@@ -26,7 +26,7 @@ public sealed class ExceptionHandlingMiddleware : IFunctionsWorkerMiddleware
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unhandled exception in {Function}", context.FunctionDefinition.Name);
+            ExceptionLog.Unhandled(_logger, context.FunctionDefinition.Name, ex);
 
             var http = context.GetHttpContext();
             if (http is null)
@@ -48,4 +48,12 @@ public sealed class ExceptionHandlingMiddleware : IFunctionsWorkerMiddleware
             });
         }
     }
+}
+
+/// <summary>High-performance (CA1848) log delegates for unhandled exceptions.</summary>
+internal static partial class ExceptionLog
+{
+    [LoggerMessage(EventId = 3000, Level = LogLevel.Error,
+        Message = "Unhandled exception in {Function}")]
+    public static partial void Unhandled(ILogger logger, string function, Exception ex);
 }

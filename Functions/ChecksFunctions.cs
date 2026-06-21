@@ -92,6 +92,9 @@ public class ChecksFunctions
             latestByCheck.GetValueOrDefault(c.Id),
             metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty)));
 
+        // Short cache so the dashboard's polling doesn't hit the DB every tick; current status
+        // moves run-to-run, so keep it brief (10s).
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=10";
         return ApiResults.Ok(result);
     }
 
