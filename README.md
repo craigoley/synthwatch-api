@@ -167,3 +167,5 @@ GRANT INSERT, UPDATE, DELETE ON checks TO "synthwatch-api";
 
 After these three steps the Function App can read all monitoring data and manage `checks`
 with no secret of any kind.
+
+<!-- claude-review end-to-end validation: trivial docs touch, safe to merge. -->
