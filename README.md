@@ -160,6 +160,14 @@ GRANT SELECT ON checks, runs, run_steps, run_metrics, incidents TO "synthwatch-a
 GRANT SELECT ON sla_availability_24h, sla_availability_7d, sla_availability_30d TO "synthwatch-api";
 GRANT EXECUTE ON FUNCTION sla_availability(timestamptz, timestamptz) TO "synthwatch-api";
 
+-- The sla_availability() SQL function runs with the INVOKER's (the MI's) privileges, so the
+-- MI also needs SELECT on every table the function reads. Beyond checks/runs (granted above),
+-- it joins maintenance_windows (added by runner migration 0004 to exclude maintenance runs).
+-- Without this grant, all /api/sla windows return HTTP 500 ("permission denied for table
+-- maintenance_windows") even though the views/data are fine. If a future runner migration adds
+-- another table to the SLA function, grant SELECT on it too.
+GRANT SELECT ON maintenance_windows TO "synthwatch-api";
+
 -- Checks CRUD: create / edit / pause (UPDATE enabled) / hard delete (cascades).
 GRANT INSERT, UPDATE, DELETE ON checks TO "synthwatch-api";
 -- 'id' is GENERATED ALWAYS AS IDENTITY, so no sequence grant is needed for inserts.
