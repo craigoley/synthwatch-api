@@ -9,7 +9,7 @@ namespace SynthWatch.Api.Infrastructure;
 /// </summary>
 public static class CheckValidation
 {
-    public static readonly string[] Kinds = { "http", "browser" };
+    public static readonly string[] Kinds = { "http", "browser", "ssl" };
     public static readonly string[] Severities = { "critical", "warning" };
     public static readonly string[] FormFactors = { "desktop", "mobile" };
     private static readonly string[] Methods = { "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
@@ -53,6 +53,8 @@ public static class CheckValidation
             errors["failureThreshold"] = "Must be greater than 0.";
         if (req.LighthouseIntervalSeconds is <= 0)
             errors["lighthouseIntervalSeconds"] = "Must be greater than 0 when provided.";
+        if (req.CertExpiryWarnDays is <= 0)
+            errors["certExpiryWarnDays"] = "Must be greater than 0 when provided.";
 
         if (errors.Count > 0)
             return false;
@@ -74,6 +76,7 @@ public static class CheckValidation
         check.LighthouseFormFactor = formFactor;
         check.PerfBudgetLcpMs = req.PerfBudgetLcpMs;
         check.PerfBudgetTransferBytes = req.PerfBudgetTransferBytes;
+        check.CertExpiryWarnDays = req.CertExpiryWarnDays ?? 30; // DB default is 30
         return true;
     }
 
@@ -145,6 +148,11 @@ public static class CheckValidation
             check.PerfBudgetLcpMs = req.PerfBudgetLcpMs;
         if (req.PerfBudgetTransferBytes is not null)
             check.PerfBudgetTransferBytes = req.PerfBudgetTransferBytes;
+        if (req.CertExpiryWarnDays is { } cwd)
+        {
+            if (cwd <= 0) errors["certExpiryWarnDays"] = "Must be greater than 0.";
+            else check.CertExpiryWarnDays = cwd;
+        }
 
         // Enforce the cross-field DB constraint on the resulting state.
         if (check.Kind == "browser" && string.IsNullOrWhiteSpace(check.FlowName))

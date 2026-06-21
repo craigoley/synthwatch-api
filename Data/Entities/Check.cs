@@ -1,7 +1,7 @@
 namespace SynthWatch.Api.Data.Entities;
 
 /// <summary>
-/// Catalogue of monitored targets. Maps to the live <c>checks</c> table (20 columns).
+/// Catalogue of monitored targets. Maps to the live <c>checks</c> table (21 columns).
 /// The runner owns this schema; this API maps to it read-mostly and never migrates it.
 /// </summary>
 public class Check
@@ -49,6 +49,9 @@ public class Check
 
     // bigint — maps natively to long, no string trap.
     public long? PerfBudgetTransferBytes { get; set; }
+
+    // SSL: warn when the cert expires within this many days. int NOT NULL DEFAULT 30.
+    public int CertExpiryWarnDays { get; set; } = 30;
 
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();

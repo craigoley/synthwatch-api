@@ -1,7 +1,7 @@
 namespace SynthWatch.Api.Data.Entities;
 
 /// <summary>
-/// One row per check execution. Maps to the live <c>runs</c> table (10 columns).
+/// One row per check execution. Maps to the live <c>runs</c> table (11 columns).
 /// </summary>
 public class Run
 {
@@ -27,6 +27,9 @@ public class Run
     public string? FailedStep { get; set; }
 
     public string? ScreenshotUrl { get; set; }
+
+    // SSL checks: measured cert days-remaining at run time. Nullable (null for non-ssl runs).
+    public int? CertDaysRemaining { get; set; }
 
     // Navigation (read-mostly).
     public Check? Check { get; set; }
