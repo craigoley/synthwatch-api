@@ -5,6 +5,10 @@
     <OutputType>Exe</OutputType>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Code-quality gate: .NET analyzers on, latest recommended ruleset. CI builds with
+         warnings-as-errors so warnings fail the build (parity with the fleet zero-warning bar). -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
     <!-- Isolated worker model. NOT in-process. -->
     <_FunctionsSkipCleanOutput>true</_FunctionsSkipCleanOutput>
     <RootNamespace>SynthWatch.Api</RootNamespace>
