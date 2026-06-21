@@ -36,11 +36,13 @@ public class IncidentsFunctions
         if (long.TryParse(req.Query["checkId"], out var checkId))
             query = query.Where(i => i.CheckId == checkId);
 
+        // Join to checks for the incident's check name/kind (dashboard parity).
         var incidents = (await query
             .OrderBy(i => i.Status == "open" ? 0 : 1)
             .ThenByDescending(i => i.OpenedAt)
+            .Select(i => new { Incident = i, i.Check!.Name, i.Check!.Kind })
             .ToListAsync(ct))
-            .Select(IncidentDto.From)
+            .Select(x => IncidentDto.From(x.Incident, x.Name, x.Kind))
             .ToList();
 
         return ApiResults.Ok(incidents);
