@@ -1,0 +1,58 @@
+name: Claude Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  claude-review:
+    name: Claude review
+    runs-on: ubuntu-latest
+    # Skip Dependabot PRs. Note: implementation PRs here may be authored by the cao825
+    # account (the human operator) — that is NOT excluded; only the bot is.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude review
+        uses: anthropics/claude-code-action@2fee15510437d71399d9139ed60433470484a8fb # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model claude-opus
+            --max-turns 50
+            --allowedTools Edit,Write,Read,Bash(git:*),Bash(gh pr:*),Bash(gh api:*),Bash(dotnet:*),mcp__github_inline_comment__create_inline_comment
+          prompt: |
+            You are reviewing a pull request for the SynthWatch API: a C# / .NET 10
+            isolated-worker Azure Functions HTTP API (ASP.NET Core integration) that is the
+            single data API over the system's Azure Postgres database. Review the PR diff and
+            post specific, actionable inline comments using the inline-comment tool. Be
+            concise; do not rubber-stamp. Prioritize this repo's hard invariants:
+
+            1. Managed-identity DB auth — the Npgsql connection string must carry only
+               host/database/username and NEVER a password. A password (or any secret) in the
+               connection string silently disables the managed-identity token and is a bug.
+            2. Read-mostly EF Core — this API does NOT own the schema and must NOT add EF
+               migrations or mutate the schema. The only writes are checks CRUD. Flag any
+               migration, EnsureCreated, or DDL.
+            3. Flex Consumption target — infra must stay on the Flex Consumption plan
+               (FC1 / FlexConsumption); .NET 10 cannot run on Linux Consumption. Flag changes
+               that move it to another plan or a non-isolated worker.
+            4. Schema fidelity — entities/columns must match the runner-owned ground truth in
+               craigoley/synthwatch docs/SCHEMA.md exactly (table/column names, bigint -> long,
+               identity columns ValueGeneratedOnAdd, status taxonomies pass/fail and
+               open/resolved). Flag drift.
+            5. CORS — must be scoped to a single configurable origin, never "*".
+
+            Also check: input validation and proper status codes, that DB exceptions are not
+            leaked to clients, async/cancellation correctness, and that the build stays clean
+            (no new analyzer warnings; CI builds with -warnaserror). Verify locally with
+            `dotnet build -c Release -warnaserror` when useful.

@@ -1,0 +1,47 @@
+name: Semgrep
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, off-peak: Mondays 05:17 UTC.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Install via pipx (preinstalled on ubuntu-latest, glibc) rather than the Alpine
+      # semgrep container — JS actions like upload-sarif can't run node under musl.
+      - name: Install Semgrep
+        run: pipx install semgrep==1.167.0
+
+      - name: Run Semgrep (SARIF)
+        # Findings should surface in code scanning, not hard-fail the build.
+        continue-on-error: true
+        run: >-
+          semgrep scan
+          --config p/default
+          --config p/security-audit
+          --config p/csharp
+          --sarif --output semgrep.sarif
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
