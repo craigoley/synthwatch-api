@@ -1,3 +1,4 @@
+using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 
 namespace SynthWatch.Api.Dtos;
@@ -19,8 +20,11 @@ public record CheckSummaryDto(
     bool LighthouseEnabled,
     DateTimeOffset? LastRunAt,
     DateTimeOffset CreatedAt,
-    // Derived:
+    // Derived. CurrentStatus is the latest run's raw status (pass|warn|fail|error|running, or
+    // paused/unknown); CurrentHealth is that status classified into up|down|running (matching
+    // sla_availability()), plus paused/unknown — so consumers don't re-derive up/down.
     string CurrentStatus,
+    string CurrentHealth,
     long? LastRunId,
     int? LastDurationMs,
     int? LastHttpStatus,
@@ -31,6 +35,8 @@ public record CheckSummaryDto(
         c.IntervalSeconds, c.TimeoutMs, c.FailureThreshold, c.Severity, c.Enabled,
         c.LighthouseEnabled, c.LastRunAt, c.CreatedAt,
         CurrentStatus: !c.Enabled ? "paused" : latest?.Status ?? "unknown",
+        CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
+            : latest is null ? RunStatus.HealthUnknown : RunStatus.Classify(latest.Status),
         LastRunId: latest?.Id,
         LastDurationMs: latest?.DurationMs,
         LastHttpStatus: latest?.HttpStatus,
@@ -60,6 +66,7 @@ public record CheckDetailDto(
     int? PerfBudgetLcpMs,
     long? PerfBudgetTransferBytes,
     string CurrentStatus,
+    string CurrentHealth,
     IReadOnlyList<RunDto> RecentRuns)
 {
     public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns) => new(
@@ -68,6 +75,8 @@ public record CheckDetailDto(
         c.Severity, c.Enabled, c.CreatedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
         c.LighthouseFormFactor, c.PerfBudgetLcpMs, c.PerfBudgetTransferBytes,
         CurrentStatus: !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
+        CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
+            : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
         RecentRuns: recentRuns.Select(RunDto.From).ToList());
 }
 

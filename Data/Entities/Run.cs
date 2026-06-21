@@ -9,7 +9,9 @@ public class Run
 
     public long CheckId { get; set; }
 
-    // CHECK: status IN ('pass','fail') — and nothing else. Default 'fail'.
+    // CHECK: status IN ('pass','warn','fail','error','running'). Default 'fail'.
+    // Widened by the runner from the original ('pass','fail'); see Data/RunStatus.cs for the
+    // full taxonomy and health classification (up=pass|warn, down=fail|error, running=in-flight).
     public string Status { get; set; } = "fail";
 
     public DateTimeOffset StartedAt { get; set; }

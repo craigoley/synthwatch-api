@@ -13,7 +13,8 @@ public class RunStep
 
     public string Name { get; set; } = null!;
 
-    // CHECK: status IN ('pass','fail')
+    // CHECK: status IN ('pass','fail','error'). Widened by the runner from ('pass','fail').
+    // (Steps have no 'warn'/'running' — see Data/RunStatus.cs.)
     public string Status { get; set; } = null!;
 
     public int DurationMs { get; set; }
