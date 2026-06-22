@@ -1,4 +1,8 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using SynthWatch.Api.Data.Entities;
 
 namespace SynthWatch.Api.Data;
@@ -49,6 +53,20 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.PerfBudgetLcpMs).HasColumnName("perf_budget_lcp_ms");
             e.Property(x => x.PerfBudgetTransferBytes).HasColumnName("perf_budget_transfer_bytes");
             e.Property(x => x.CertExpiryWarnDays).HasColumnName("cert_expiry_warn_days");
+
+            // No-code assertion model + request config (jsonb / text). Typed CLR models are
+            // (de)serialized to jsonb via System.Text.Json value converters (camelCase keys,
+            // matching the runner's contract). request_body is plain text.
+            var (asConv, asCmp) = JsonbColumn<List<Assertion>>();
+            e.Property(x => x.Assertions).HasColumnName("assertions").HasColumnType("jsonb")
+                .HasConversion(asConv, asCmp);
+            var (hdrConv, hdrCmp) = JsonbColumn<Dictionary<string, string>?>();
+            e.Property(x => x.RequestHeaders).HasColumnName("request_headers").HasColumnType("jsonb")
+                .HasConversion(hdrConv, hdrCmp);
+            e.Property(x => x.RequestBody).HasColumnName("request_body");
+            var (authConv, authCmp) = JsonbColumn<Dictionary<string, string>?>();
+            e.Property(x => x.Auth).HasColumnName("auth").HasColumnType("jsonb")
+                .HasConversion(authConv, authCmp);
         });
 
         modelBuilder.Entity<Run>(e =>
@@ -154,5 +172,30 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.MaxOpenSeverity).HasColumnName("max_open_severity");
             e.Property(x => x.Spark).HasColumnName("spark");
         });
+    }
+
+    // camelCase keys, omit nulls — matches the runner's JSONB shape (e.g. assertion elements
+    // {source, comparison, ...}, auth {type, token_env, ...}). Dictionary keys are preserved verbatim.
+    private static readonly JsonSerializerOptions JsonbOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    /// <summary>
+    /// Builds an EF value converter + comparer that (de)serializes a CLR model to a jsonb string.
+    /// EF stores SQL NULL for a null property (the converter is only invoked for non-null values).
+    /// The comparer compares by serialized JSON so change tracking works for reassigned values.
+    /// </summary>
+    private static (ValueConverter<T, string>, ValueComparer<T>) JsonbColumn<T>()
+    {
+        var converter = new ValueConverter<T, string>(
+            v => JsonSerializer.Serialize(v, JsonbOptions),
+            v => JsonSerializer.Deserialize<T>(v, JsonbOptions)!);
+        var comparer = new ValueComparer<T>(
+            (a, b) => JsonSerializer.Serialize(a, JsonbOptions) == JsonSerializer.Serialize(b, JsonbOptions),
+            v => v == null ? 0 : JsonSerializer.Serialize(v, JsonbOptions).GetHashCode(StringComparison.Ordinal),
+            v => JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(v, JsonbOptions), JsonbOptions)!);
+        return (converter, comparer);
     }
 }

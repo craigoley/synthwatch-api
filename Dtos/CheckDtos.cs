@@ -51,7 +51,13 @@ public record CheckSummaryDto(
     // SSL: the warn threshold config (always present) and the latest run's measured
     // days-remaining (null for non-ssl checks or when there is no latest run).
     int CertExpiryWarnDays,
-    int? LastCertDaysRemaining)
+    int? LastCertDaysRemaining,
+    // No-code assertion model + request config. auth is references-only (type + *_env names);
+    // write validation forbids inline credential values, so nothing secret is ever stored/echoed.
+    IReadOnlyList<Assertion> Assertions,
+    IReadOnlyDictionary<string, string>? RequestHeaders,
+    string? RequestBody,
+    IReadOnlyDictionary<string, string>? Auth)
 {
     public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
@@ -71,7 +77,11 @@ public record CheckSummaryDto(
         OpenIncidentCount: m.OpenIncidentCount,
         MaxOpenSeverity: m.MaxOpenSeverity,
         CertExpiryWarnDays: c.CertExpiryWarnDays,
-        LastCertDaysRemaining: latest?.CertDaysRemaining);
+        LastCertDaysRemaining: latest?.CertDaysRemaining,
+        Assertions: c.Assertions,
+        RequestHeaders: c.RequestHeaders,
+        RequestBody: c.RequestBody,
+        Auth: c.Auth);
 }
 
 /// <summary>Per-check computed metrics (ported SQL), merged into the check summary by id.</summary>
@@ -110,6 +120,11 @@ public record CheckDetailDto(
     int? PerfBudgetLcpMs,
     long? PerfBudgetTransferBytes,
     int CertExpiryWarnDays,
+    // No-code assertion model + request config (auth is references-only, see CheckSummaryDto).
+    IReadOnlyList<Assertion> Assertions,
+    IReadOnlyDictionary<string, string>? RequestHeaders,
+    string? RequestBody,
+    IReadOnlyDictionary<string, string>? Auth,
     string CurrentStatus,
     string CurrentHealth,
     IReadOnlyList<RunDto> RecentRuns)
@@ -119,6 +134,10 @@ public record CheckDetailDto(
         c.BodyMustContain, c.IntervalSeconds, c.LastRunAt, c.TimeoutMs, c.FailureThreshold,
         c.Severity, c.Enabled, c.CreatedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
         c.LighthouseFormFactor, c.PerfBudgetLcpMs, c.PerfBudgetTransferBytes, c.CertExpiryWarnDays,
+        Assertions: c.Assertions,
+        RequestHeaders: c.RequestHeaders,
+        RequestBody: c.RequestBody,
+        Auth: c.Auth,
         CurrentStatus: !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
         CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
@@ -146,6 +165,10 @@ public class CreateCheckRequest
     public int? PerfBudgetLcpMs { get; set; }
     public long? PerfBudgetTransferBytes { get; set; }
     public int? CertExpiryWarnDays { get; set; }
+    public List<Assertion>? Assertions { get; set; }
+    public Dictionary<string, string>? RequestHeaders { get; set; }
+    public string? RequestBody { get; set; }
+    public Dictionary<string, string>? Auth { get; set; }
 }
 
 /// <summary>Body for PATCH /api/checks/{id}. Every field optional; only present fields change.</summary>
@@ -168,4 +191,8 @@ public class UpdateCheckRequest
     public int? PerfBudgetLcpMs { get; set; }
     public long? PerfBudgetTransferBytes { get; set; }
     public int? CertExpiryWarnDays { get; set; }
+    public List<Assertion>? Assertions { get; set; }
+    public Dictionary<string, string>? RequestHeaders { get; set; }
+    public string? RequestBody { get; set; }
+    public Dictionary<string, string>? Auth { get; set; }
 }
