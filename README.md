@@ -196,3 +196,5 @@ tables), execute the SLA function, and manage `checks` — with no secret of any
 access beyond `checks`.
 
 <!-- claude-review end-to-end validation: trivial docs touch, safe to merge. -->
+
+<!-- auto-merge validation: trusted no-op (safe to remove) -->
