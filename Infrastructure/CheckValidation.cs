@@ -310,12 +310,15 @@ public static class CheckValidation
             ValidateAuth(s.Auth, errors, p);
 
             // {{var}} reference integrity: every template var must come from an earlier step's extract.
-            foreach (var tmpl in TemplateVars(s.Url).Concat(TemplateVars(s.Body))
-                         .Concat((s.Headers?.Values ?? Enumerable.Empty<string>()).SelectMany(TemplateVars)))
-            {
-                if (!extractedSoFar.Contains(tmpl))
-                    errors[$"{p}template"] = $"References {{{{{tmpl}}}}} which no earlier step extracts.";
-            }
+            // Report every dangling var (not just the last one) so the field detail stays complete.
+            var missing = TemplateVars(s.Url).Concat(TemplateVars(s.Body))
+                .Concat((s.Headers?.Values ?? Enumerable.Empty<string>()).SelectMany(TemplateVars))
+                .Where(v => !extractedSoFar.Contains(v))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (missing.Count > 0)
+                errors[$"{p}template"] =
+                    $"References {string.Join(", ", missing.Select(v => $"{{{{{v}}}}}"))} which no earlier step extracts.";
 
             // Validate + register this step's extract vars (available to LATER steps).
             if (s.Extract is not null)
