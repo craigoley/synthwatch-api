@@ -83,8 +83,9 @@ jobs:
               - Provide your overall summary (verdict + key findings, or an explicit
                 "no issues found") as your final message; it is posted as the PR
                 (tracking) comment automatically.
-              - If the PR author asks to merge, OR your review found no blocking issues,
-                address any of your own actionable findings by committing fixes to the PR
-                branch (verify with `dotnet build -c Release -warnaserror`), then
-                squash-merge: `gh pr merge --squash --delete-branch`.
-              - Otherwise leave the comments for the author and do not merge.
+              - Post actionable findings as inline comments. If the PR author asks you to,
+                you may commit fixes to the PR branch (verify with
+                `dotnet build -c Release -warnaserror`).
+              - Do NOT merge. Merging is handled deterministically by the separate Auto-merge
+                workflow, which is gated to trusted authors and uses GitHub native auto-merge
+                (it waits for the required checks). Your review here is advisory.

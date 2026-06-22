@@ -1,0 +1,34 @@
+name: Auto-merge
+
+# Hands-free merge for TRUSTED authors only. This is a PUBLIC repo that DEPLOYS to Azure on merge
+# to main, so merge authorization is a security property: checks passing is necessary but NOT
+# sufficient — the author must be on the trusted allowlist below. Untrusted authors' PRs are never
+# auto-merged here, no matter how green their checks are (this job simply does not run for them).
+#
+# Mechanism: GitHub *native* auto-merge (`gh pr merge --auto`). Unlike an immediate merge, --auto
+# tells GitHub to HOLD the merge until every required status check passes — so it cooperates with
+# branch protection (the required "Test / Test (xUnit + Testcontainers Postgres)" check) instead of
+# racing/failing it. Requires repo setting allow_auto_merge=true.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge (trusted authors)
+    runs-on: ubuntu-latest
+    # ★ TRUST GATE (hard, deterministic — NOT an LLM decision). Only the operator (craigoley /
+    # cao825), the agent (craigoleyagent), and dependabot[bot] may auto-merge. Any other author ->
+    # this job is skipped -> their PR NEVER auto-merges. dependabot is allowed here even though it is
+    # review-skipped in claude-review.yml (low-value to review, safe to auto-merge once checks pass).
+    if: contains(fromJSON('["craigoley", "cao825", "craigoleyagent", "dependabot[bot]"]'), github.event.pull_request.user.login)
+    steps:
+      - name: Enable native auto-merge (waits for required checks)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --squash --delete-branch "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}"
