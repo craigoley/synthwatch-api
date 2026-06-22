@@ -12,7 +12,7 @@
 //
 //   az deployment group create -g synthwatch-rg -f infra/main.bicep \
 //     -p pgHost=<server>.postgres.database.azure.com \
-//        allowedCorsOrigin=https://<dashboard>.vercel.app
+//        allowedCorsOrigins='["https://<dashboard>.vercel.app","https://<preview>.vercel.app"]'
 
 targetScope = 'resourceGroup'
 
@@ -31,8 +31,10 @@ param pgDatabase string = 'synthwatch'
 @description('Postgres role for the Function App MI. For a system-assigned identity this is the Function App name — it must match the principal created via pgaadauth_create_principal.')
 param pgMiUsername string = functionAppName
 
-@description('Exact Vercel dashboard origin allowed by CORS (scheme + host, no trailing slash). Not "*".')
-param allowedCorsOrigin string
+@description('Allowed CORS origins (scheme + host, no trailing slash). Applied as PLATFORM CORS (siteConfig.cors) — the only layer that can answer the OPTIONS preflight the host intercepts. Defaults to the prod dashboard so it survives redeploys; never "*".')
+param allowedCorsOrigins array = [
+  'https://synthwatch-dashboard.vercel.app'
+]
 
 @description('Max Flex Consumption instances.')
 param maximumInstanceCount int = 40
@@ -161,12 +163,14 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'Postgres__Username'
           value: pgMiUsername
         }
-        // CORS — the single allowed dashboard origin.
-        {
-          name: 'Cors__AllowedOrigin'
-          value: allowedCorsOrigin
-        }
       ]
+      // PLATFORM CORS. The Functions host answers the OPTIONS preflight itself (before the worker
+      // runs), so this — not app code — is what makes preflight work for PATCH/POST/DELETE.
+      // Explicit origins only (never "*"); the host echoes the matched origin.
+      cors: {
+        allowedOrigins: allowedCorsOrigins
+        supportCredentials: false
+      }
     }
   }
 }

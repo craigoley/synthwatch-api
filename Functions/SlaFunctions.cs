@@ -86,7 +86,9 @@ public class SlaFunctions
             InsufficientData: fleetInsufficient);
 
         // SLA aggregates change slowly (windowed availability); cache a bit longer than /checks.
+        // Vary on Origin: publicly cacheable + per-origin platform CORS header.
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(new
         {
             window = string.IsNullOrEmpty(window) ? "24h" : window,
