@@ -122,6 +122,8 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.CpuTimeMs).HasColumnName("cpu_time_ms");
             e.Property(x => x.LayoutCount).HasColumnName("layout_count");
             e.Property(x => x.RecalcStyleCount).HasColumnName("recalc_style_count");
+            e.Property(x => x.Cls).HasColumnName("cls");
+            e.Property(x => x.InpMs).HasColumnName("inp_ms");
             e.Property(x => x.CapturedAt).HasColumnName("captured_at").ValueGeneratedOnAdd();
             e.HasIndex(x => x.RunId).IsUnique();
             e.HasOne(x => x.Run).WithOne(r => r.Metrics).HasForeignKey<RunMetric>(x => x.RunId);
