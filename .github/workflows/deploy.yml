@@ -53,6 +53,51 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # Reconcile critical config so a code-only deploy or a manual change can't silently drop it
+      # (the 2026-06-22 CORS outage: siteConfig.cors lived in Bicep but CD never re-asserted it).
+      # SAFE BY DESIGN — non-destructive: CORS is reconciled ADDITIVELY (ensure required origins are
+      # present; never remove one, so a deliberately-added preview origin is preserved), and missing
+      # critical app settings only WARN. This step never deletes/overwrites, so it cannot itself
+      # become an outage source. Runs before the code deploy, reusing the azure/login session.
+      - name: Reconcile critical config (CORS) + drift check
+        env:
+          REQUIRED_CORS_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
+          RG: synthwatch-rg
+        run: |
+          set -euo pipefail
+          APP="$AZURE_FUNCTIONAPP_NAME"
+
+          # --- CORS: ensure each required origin is present (additive; restores drift) ---
+          if [ -z "${REQUIRED_CORS_ORIGINS:-}" ]; then
+            echo "::warning::CORS_ALLOWED_ORIGINS repo variable is not set — skipping CORS reconcile."
+          else
+            mapfile -t current < <(az functionapp cors show -g "$RG" -n "$APP" --query "allowedOrigins[]" -o tsv)
+            echo "Current CORS origins: ${current[*]:-<none>}"
+            IFS=',' read -ra want <<< "$REQUIRED_CORS_ORIGINS"
+            for raw in "${want[@]}"; do
+              o="$(echo "$raw" | xargs)"; [ -z "$o" ] && continue
+              if printf '%s\n' "${current[@]:-}" | grep -qxF "$o"; then
+                echo "  present: $o"
+              else
+                echo "::warning::CORS origin '$o' was MISSING — restoring it (drift reconciled)."
+                az functionapp cors add -g "$RG" -n "$APP" --allowed-origins "$o"
+              fi
+            done
+          fi
+
+          # --- App settings: WARN (never fail/mutate) if a critical setting is absent ---
+          names="$(az functionapp config appsettings list -g "$RG" -n "$APP" --query "[].name" -o tsv)"
+          for key in AzureWebJobsStorage__accountName APPLICATIONINSIGHTS_CONNECTION_STRING \
+                     Postgres__Host Postgres__Database Postgres__Username; do
+            if printf '%s\n' "$names" | grep -qxF "$key"; then echo "  present: $key"
+            else echo "::warning::critical app setting MISSING: $key"; fi
+          done
+
+          {
+            echo "### Config reconcile"
+            echo "- CORS origins now: $(az functionapp cors show -g "$RG" -n "$APP" --query "join(', ', allowedOrigins)" -o tsv)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # functions-action uses the azure/login (RBAC) session — no publish profile/secret.
       # v1.5.x supports Flex Consumption + dotnet-isolated.
       - name: Deploy to Azure Functions
