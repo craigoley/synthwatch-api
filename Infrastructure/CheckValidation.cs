@@ -9,7 +9,7 @@ namespace SynthWatch.Api.Infrastructure;
 /// </summary>
 public static class CheckValidation
 {
-    public static readonly string[] Kinds = { "http", "browser", "ssl", "dns", "tcp", "ping" };
+    public static readonly string[] Kinds = { "http", "browser", "ssl", "dns", "tcp", "ping", "multistep" };
     private static readonly HashSet<string> NetworkKinds = new(StringComparer.Ordinal) { "dns", "tcp", "ping" };
     // DNS record types the runner supports (runner/netChecks.ts). recordType defaults to 'A'.
     private static readonly HashSet<string> DnsRecordTypes =
@@ -82,6 +82,7 @@ public static class CheckValidation
         ValidateAssertions(req.Assertions, errors);
         ValidateAuth(req.Auth, errors);
         ValidateNetConfig(req.Kind, req.TargetUrl, req.NetConfig, errors);
+        ValidateSteps(req.Kind, req.Steps, errors);
 
         if (errors.Count > 0)
             return false;
@@ -109,6 +110,7 @@ public static class CheckValidation
         check.RequestBody = string.IsNullOrWhiteSpace(req.RequestBody) ? null : req.RequestBody;
         check.Auth = req.Auth;
         check.NetConfig = req.NetConfig;
+        check.Steps = req.Steps;
         return true;
     }
 
@@ -210,6 +212,12 @@ public static class CheckValidation
             if (!errors.Keys.Any(k => k.StartsWith("netConfig", StringComparison.Ordinal)))
                 check.NetConfig = req.NetConfig;
         }
+        if (req.Steps is not null)
+        {
+            ValidateSteps(check.Kind, req.Steps, errors);
+            if (!errors.Keys.Any(k => k.StartsWith("steps", StringComparison.Ordinal)))
+                check.Steps = req.Steps;
+        }
 
         // Enforce the cross-field DB constraint on the resulting state.
         if (check.Kind == "browser" && string.IsNullOrWhiteSpace(check.FlowName))
@@ -218,44 +226,121 @@ public static class CheckValidation
         return errors;
     }
 
-    /// <summary>Validates the assertion array (unknown source/comparison, missing required target).</summary>
-    private static void ValidateAssertions(List<Assertion>? assertions, Dictionary<string, string> errors)
+    /// <summary>
+    /// Validates an assertion array (unknown source/comparison, missing required target).
+    /// <paramref name="prefix"/> nests the error keys (e.g. "steps[2]." for a multistep step).
+    /// </summary>
+    private static void ValidateAssertions(List<Assertion>? assertions, Dictionary<string, string> errors, string prefix = "")
     {
         if (assertions is null) return;
         for (var i = 0; i < assertions.Count; i++)
         {
             var a = assertions[i];
             if (string.IsNullOrWhiteSpace(a.Source) || !AssertionSources.Contains(a.Source))
-                errors[$"assertions[{i}].source"] = $"Must be one of: {string.Join(", ", AssertionSources)}.";
+                errors[$"{prefix}assertions[{i}].source"] = $"Must be one of: {string.Join(", ", AssertionSources)}.";
             if (string.IsNullOrWhiteSpace(a.Comparison) || !AssertionComparisons.Contains(a.Comparison))
-                errors[$"assertions[{i}].comparison"] = $"Must be one of: {string.Join(", ", AssertionComparisons)}.";
+                errors[$"{prefix}assertions[{i}].comparison"] = $"Must be one of: {string.Join(", ", AssertionComparisons)}.";
             if (a.Source is not null && SourcesNeedingTarget.Contains(a.Source) && string.IsNullOrWhiteSpace(a.Target))
-                errors[$"assertions[{i}].target"] = $"Required when source is '{a.Source}'.";
+                errors[$"{prefix}assertions[{i}].target"] = $"Required when source is '{a.Source}'.";
         }
     }
 
     /// <summary>
-    /// Validates the auth reference object: known type, and NO inline credential values — secrets
+    /// Validates an auth reference object: known type, and NO inline credential values — secrets
     /// must be referenced by env-var name (a key ending in <c>_env</c>). This keeps plaintext
-    /// tokens/passwords out of the DB end-to-end.
+    /// tokens/passwords out of the DB end-to-end. <paramref name="prefix"/> nests the error keys.
     /// </summary>
-    private static void ValidateAuth(Dictionary<string, string>? auth, Dictionary<string, string> errors)
+    private static void ValidateAuth(Dictionary<string, string>? auth, Dictionary<string, string> errors, string prefix = "")
     {
         if (auth is null) return;
         if (!auth.TryGetValue("type", out var type) || !AuthTypes.Contains(type))
         {
-            errors["auth.type"] = $"Must be one of: {string.Join(", ", AuthTypes)}.";
+            errors[$"{prefix}auth.type"] = $"Must be one of: {string.Join(", ", AuthTypes)}.";
         }
         foreach (var key in auth.Keys)
         {
             if (!AuthNonSecretKeys.Contains(key) && !key.EndsWith("_env", StringComparison.Ordinal))
             {
-                errors["auth"] = "Inline credential values are not allowed; reference a secret by " +
+                errors[$"{prefix}auth"] = "Inline credential values are not allowed; reference a secret by " +
                                  "env-var name (a key ending in '_env', e.g. token_env).";
                 break;
             }
         }
     }
+
+    private static readonly System.Text.RegularExpressions.Regex TemplateRef =
+        new(@"\{\{\s*([^}\s]+)\s*\}\}", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex VarName =
+        new("^[A-Za-z_][A-Za-z0-9_]*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Validates the multistep step chain (runner contract: migration 0013 / multistep.ts). Each step
+    /// reuses the single-check request/assertion/auth validation; extract rules need a sane var +
+    /// non-empty jsonPath; and {{var}} references are checked for integrity (every template var must
+    /// have been extracted by an EARLIER step — choice (a), parseable from the runner's exact regex).
+    /// </summary>
+    private static void ValidateSteps(string? kind, List<ChainStep>? steps, Dictionary<string, string> errors)
+    {
+        var isMultistep = kind == "multistep";
+
+        if (!isMultistep)
+        {
+            if (steps is not null) errors["steps"] = "Only multistep checks may carry steps.";
+            return;
+        }
+        if (steps is null || steps.Count == 0)
+        {
+            errors["steps"] = "A multistep check requires a non-empty steps array.";
+            return;
+        }
+
+        var extractedSoFar = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < steps.Count; i++)
+        {
+            var s = steps[i];
+            var p = $"steps[{i}].";
+
+            if (string.IsNullOrWhiteSpace(s.Name)) errors[$"{p}name"] = "Required.";
+            if (string.IsNullOrWhiteSpace(s.Url)) errors[$"{p}url"] = "Required.";
+            if (!string.IsNullOrWhiteSpace(s.Method) && !Methods.Contains(s.Method!.ToUpperInvariant()))
+                errors[$"{p}method"] = $"Must be one of: {string.Join(", ", Methods)}.";
+
+            // Reuse the single-check assertion + secret-ref auth validation, nested per step.
+            ValidateAssertions(s.Assertions, errors, p);
+            ValidateAuth(s.Auth, errors, p);
+
+            // {{var}} reference integrity: every template var must come from an earlier step's extract.
+            // Report every dangling var (not just the last one) so the field detail stays complete.
+            var missing = TemplateVars(s.Url).Concat(TemplateVars(s.Body))
+                .Concat((s.Headers?.Values ?? Enumerable.Empty<string>()).SelectMany(TemplateVars))
+                .Where(v => !extractedSoFar.Contains(v))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (missing.Count > 0)
+                errors[$"{p}template"] =
+                    $"References {string.Join(", ", missing.Select(v => $"{{{{{v}}}}}"))} which no earlier step extracts.";
+
+            // Validate + register this step's extract vars (available to LATER steps).
+            if (s.Extract is not null)
+            {
+                for (var j = 0; j < s.Extract.Count; j++)
+                {
+                    var e = s.Extract[j];
+                    if (string.IsNullOrWhiteSpace(e.Var) || !VarName.IsMatch(e.Var))
+                        errors[$"{p}extract[{j}].var"] = "Must be a valid identifier (letters, digits, underscore).";
+                    else
+                        extractedSoFar.Add(e.Var);
+                    if (string.IsNullOrWhiteSpace(e.JsonPath))
+                        errors[$"{p}extract[{j}].jsonPath"] = "Required.";
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<string> TemplateVars(string? input) =>
+        string.IsNullOrEmpty(input)
+            ? Enumerable.Empty<string>()
+            : TemplateRef.Matches(input).Select(m => m.Groups[1].Value);
 
     /// <summary>
     /// Validates net_config against the runner's per-kind contract (migration 0011 / netChecks.ts):

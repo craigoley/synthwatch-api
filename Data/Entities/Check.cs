@@ -64,6 +64,9 @@ public class Check
     // Network checks (dns/tcp/ping): per-kind config (migration 0011; jsonb). Null for other kinds.
     public NetConfig? NetConfig { get; set; }
 
+    // Multistep API chains (kind='multistep'): ordered step list (migration 0013; jsonb). Null otherwise.
+    public List<ChainStep>? Steps { get; set; }
+
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();

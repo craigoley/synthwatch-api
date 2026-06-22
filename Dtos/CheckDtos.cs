@@ -59,7 +59,9 @@ public record CheckSummaryDto(
     string? RequestBody,
     IReadOnlyDictionary<string, string>? Auth,
     // Network checks (dns/tcp/ping): per-kind config; null for other kinds.
-    NetConfig? NetConfig)
+    NetConfig? NetConfig,
+    // Multistep API chains: ordered step list; null for non-multistep kinds.
+    IReadOnlyList<ChainStep>? Steps)
 {
     public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
@@ -84,7 +86,8 @@ public record CheckSummaryDto(
         RequestHeaders: c.RequestHeaders,
         RequestBody: c.RequestBody,
         Auth: c.Auth,
-        NetConfig: c.NetConfig);
+        NetConfig: c.NetConfig,
+        Steps: c.Steps);
 }
 
 /// <summary>Per-check computed metrics (ported SQL), merged into the check summary by id.</summary>
@@ -129,6 +132,7 @@ public record CheckDetailDto(
     string? RequestBody,
     IReadOnlyDictionary<string, string>? Auth,
     NetConfig? NetConfig,
+    IReadOnlyList<ChainStep>? Steps,
     string CurrentStatus,
     string CurrentHealth,
     IReadOnlyList<RunDto> RecentRuns)
@@ -143,6 +147,7 @@ public record CheckDetailDto(
         RequestBody: c.RequestBody,
         Auth: c.Auth,
         NetConfig: c.NetConfig,
+        Steps: c.Steps,
         CurrentStatus: !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
         CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
@@ -175,6 +180,7 @@ public class CreateCheckRequest
     public string? RequestBody { get; set; }
     public Dictionary<string, string>? Auth { get; set; }
     public NetConfig? NetConfig { get; set; }
+    public List<ChainStep>? Steps { get; set; }
 }
 
 /// <summary>Body for PATCH /api/checks/{id}. Every field optional; only present fields change.</summary>
@@ -202,4 +208,5 @@ public class UpdateCheckRequest
     public string? RequestBody { get; set; }
     public Dictionary<string, string>? Auth { get; set; }
     public NetConfig? NetConfig { get; set; }
+    public List<ChainStep>? Steps { get; set; }
 }
