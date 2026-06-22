@@ -7,7 +7,7 @@ using Xunit;
 namespace SynthWatch.Api.Tests;
 
 /// <summary>
-/// Spins up a real postgres:16 (Testcontainers) seeded with the runner-owned schema snapshot
+/// Spins up a real postgres:17 (Testcontainers) seeded with the runner-owned schema snapshot
 /// (fixtures/schema.sql — includes the sla_availability function/views + JSONB columns) plus
 /// deterministic fixtures. Lets the DB-dependent behavior (SLA SQL, parity lateral joins, JSONB
 /// round-trips) be tested faithfully. If Docker is unavailable (e.g. local dev), <see cref="Available"/>
