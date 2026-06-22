@@ -87,12 +87,14 @@ public record IncidentDto(
     string? Summary,
     // Dashboard-parity: the incident's check name/kind (join to checks).
     string CheckName,
-    string CheckKind)
+    string CheckKind,
+    // AI root-cause analysis (incidents.rca); null when RCA is off/failed/pre-existing.
+    IncidentRca? Rca)
 {
     public static IncidentDto From(Incident i, string checkName, string checkKind) => new(
         i.Id, i.CheckId, i.Status, i.Severity, i.OpenedAt, i.ResolvedAt,
         i.OpenedRunId, i.ResolvedRunId, i.ConsecutiveFailures, i.Summary,
-        checkName, checkKind);
+        checkName, checkKind, i.Rca);
 }
 
 public record SlaDto(

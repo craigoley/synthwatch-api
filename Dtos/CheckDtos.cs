@@ -61,9 +61,14 @@ public record CheckSummaryDto(
     // Network checks (dns/tcp/ping): per-kind config; null for other kinds.
     NetConfig? NetConfig,
     // Multistep API chains: ordered step list; null for non-multistep kinds.
-    IReadOnlyList<ChainStep>? Steps)
+    IReadOnlyList<ChainStep>? Steps,
+    // Per-location rollup: each location's latest-run status (multi-location migration). One entry
+    // per location that has run; single-location checks carry one "default" entry so the dashboard
+    // grid's regional indicator is uniform. Empty only when the check has never run.
+    IReadOnlyList<LocationStatusDto> Locations)
 {
-    public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m) => new(
+    public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m,
+        IReadOnlyList<LocationStatusDto> locations) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.IntervalSeconds, c.TimeoutMs, c.FailureThreshold, c.Severity, c.Enabled,
         c.LighthouseEnabled, c.LastRunAt, c.CreatedAt,
@@ -87,8 +92,12 @@ public record CheckSummaryDto(
         RequestBody: c.RequestBody,
         Auth: c.Auth,
         NetConfig: c.NetConfig,
-        Steps: c.Steps);
+        Steps: c.Steps,
+        Locations: locations);
 }
+
+/// <summary>A check's latest-run status from one location (per-location rollup for the grid).</summary>
+public record LocationStatusDto(string Location, string Status);
 
 /// <summary>Per-check computed metrics (ported SQL), merged into the check summary by id.</summary>
 public record CheckMetricsDto(

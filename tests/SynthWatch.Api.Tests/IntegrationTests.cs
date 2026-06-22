@@ -73,6 +73,8 @@ public class IntegrationTests
         Assert.NotEmpty(seed.Spark);              // json_agg sparkline
         Assert.Equal(0, seed.OpenIncidentCount);  // the seeded incident is resolved
         Assert.Null(seed.MaxOpenSeverity);
+        // Per-location rollup: the seed runs are single-location -> one "default" entry.
+        Assert.Contains(seed.Locations, l => l.Location == "default");
     }
 
     [SkippableFact]

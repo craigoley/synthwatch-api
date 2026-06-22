@@ -1,3 +1,4 @@
+using System.Text.Json;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
@@ -56,8 +57,9 @@ public class MappingTests
         var latest = new Run { Id = 9, CheckId = 1, Status = "warn" };
         var metrics = new CheckMetricsDto(50.0, 90.0, 100, 1, "critical",
             new List<SparkPoint> { new(default, 30, "pass") });
+        var locations = new List<LocationStatusDto> { new("default", "warn") };
 
-        var dto = CheckSummaryDto.From(check, latest, metrics);
+        var dto = CheckSummaryDto.From(check, latest, metrics, locations);
 
         Assert.Equal(50.0, dto.P50Ms);
         Assert.Equal(90.0, dto.P95Ms);
@@ -68,5 +70,55 @@ public class MappingTests
         Assert.True(dto.HasOpenIncident);
         Assert.Equal("warn", dto.CurrentStatus);  // raw latest status
         Assert.Equal("up", dto.CurrentHealth);     // warn -> up
+    }
+
+    [Fact]
+    public void CheckSummary_carries_per_location_rollup()
+    {
+        var check = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true };
+        var locations = new List<LocationStatusDto> { new("eastus2", "pass"), new("westus", "fail") };
+
+        var dto = CheckSummaryDto.From(check, new Run { Id = 1, CheckId = 1, Status = "fail" },
+            CheckMetricsDto.Empty, locations);
+
+        Assert.Equal(2, dto.Locations.Count);
+        Assert.Equal("eastus2", dto.Locations[0].Location);
+        Assert.Equal("pass", dto.Locations[0].Status);
+        Assert.Equal("westus", dto.Locations[1].Location);
+        Assert.Equal("fail", dto.Locations[1].Status);
+    }
+
+    [Fact]
+    public void IncidentDto_carries_rca()
+    {
+        var inc = new Incident
+        {
+            Id = 1, CheckId = 1, Status = "open", Severity = "critical",
+            Rca = new IncidentRca { Classification = "real-outage", Confidence = "high", Observed = new() { "HTTP 503" } }
+        };
+        var dto = IncidentDto.From(inc, "c", "http");
+        Assert.NotNull(dto.Rca);
+        Assert.Equal("real-outage", dto.Rca!.Classification);
+        Assert.Equal("high", dto.Rca.Confidence);   // confidence is a level (string), not a number
+        Assert.Equal("HTTP 503", dto.Rca.Observed![0]);
+    }
+
+    [Fact]
+    public void IncidentRca_deserializes_runner_shape_including_generated_at()
+    {
+        // Mirrors the jsonb converter options (camelCase). Runner writes single-word keys + the one
+        // snake_case key generated_at, mapped via [JsonPropertyName].
+        var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        const string json = """
+        {"classification":"flaky-transient","confidence":"low","observed":["timeout at step 2"],
+         "inferred":["network blip"],"summary":"likely transient","signature":"1|err|step2",
+         "model":"gpt-4o","cached":false,"generated_at":"2026-06-22T12:00:00Z"}
+        """;
+        var rca = JsonSerializer.Deserialize<IncidentRca>(json, opts)!;
+        Assert.Equal("flaky-transient", rca.Classification);
+        Assert.Equal("low", rca.Confidence);
+        Assert.Single(rca.Observed!);
+        Assert.False(rca.Cached);
+        Assert.Equal("2026-06-22T12:00:00Z", rca.GeneratedAt); // snake_case key mapped correctly
     }
 }
