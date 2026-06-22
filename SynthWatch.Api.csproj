@@ -31,7 +31,7 @@
          type layout is incompatible with Microsoft.Azure.Functions.Worker.ApplicationInsights
          (2.x), causing a TypeLoadException on ITelemetryInitializer that crashes the isolated
          worker at startup. 2.22.x is the version pairing the Functions worker AI integration. -->
-    <PackageReference Include="Microsoft.ApplicationInsights.WorkerService" Version="2.22.0" />
+    <PackageReference Include="Microsoft.ApplicationInsights.WorkerService" Version="2.23.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.52.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.ApplicationInsights" Version="2.51.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Http.AspNetCore" Version="2.1.0" />
