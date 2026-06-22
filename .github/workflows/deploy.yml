@@ -14,10 +14,11 @@ on:
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
-# Never cancel a deploy mid-roll; serialize deploys to main instead.
+# Serialize deploys to main; a newer deploy cancels an in-flight older one so two pushes can't
+# race back-to-back (the 2026-06-22 incident: queued deploys ran 18s apart).
 concurrency:
   group: deploy-main
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 # Least privilege: id-token to mint the OIDC token for azure/login, read to checkout.
 permissions:
