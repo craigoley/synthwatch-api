@@ -66,7 +66,7 @@ public class IntegrationTests
         var ok = Assert.IsType<OkObjectResult>(await fn.ListChecks(Request(), default));
         var checks = Assert.IsAssignableFrom<IEnumerable<CheckSummaryDto>>(ok.Value!).ToList();
 
-        var seed = Assert.Single(checks.Where(c => c.Name == "seed-http"));
+        var seed = Assert.Single(checks, c => c.Name == "seed-http");
         Assert.True(seed.Runs24h >= 25);          // 25 completed runs seeded in the last 24h
         Assert.NotNull(seed.P50Ms);               // percentile_cont over duration_ms
         Assert.NotNull(seed.P95Ms);
@@ -85,7 +85,7 @@ public class IntegrationTests
         // 24h: ~10-day-old check with 25 completed runs, full coverage -> real % + fleet.
         var ok24 = Assert.IsType<OkObjectResult>(await fn.GetSla(Request("?window=24h"), default));
         var r24 = Assert.IsType<SlaResponseDto>(ok24.Value!);
-        var item24 = Assert.Single(r24.Items.Where(i => i.CheckName == "seed-http"));
+        var item24 = Assert.Single(r24.Items, i => i.CheckName == "seed-http");
         Assert.False(item24.InsufficientData);
         Assert.NotNull(item24.AvailabilityPct);
         Assert.False(r24.Fleet.InsufficientData);
@@ -94,7 +94,7 @@ public class IntegrationTests
         // 30d: same data, but the check is only ~10 days old -> <80% coverage -> insufficient.
         var ok30 = Assert.IsType<OkObjectResult>(await fn.GetSla(Request("?window=30d"), default));
         var r30 = Assert.IsType<SlaResponseDto>(ok30.Value!);
-        var item30 = Assert.Single(r30.Items.Where(i => i.CheckName == "seed-http"));
+        var item30 = Assert.Single(r30.Items, i => i.CheckName == "seed-http");
         Assert.True(item30.InsufficientData);
         Assert.Null(item30.AvailabilityPct);      // misleading precise % suppressed
         Assert.True(item30.CompletedRuns > 0);    // raw counts still present

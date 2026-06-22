@@ -2,7 +2,6 @@
 -- PostgreSQL database dump
 --
 
-\restrict 6CkstrncVObO3fqkaIaYRJgsYhUWmCoukY03yhfQEwp4dvPJ5GfwCpwqs7qeqnu
 
 -- Dumped from database version 16.14
 -- Dumped by pg_dump version 18.4
@@ -579,5 +578,4 @@ ALTER TABLE ONLY public.runs
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 6CkstrncVObO3fqkaIaYRJgsYhUWmCoukY03yhfQEwp4dvPJ5GfwCpwqs7qeqnu
 
