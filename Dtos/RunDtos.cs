@@ -14,11 +14,15 @@ public record RunDto(
     string? FailedStep,
     string? ScreenshotUrl,
     // SSL: structured cert days-remaining for this run (null for non-ssl runs).
-    int? CertDaysRemaining)
+    int? CertDaysRemaining,
+    // Downloadable Playwright trace: the API proxy path (GET /api/runs/{id}/trace), or null when
+    // the run has no trace (passing/non-browser runs). Not the raw blob URL — the proxy streams it.
+    string? TraceUrl)
 {
     public static RunDto From(Run r) => new(
         r.Id, r.CheckId, r.Status, r.StartedAt, r.FinishedAt, r.DurationMs,
-        r.HttpStatus, r.ErrorMessage, r.FailedStep, r.ScreenshotUrl, r.CertDaysRemaining);
+        r.HttpStatus, r.ErrorMessage, r.FailedStep, r.ScreenshotUrl, r.CertDaysRemaining,
+        TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace");
 }
 
 public record RunStepDto(

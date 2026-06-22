@@ -28,6 +28,10 @@ public class Run
 
     public string? ScreenshotUrl { get; set; }
 
+    // Playwright trace blob URL, captured on browser-run FAILURE (runner PR #39). Null otherwise.
+    // Served via the API proxy (GET /api/runs/{id}/trace), not this raw URL.
+    public string? TraceUrl { get; set; }
+
     // SSL checks: measured cert days-remaining at run time. Nullable (null for non-ssl runs).
     public int? CertDaysRemaining { get; set; }
 
