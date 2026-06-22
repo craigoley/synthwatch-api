@@ -14,6 +14,21 @@ public static class CheckValidation
     public static readonly string[] FormFactors = { "desktop", "mobile" };
     private static readonly string[] Methods = { "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
 
+    // Assertion vocabulary — mirrors the runner contract (migration 0008 / runner/assertions.ts).
+    private static readonly HashSet<string> AssertionSources =
+        new(StringComparer.Ordinal) { "status", "response_time", "header", "body", "json_path", "size" };
+    private static readonly HashSet<string> AssertionComparisons = new(StringComparer.Ordinal)
+        { "eq", "ne", "lt", "gt", "gte", "lte", "contains", "not_contains", "matches", "exists", "one_of" };
+    // Sources whose assertion requires a target (header name / JSONPath expr).
+    private static readonly HashSet<string> SourcesNeedingTarget =
+        new(StringComparer.Ordinal) { "header", "json_path" };
+    // auth.type values the runner understands.
+    private static readonly HashSet<string> AuthTypes =
+        new(StringComparer.Ordinal) { "none", "bearer", "basic", "api_key" };
+    // Non-secret auth keys allowed inline; any other non-"*_env" key is treated as an inline secret.
+    private static readonly HashSet<string> AuthNonSecretKeys =
+        new(StringComparer.Ordinal) { "type", "username", "header" };
+
     /// <summary>Validates a create request and, when valid, produces the entity to insert.</summary>
     public static bool TryBuildNew(CreateCheckRequest req, out Check check, out Dictionary<string, string> errors)
     {
@@ -55,6 +70,8 @@ public static class CheckValidation
             errors["lighthouseIntervalSeconds"] = "Must be greater than 0 when provided.";
         if (req.CertExpiryWarnDays is <= 0)
             errors["certExpiryWarnDays"] = "Must be greater than 0 when provided.";
+        ValidateAssertions(req.Assertions, errors);
+        ValidateAuth(req.Auth, errors);
 
         if (errors.Count > 0)
             return false;
@@ -77,6 +94,10 @@ public static class CheckValidation
         check.PerfBudgetLcpMs = req.PerfBudgetLcpMs;
         check.PerfBudgetTransferBytes = req.PerfBudgetTransferBytes;
         check.CertExpiryWarnDays = req.CertExpiryWarnDays ?? 30; // DB default is 30
+        check.Assertions = req.Assertions ?? new();
+        check.RequestHeaders = req.RequestHeaders;
+        check.RequestBody = string.IsNullOrWhiteSpace(req.RequestBody) ? null : req.RequestBody;
+        check.Auth = req.Auth;
         return true;
     }
 
@@ -153,12 +174,67 @@ public static class CheckValidation
             if (cwd <= 0) errors["certExpiryWarnDays"] = "Must be greater than 0.";
             else check.CertExpiryWarnDays = cwd;
         }
+        if (req.Assertions is not null)
+        {
+            ValidateAssertions(req.Assertions, errors);
+            if (!errors.Keys.Any(k => k.StartsWith("assertions", StringComparison.Ordinal)))
+                check.Assertions = req.Assertions;
+        }
+        if (req.RequestHeaders is not null)
+            check.RequestHeaders = req.RequestHeaders;
+        if (req.RequestBody is not null)
+            check.RequestBody = string.IsNullOrWhiteSpace(req.RequestBody) ? null : req.RequestBody;
+        if (req.Auth is not null)
+        {
+            ValidateAuth(req.Auth, errors);
+            if (!errors.ContainsKey("auth") && !errors.ContainsKey("auth.type"))
+                check.Auth = req.Auth;
+        }
 
         // Enforce the cross-field DB constraint on the resulting state.
         if (check.Kind == "browser" && string.IsNullOrWhiteSpace(check.FlowName))
             errors["flowName"] = "Required when kind is 'browser'.";
 
         return errors;
+    }
+
+    /// <summary>Validates the assertion array (unknown source/comparison, missing required target).</summary>
+    private static void ValidateAssertions(List<Assertion>? assertions, Dictionary<string, string> errors)
+    {
+        if (assertions is null) return;
+        for (var i = 0; i < assertions.Count; i++)
+        {
+            var a = assertions[i];
+            if (string.IsNullOrWhiteSpace(a.Source) || !AssertionSources.Contains(a.Source))
+                errors[$"assertions[{i}].source"] = $"Must be one of: {string.Join(", ", AssertionSources)}.";
+            if (string.IsNullOrWhiteSpace(a.Comparison) || !AssertionComparisons.Contains(a.Comparison))
+                errors[$"assertions[{i}].comparison"] = $"Must be one of: {string.Join(", ", AssertionComparisons)}.";
+            if (a.Source is not null && SourcesNeedingTarget.Contains(a.Source) && string.IsNullOrWhiteSpace(a.Target))
+                errors[$"assertions[{i}].target"] = $"Required when source is '{a.Source}'.";
+        }
+    }
+
+    /// <summary>
+    /// Validates the auth reference object: known type, and NO inline credential values — secrets
+    /// must be referenced by env-var name (a key ending in <c>_env</c>). This keeps plaintext
+    /// tokens/passwords out of the DB end-to-end.
+    /// </summary>
+    private static void ValidateAuth(Dictionary<string, string>? auth, Dictionary<string, string> errors)
+    {
+        if (auth is null) return;
+        if (!auth.TryGetValue("type", out var type) || !AuthTypes.Contains(type))
+        {
+            errors["auth.type"] = $"Must be one of: {string.Join(", ", AuthTypes)}.";
+        }
+        foreach (var key in auth.Keys)
+        {
+            if (!AuthNonSecretKeys.Contains(key) && !key.EndsWith("_env", StringComparison.Ordinal))
+            {
+                errors["auth"] = "Inline credential values are not allowed; reference a secret by " +
+                                 "env-var name (a key ending in '_env', e.g. token_env).";
+                break;
+            }
+        }
     }
 
     private static bool IsHttpUrl(string value) =>

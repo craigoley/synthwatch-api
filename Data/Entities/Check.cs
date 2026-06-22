@@ -53,6 +53,14 @@ public class Check
     // SSL: warn when the cert expires within this many days. int NOT NULL DEFAULT 30.
     public int CertExpiryWarnDays { get; set; } = 30;
 
+    // No-code assertion model + request config (migration 0008; jsonb/text). assertions is
+    // NOT NULL DEFAULT '[]'; the others are nullable. auth holds secret REFERENCES (*_env names),
+    // never raw credentials.
+    public List<Assertion> Assertions { get; set; } = new();
+    public Dictionary<string, string>? RequestHeaders { get; set; }
+    public string? RequestBody { get; set; }
+    public Dictionary<string, string>? Auth { get; set; }
+
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();
