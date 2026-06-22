@@ -30,5 +30,11 @@ jobs:
     steps:
       - name: Enable native auto-merge (waits for required checks)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer AUTOMERGE_TOKEN (a fine-grained PAT or GitHub App token with contents +
+          # pull-requests write) so the eventual merge is attributed to a real identity and the
+          # post-merge push TRIGGERS the Deploy workflow. With the default GITHUB_TOKEN, GitHub
+          # suppresses workflow runs caused by the token, so an auto-merged code change would NOT
+          # auto-deploy. Falls back to GITHUB_TOKEN (auto-merge still works; deploy must then be
+          # run manually for code changes). See repo setting: add the AUTOMERGE_TOKEN secret.
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN || secrets.GITHUB_TOKEN }}
         run: gh pr merge --auto --squash --delete-branch "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}"
