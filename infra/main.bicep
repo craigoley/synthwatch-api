@@ -43,12 +43,16 @@ param maximumInstanceCount int = 40
 @allowed([512, 2048, 4096])
 param instanceMemoryMB int = 2048
 
+@description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
+param artifactsStorageAccountName string = 'synthwatche24e33105c'
+
 var storageAccountName = take(toLower('st${uniqueString(resourceGroup().id, functionAppName)}'), 24)
 var deploymentContainerName = 'app-package'
 
 // Built-in role definition IDs.
 var storageBlobDataOwnerRoleId = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
 var storageQueueDataContributorRoleId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
+var storageBlobDataReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -192,6 +196,23 @@ resource queueContributorAssignment 'Microsoft.Authorization/roleAssignments@202
   scope: storage
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageQueueDataContributorRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// The Function App's MI needs READ access to the runner-owned artifacts account so the
+// trace/screenshot proxies can stream blobs. Durable Bicep declaration of a grant that was first
+// applied live (the config-drift lesson: don't leave critical access as a manual-only setting).
+resource artifactsStorage 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: artifactsStorageAccountName
+}
+
+resource artifactsBlobReaderAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(artifactsStorage.id, functionApp.id, storageBlobDataReaderRoleId)
+  scope: artifactsStorage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataReaderRoleId)
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
   }

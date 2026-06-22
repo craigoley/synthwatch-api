@@ -12,6 +12,9 @@ public record RunDto(
     int? HttpStatus,
     string? ErrorMessage,
     string? FailedStep,
+    // The API proxy path (GET /api/runs/{id}/screenshot), or null when the run has no screenshot.
+    // Repurposed from the raw blob URL — that never worked (artifacts account blocks public access,
+    // so the dashboard <img> on the raw URL 409'd); the proxy streams it behind the API.
     string? ScreenshotUrl,
     // SSL: structured cert days-remaining for this run (null for non-ssl runs).
     int? CertDaysRemaining,
@@ -21,7 +24,9 @@ public record RunDto(
 {
     public static RunDto From(Run r) => new(
         r.Id, r.CheckId, r.Status, r.StartedAt, r.FinishedAt, r.DurationMs,
-        r.HttpStatus, r.ErrorMessage, r.FailedStep, r.ScreenshotUrl, r.CertDaysRemaining,
+        r.HttpStatus, r.ErrorMessage, r.FailedStep,
+        ScreenshotUrl: string.IsNullOrEmpty(r.ScreenshotUrl) ? null : $"/api/runs/{r.Id}/screenshot",
+        CertDaysRemaining: r.CertDaysRemaining,
         TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace");
 }
 
