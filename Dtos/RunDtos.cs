@@ -113,6 +113,12 @@ public record SlaFleetDto(
     decimal? AvailabilityPct,
     bool InsufficientData);
 
+/// <summary>The /api/sla response: the window, the fleet rollup, and per-check items.</summary>
+public record SlaResponseDto(
+    string Window,
+    SlaFleetDto Fleet,
+    IReadOnlyList<SlaDto> Items);
+
 /// <summary>A browser flow from the runner-owned flow_manifest (the catalogue of flows).</summary>
 public record FlowDto(
     string Name,
