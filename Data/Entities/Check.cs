@@ -61,6 +61,9 @@ public class Check
     public string? RequestBody { get; set; }
     public Dictionary<string, string>? Auth { get; set; }
 
+    // Network checks (dns/tcp/ping): per-kind config (migration 0011; jsonb). Null for other kinds.
+    public NetConfig? NetConfig { get; set; }
+
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();

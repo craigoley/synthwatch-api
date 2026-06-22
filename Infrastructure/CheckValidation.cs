@@ -9,7 +9,11 @@ namespace SynthWatch.Api.Infrastructure;
 /// </summary>
 public static class CheckValidation
 {
-    public static readonly string[] Kinds = { "http", "browser", "ssl" };
+    public static readonly string[] Kinds = { "http", "browser", "ssl", "dns", "tcp", "ping" };
+    private static readonly HashSet<string> NetworkKinds = new(StringComparer.Ordinal) { "dns", "tcp", "ping" };
+    // DNS record types the runner supports (runner/netChecks.ts). recordType defaults to 'A'.
+    private static readonly HashSet<string> DnsRecordTypes =
+        new(StringComparer.Ordinal) { "A", "AAAA", "CNAME", "MX", "TXT", "NS" };
     public static readonly string[] Severities = { "critical", "warning" };
     public static readonly string[] FormFactors = { "desktop", "mobile" };
     private static readonly string[] Methods = { "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
@@ -39,8 +43,13 @@ public static class CheckValidation
             errors["name"] = "Required.";
         if (string.IsNullOrWhiteSpace(req.Kind) || !Kinds.Contains(req.Kind))
             errors["kind"] = $"Must be one of: {string.Join(", ", Kinds)}.";
-        if (string.IsNullOrWhiteSpace(req.TargetUrl) || !IsHttpUrl(req.TargetUrl))
-            errors["targetUrl"] = "Required; must be an absolute http(s) URL.";
+        var kindIsNetwork = !string.IsNullOrWhiteSpace(req.Kind) && NetworkKinds.Contains(req.Kind!);
+        if (string.IsNullOrWhiteSpace(req.TargetUrl))
+            errors["targetUrl"] = "Required.";
+        else if (kindIsNetwork ? !IsNetTarget(req.TargetUrl) : !IsHttpUrl(req.TargetUrl))
+            errors["targetUrl"] = kindIsNetwork
+                ? "Must be a host or host:port."
+                : "Must be an absolute http(s) URL.";
 
         // browser kind requires a flow_name (DB constraint: browser_needs_flow).
         if (req.Kind == "browser" && string.IsNullOrWhiteSpace(req.FlowName))
@@ -72,6 +81,7 @@ public static class CheckValidation
             errors["certExpiryWarnDays"] = "Must be greater than 0 when provided.";
         ValidateAssertions(req.Assertions, errors);
         ValidateAuth(req.Auth, errors);
+        ValidateNetConfig(req.Kind, req.TargetUrl, req.NetConfig, errors);
 
         if (errors.Count > 0)
             return false;
@@ -98,6 +108,7 @@ public static class CheckValidation
         check.RequestHeaders = req.RequestHeaders;
         check.RequestBody = string.IsNullOrWhiteSpace(req.RequestBody) ? null : req.RequestBody;
         check.Auth = req.Auth;
+        check.NetConfig = req.NetConfig;
         return true;
     }
 
@@ -113,7 +124,9 @@ public static class CheckValidation
         }
         if (req.TargetUrl is not null)
         {
-            if (!IsHttpUrl(req.TargetUrl)) errors["targetUrl"] = "Must be an absolute http(s) URL.";
+            var isNet = NetworkKinds.Contains(check.Kind);
+            if (isNet ? !IsNetTarget(req.TargetUrl) : !IsHttpUrl(req.TargetUrl))
+                errors["targetUrl"] = isNet ? "Must be a host or host:port." : "Must be an absolute http(s) URL.";
             else check.TargetUrl = req.TargetUrl.Trim();
         }
         if (req.FlowName is not null)
@@ -190,6 +203,13 @@ public static class CheckValidation
             if (!errors.ContainsKey("auth") && !errors.ContainsKey("auth.type"))
                 check.Auth = req.Auth;
         }
+        if (req.NetConfig is not null)
+        {
+            // Validate against the resulting kind + (possibly patched) target_url.
+            ValidateNetConfig(check.Kind, check.TargetUrl, req.NetConfig, errors);
+            if (!errors.Keys.Any(k => k.StartsWith("netConfig", StringComparison.Ordinal)))
+                check.NetConfig = req.NetConfig;
+        }
 
         // Enforce the cross-field DB constraint on the resulting state.
         if (check.Kind == "browser" && string.IsNullOrWhiteSpace(check.FlowName))
@@ -236,6 +256,66 @@ public static class CheckValidation
             }
         }
     }
+
+    /// <summary>
+    /// Validates net_config against the runner's per-kind contract (migration 0011 / netChecks.ts):
+    /// dns recordType (optional, defaults A) must be a supported type; tcp needs a port (from
+    /// net_config.port OR host:port in target_url); ping port is optional (default 443); any port
+    /// must be 1-65535. Non-network kinds must NOT carry net_config.
+    /// </summary>
+    private static void ValidateNetConfig(string? kind, string? targetUrl, NetConfig? net, Dictionary<string, string> errors)
+    {
+        var isNetwork = kind is not null && NetworkKinds.Contains(kind);
+
+        if (net is not null && !isNetwork)
+        {
+            errors["netConfig"] = "Only dns/tcp/ping checks may carry netConfig.";
+            return;
+        }
+        if (!isNetwork)
+            return;
+
+        if (net?.Port is { } port && (port < 1 || port > 65535))
+            errors["netConfig.port"] = "Must be between 1 and 65535.";
+
+        switch (kind)
+        {
+            case "dns":
+                if (!string.IsNullOrWhiteSpace(net?.RecordType))
+                {
+                    var recordType = net!.RecordType!.ToUpperInvariant();
+                    if (!DnsRecordTypes.Contains(recordType))
+                        errors["netConfig.recordType"] = $"Must be one of: {string.Join(", ", DnsRecordTypes)}.";
+                    else
+                        // Normalize on store: the runner's DNS rrtype is upper-case-only, so persist
+                        // the canonical form rather than whatever casing the caller sent.
+                        net.RecordType = recordType;
+                }
+                break;
+            case "tcp":
+                // Port must be resolvable from net_config.port OR a host:port in target_url.
+                if (net?.Port is null && PortFromTarget(targetUrl) is null)
+                    errors["netConfig.port"] = "Required for tcp (set netConfig.port or include host:port in targetUrl).";
+                break;
+            case "ping":
+                // Port optional (runner defaults to 443); range already checked above.
+                break;
+        }
+    }
+
+    /// <summary>Extracts an explicit port from a target like "host:port" / "scheme://host:port".</summary>
+    private static int? PortFromTarget(string? target)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+            return null;
+        var s = target.Contains("://", StringComparison.Ordinal) ? target : $"tcp://{target}";
+        return Uri.TryCreate(s, UriKind.Absolute, out var u) && u.Port > 0 ? u.Port : null;
+    }
+
+    /// <summary>A network target is a host or host:port (no http(s) scheme required).</summary>
+    private static bool IsNetTarget(string value) =>
+        Uri.TryCreate(value.Contains("://", StringComparison.Ordinal) ? value : $"tcp://{value}",
+            UriKind.Absolute, out var u) && !string.IsNullOrEmpty(u.Host);
 
     private static bool IsHttpUrl(string value) =>
         Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
