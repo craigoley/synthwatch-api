@@ -6,18 +6,19 @@ name: Deploy API to Azure Functions
 # client/tenant/subscription IDs are repo variables.
 on:
   # Token-free auto-deploy after a hands-free auto-merge. A native auto-merge merges via the default
-  # GITHUB_TOKEN, and GitHub SUPPRESSES push-triggered workflows from GITHUB_TOKEN events — so the
-  # old `on: push: main` never fired Deploy after an auto-merge. The CodeQL code-scanning workflow
-  # ("Code Quality: Push on main", event=dynamic) is GitHub-managed, runs on EVERY merge to main
-  # (incl. GITHUB_TOKEN merges), and is NOT suppressed — evidence: it ran on every auto-merge commit
-  # while all `on: push` workflows were suppressed. Chain Deploy off it via workflow_run (also not
-  # suppressed) so Deploy auto-fires with no PAT/secret. (Both CodeQL workflows are named "CodeQL";
-  # matching by name catches the dynamic one that survives GITHUB_TOKEN merges.) workflow_dispatch
-  # stays as the manual fallback.
-  workflow_run:
-    workflows: ["CodeQL"]
-    types: [completed]
+  # GITHUB_TOKEN, and GitHub SUPPRESSES push-triggered workflows from GITHUB_TOKEN events — so
+  # `on: push: main` does NOT fire Deploy after an auto-merge. (A workflow_run off the dynamic
+  # code-scanning "CodeQL" run was tried and PROVEN not to fire — workflow_run does not chain off
+  # GitHub's managed dynamic workflow.) Instead the auto-merge workflow DISPATCHES this Deploy after
+  # the merge: workflow_dispatch is the documented EXCEPTION that GITHUB_TOKEN can still trigger.
+  # `push` is kept as a redundant trigger for any non-auto-merge (human/PAT) merge to main.
+  push:
     branches: [main]
+    paths:
+      - '**/*.cs'
+      - '**/*.csproj'
+      - 'host.json'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
 # Serialize deploys to main; a newer deploy cancels an in-flight older one so two pushes can't
@@ -39,19 +40,9 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Deploy only on a manual dispatch, or when the upstream CodeQL run on main SUCCEEDED (a real
-    # merge whose CI passed — the PR could not have auto-merged otherwise). Never deploy off a
-    # failed/cancelled CodeQL run.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          # For workflow_run, deploy the exact commit CodeQL ran on (the merge commit); for a manual
-          # dispatch, the default ref (main HEAD).
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Setup .NET
         uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
