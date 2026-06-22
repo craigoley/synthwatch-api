@@ -281,9 +281,16 @@ public static class CheckValidation
         switch (kind)
         {
             case "dns":
-                if (!string.IsNullOrWhiteSpace(net?.RecordType) &&
-                    !DnsRecordTypes.Contains(net!.RecordType!.ToUpperInvariant()))
-                    errors["netConfig.recordType"] = $"Must be one of: {string.Join(", ", DnsRecordTypes)}.";
+                if (!string.IsNullOrWhiteSpace(net?.RecordType))
+                {
+                    var recordType = net!.RecordType!.ToUpperInvariant();
+                    if (!DnsRecordTypes.Contains(recordType))
+                        errors["netConfig.recordType"] = $"Must be one of: {string.Join(", ", DnsRecordTypes)}.";
+                    else
+                        // Normalize on store: the runner's DNS rrtype is upper-case-only, so persist
+                        // the canonical form rather than whatever casing the caller sent.
+                        net.RecordType = recordType;
+                }
                 break;
             case "tcp":
                 // Port must be resolvable from net_config.port OR a host:port in target_url.
