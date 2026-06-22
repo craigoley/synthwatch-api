@@ -58,7 +58,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         try
         {
             // Build() AND StartAsync() both probe Docker; treat either failing as "unavailable".
-            _container = new PostgreSqlBuilder().WithImage("postgres:16").Build();
+            _container = new PostgreSqlBuilder("postgres:16").Build();
             await _container.StartAsync();
         }
         catch (Exception ex)
@@ -77,8 +77,10 @@ public sealed class PostgresFixture : IAsyncLifetime
             // pg_dump emits the sla_availability function before the tables its body references; with
             // body validation on, CREATE FUNCTION would fail ("relation checks does not exist"). Defer
             // body checks for the schema batch (this is what pg_dump's own SET preamble does).
-            await new NpgsqlCommand("SET check_function_bodies = false;\n" + schema, conn).ExecuteNonQueryAsync();
-            await new NpgsqlCommand(SeedSql, conn).ExecuteNonQueryAsync();
+            await using (var schemaCommand = new NpgsqlCommand("SET check_function_bodies = false;\n" + schema, conn))
+                await schemaCommand.ExecuteNonQueryAsync();
+            await using (var seedCommand = new NpgsqlCommand(SeedSql, conn))
+                await seedCommand.ExecuteNonQueryAsync();
         }
         Available = true;
     }
