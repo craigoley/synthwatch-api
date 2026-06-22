@@ -1,7 +1,7 @@
 namespace SynthWatch.Api.Data.Entities;
 
 /// <summary>
-/// One row per check execution. Maps to the live <c>runs</c> table (11 columns).
+/// One row per check execution. Maps to the live <c>runs</c> table.
 /// </summary>
 public class Run
 {
@@ -34,6 +34,10 @@ public class Run
 
     // SSL checks: measured cert days-remaining at run time. Nullable (null for non-ssl runs).
     public int? CertDaysRemaining { get; set; }
+
+    // Multi-location: the region this run executed from (runner multi-location migration). NOT NULL
+    // in the DB, default 'default' for legacy/single-location rows — so this is never null.
+    public string Location { get; set; } = "default";
 
     // Navigation (read-mostly).
     public Check? Check { get; set; }

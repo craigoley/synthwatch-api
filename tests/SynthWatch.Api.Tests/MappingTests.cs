@@ -30,6 +30,15 @@ public class MappingTests
         Assert.Null(dto.TraceUrl);
     }
 
+    [Fact]
+    public void RunDto_surfaces_location_and_defaults_to_default()
+    {
+        // multi-location run carries its region
+        Assert.Equal("westus", RunDto.From(new Run { Id = 1, CheckId = 1, Status = "fail", Location = "westus" }).Location);
+        // legacy/empty -> "default" (never null, dashboard-safe)
+        Assert.Equal("default", RunDto.From(new Run { Id = 2, CheckId = 1, Status = "pass", Location = "" }).Location);
+    }
+
     [Theory]
     [InlineData("pass", "up")]
     [InlineData("warn", "up")]   // warn counts as up (matches sla_availability)
