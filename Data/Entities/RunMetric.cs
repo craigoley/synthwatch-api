@@ -1,7 +1,7 @@
 namespace SynthWatch.Api.Data.Entities;
 
 /// <summary>
-/// Tier-1 per-run telemetry; one row per browser run. Maps to <c>run_metrics</c> (15 columns).
+/// Tier-1 per-run telemetry; one row per browser run. Maps to <c>run_metrics</c> (17 columns).
 /// Every metric is nullable — a capture failure must never fail the check.
 /// UNIQUE on run_id enforces one metrics row per run.
 /// </summary>
