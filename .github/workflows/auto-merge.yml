@@ -17,11 +17,17 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write # to dispatch the Deploy workflow (workflow_dispatch) after the merge
 
 jobs:
   auto-merge:
     name: Auto-merge (trusted authors)
     runs-on: ubuntu-latest
+    timeout-minutes: 20 # caps the post-merge wait (poll-until-merged below)
+    # One poller per PR: a new push cancels the previous run so we don't stack waiters.
+    concurrency:
+      group: auto-merge-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     # ★ TRUST GATE (hard, deterministic — NOT an LLM decision). Only the operator (craigoley /
     # cao825), the agent (craigoleyagent), and dependabot[bot] may auto-merge. Any other author ->
     # this job is skipped -> their PR NEVER auto-merges. dependabot is allowed here even though it is
@@ -30,11 +36,34 @@ jobs:
     steps:
       - name: Enable native auto-merge (waits for required checks)
         env:
-          # Prefer AUTOMERGE_TOKEN (a fine-grained PAT or GitHub App token with contents +
-          # pull-requests write) so the eventual merge is attributed to a real identity and the
-          # post-merge push TRIGGERS the Deploy workflow. With the default GITHUB_TOKEN, GitHub
-          # suppresses workflow runs caused by the token, so an auto-merged code change would NOT
-          # auto-deploy. Falls back to GITHUB_TOKEN (auto-merge still works; deploy must then be
-          # run manually for code changes). See repo setting: add the AUTOMERGE_TOKEN secret.
-          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr merge --auto --squash --delete-branch "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}"
+
+      # Token-free auto-deploy: the merge above is performed via GITHUB_TOKEN, and GitHub SUPPRESSES
+      # push-triggered workflows from GITHUB_TOKEN events — so Deploy's `on: push` won't fire. Wait
+      # for the merge, then DISPATCH Deploy. workflow_dispatch is the documented EXCEPTION that
+      # GITHUB_TOKEN can still trigger, so this needs no PAT/secret. Bails out cheaply if CI fails
+      # (no merge will happen) or the PR is closed unmerged.
+      - name: Auto-deploy after merge (token-free workflow_dispatch)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          for _ in $(seq 1 60); do
+            state=$(gh pr view "$PR" --json state -q .state 2>/dev/null || echo "")
+            if [ "$state" = "MERGED" ]; then
+              echo "PR #$PR merged -> dispatching Deploy (workflow_dispatch, token-free)"
+              gh workflow run deploy.yml --ref main
+              exit 0
+            fi
+            if [ "$state" = "CLOSED" ]; then echo "PR #$PR closed unmerged -> no deploy"; exit 0; fi
+            concl=$(gh pr view "$PR" --json statusCheckRollup \
+              -q '[.statusCheckRollup[]? | select(.name=="Test (xUnit + Testcontainers Postgres)")][-1].conclusion // ""' \
+              2>/dev/null || echo "")
+            if [ "$concl" = "FAILURE" ] || [ "$concl" = "CANCELLED" ]; then
+              echo "Test concluded $concl -> PR won't merge -> no deploy"; exit 0
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for merge; Deploy not dispatched (workflow_dispatch fallback available)"
