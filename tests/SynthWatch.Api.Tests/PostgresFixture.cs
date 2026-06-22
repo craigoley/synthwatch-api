@@ -58,7 +58,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         try
         {
             // Build() AND StartAsync() both probe Docker; treat either failing as "unavailable".
-            _container = new PostgreSqlBuilder().WithImage("postgres:16").Build();
+            _container = new PostgreSqlBuilder().WithImage("postgres:17").Build();
             await _container.StartAsync();
         }
         catch (Exception ex)
