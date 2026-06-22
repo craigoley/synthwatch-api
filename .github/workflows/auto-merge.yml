@@ -53,6 +53,14 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -uo pipefail
+          # Only dispatch Deploy when the PR touched deploy-relevant paths (mirrors deploy.yml's
+          # push `paths` filter: .cs/.csproj/host.json/deploy.yml) — a docs/workflow-only merge
+          # shouldn't redeploy. Matches the runner repo's auto-merge dispatch gating.
+          FILES=$(gh pr view "$PR" --json files -q '.files[].path' 2>/dev/null || echo "")
+          if ! printf '%s\n' "$FILES" | grep -qE '(\.cs|\.csproj)$|(^|/)host\.json$|^\.github/workflows/deploy\.yml$'; then
+            echo "No deploy-relevant changes in PR #$PR — not dispatching Deploy."
+            exit 0
+          fi
           for _ in $(seq 1 60); do
             state=$(gh pr view "$PR" --json state -q .state 2>/dev/null || echo "")
             if [ "$state" = "MERGED" ]; then
