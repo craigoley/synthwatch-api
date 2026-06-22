@@ -48,7 +48,8 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          queries: security-and-quality
+          # config-file carries the query suite + paths-ignore (excludes obj/ generated code).
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Build (manual)
         if: matrix.build-mode == 'manual'

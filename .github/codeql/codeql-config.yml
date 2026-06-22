@@ -1,0 +1,14 @@
+name: "SynthWatch API CodeQL config"
+
+# Run the security-and-quality suite (kept here so the workflow has a single source of config).
+queries:
+  - uses: security-and-quality
+
+# Exclude build output and source-generator output from analysis. The Azure Functions Worker SDK
+# emits GeneratedFunctionExecutor.g.cs under obj/ at build time; CodeQL was flagging
+# cs/dereferenced-value-may-be-null in that GENERATED code (not ours, regenerated every build, not
+# editable). Our hand-written code (Functions/, Data/, Dtos/, Infrastructure/) is still analyzed.
+paths-ignore:
+  - '**/obj/**'
+  - '**/bin/**'
+  - '**/*.g.cs'
