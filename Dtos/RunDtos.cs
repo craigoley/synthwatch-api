@@ -101,5 +101,15 @@ public record SlaFleetDto(
     decimal? AvailabilityPct,
     bool InsufficientData);
 
+/// <summary>A browser flow from the runner-owned flow_manifest (the catalogue of flows).</summary>
+public record FlowDto(
+    string Name,
+    string? Description,
+    string? EntryUrlHint,
+    DateTimeOffset UpdatedAt)
+{
+    public static FlowDto From(FlowManifest f) => new(f.Name, f.Description, f.EntryUrlHint, f.UpdatedAt);
+}
+
 /// <summary>Generic paged envelope for list endpoints.</summary>
 public record PagedResult<T>(IReadOnlyList<T> Items, int Page, int PageSize, long Total);

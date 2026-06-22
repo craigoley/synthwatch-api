@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
 using SynthWatch.Api.Data;
+using SynthWatch.Api.Dtos;
 using SynthWatch.Api.Infrastructure;
 
 namespace SynthWatch.Api.Functions;
@@ -13,19 +14,23 @@ public class FlowsFunctions
 
     public FlowsFunctions(SynthWatchDbContext db) => _db = db;
 
-    /// <summary>GET /api/flows — distinct non-null flow_name values.</summary>
+    /// <summary>
+    /// GET /api/flows — the runner-owned flow manifest (name + description + entryUrlHint +
+    /// updatedAt), the single source of truth for "what flows exist". Replaces the previous
+    /// distinct-flow_name string[] (a stopgap) with the richer object[] shape.
+    /// </summary>
     [Function("ListFlows")]
     public async Task<IActionResult> ListFlows(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "flows")] HttpRequest req,
         CancellationToken ct)
     {
-        var flows = await _db.Checks.AsNoTracking()
-            .Where(c => c.FlowName != null)
-            .Select(c => c.FlowName!)
-            .Distinct()
-            .OrderBy(f => f)
-            .ToListAsync(ct);
+        var flows = (await _db.FlowManifests.AsNoTracking()
+            .OrderBy(f => f.Name)
+            .ToListAsync(ct))
+            .Select(FlowDto.From)
+            .ToList();
 
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
         return ApiResults.Ok(flows);
     }
 }

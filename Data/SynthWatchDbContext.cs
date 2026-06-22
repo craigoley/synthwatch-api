@@ -25,6 +25,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<Incident> Incidents => Set<Incident>();
     public DbSet<SlaAvailabilityRow> SlaAvailability => Set<SlaAvailabilityRow>();
     public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
+    public DbSet<FlowManifest> FlowManifests => Set<FlowManifest>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -157,6 +158,16 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.UpRuns).HasColumnName("up_runs");
             e.Property(x => x.DownRuns).HasColumnName("down_runs");
             e.Property(x => x.AvailabilityPct).HasColumnName("availability_pct");
+        });
+
+        modelBuilder.Entity<FlowManifest>(e =>
+        {
+            e.ToTable("flow_manifest");
+            e.HasKey(x => x.Name);
+            e.Property(x => x.Name).HasColumnName("name");
+            e.Property(x => x.Description).HasColumnName("description");
+            e.Property(x => x.EntryUrlHint).HasColumnName("entry_url_hint");
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").ValueGeneratedOnAddOrUpdate();
         });
 
         // Keyless: read per-check parity metrics via the ported lateral-join raw SQL only.
