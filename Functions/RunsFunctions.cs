@@ -64,9 +64,18 @@ public class RunsFunctions
         if (string.IsNullOrEmpty(traceUrl))
             return ApiResults.NotFound($"No trace for run {id}.");
 
+        // Defence-in-depth: trace_url is runner-written, but never attach the API's managed-identity
+        // token to an arbitrary host. Only proxy Azure Blob endpoints.
+        if (!Uri.TryCreate(traceUrl, UriKind.Absolute, out var blobUri) ||
+            !blobUri.Host.EndsWith(".blob.core.windows.net", StringComparison.OrdinalIgnoreCase))
+        {
+            TraceLog.InvalidTraceUrl(_logger, id);
+            return ApiResults.NotFound($"No trace for run {id}.");
+        }
+
         try
         {
-            var blob = new BlobClient(new Uri(traceUrl), _credential);
+            var blob = new BlobClient(blobUri, _credential);
             var resp = await blob.DownloadStreamingAsync(cancellationToken: ct);
             return new FileStreamResult(resp.Value.Content, "application/zip")
             {
@@ -92,4 +101,8 @@ internal static partial class TraceLog
     [LoggerMessage(EventId = 4000, Level = LogLevel.Error,
         Message = "Trace blob download failed for run {RunId} (status {Status})")]
     public static partial void BlobError(ILogger logger, long runId, int status, Exception ex);
+
+    [LoggerMessage(EventId = 4001, Level = LogLevel.Warning,
+        Message = "Run {RunId} has a trace_url that is not an Azure Blob endpoint; refusing to proxy it")]
+    public static partial void InvalidTraceUrl(ILogger logger, long runId);
 }
