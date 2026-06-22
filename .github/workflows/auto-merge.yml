@@ -47,6 +47,9 @@ jobs:
       - name: Auto-deploy after merge (token-free workflow_dispatch)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job has no checkout, so gh can't infer the repo from a git remote — set it
+          # explicitly (GH_REPO) so `gh pr view` / `gh workflow run` resolve without --repo.
+          GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -uo pipefail
