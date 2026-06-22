@@ -31,6 +31,7 @@ public class FlowsFunctions
             .ToList();
 
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(flows);
     }
 }

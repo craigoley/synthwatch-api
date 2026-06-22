@@ -93,8 +93,10 @@ public class ChecksFunctions
             metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty)));
 
         // Short cache so the dashboard's polling doesn't hit the DB every tick; current status
-        // moves run-to-run, so keep it brief (10s).
+        // moves run-to-run, so keep it brief (10s). Vary on Origin since platform CORS echoes a
+        // per-origin Access-Control-Allow-Origin and these responses are publicly cacheable.
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=10";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(result);
     }
 

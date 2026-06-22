@@ -16,9 +16,11 @@ builder.Services
     .AddApplicationInsightsTelemetryWorkerService()
     .ConfigureFunctionsApplicationInsights();
 
-// Options bound from app settings (Postgres__*, Cors__*).
+// Options bound from app settings (Postgres__*).
 builder.Services.Configure<PostgresOptions>(builder.Configuration.GetSection("Postgres"));
-builder.Services.Configure<CorsOptions>(builder.Configuration.GetSection("Cors"));
+// NOTE: CORS is handled by the PLATFORM (Function App siteConfig.cors), NOT app code. The host
+// answers the OPTIONS preflight itself before the worker is ever invoked, so app-level CORS
+// middleware/functions cannot intercept preflight. See infra/main.bicep (siteConfig.cors).
 
 // Single managed-identity-authenticated Npgsql data source for the whole app.
 builder.Services.AddSingleton(PostgresDataSourceFactory.Create);
@@ -31,9 +33,8 @@ builder.Services.AddDbContext<SynthWatchDbContext>((sp, options) =>
 });
 
 // Worker middleware (outermost first): request logging (times whole pipeline + final status),
-// then CORS (decorates every response), then exception shielding (innermost).
+// then exception shielding (innermost). CORS is platform-level (see above).
 builder.UseMiddleware<RequestLoggingMiddleware>();
-builder.UseMiddleware<CorsMiddleware>();
 builder.UseMiddleware<ExceptionHandlingMiddleware>();
 
 builder.Build().Run();
