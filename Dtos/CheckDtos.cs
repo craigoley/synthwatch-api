@@ -57,7 +57,9 @@ public record CheckSummaryDto(
     IReadOnlyList<Assertion> Assertions,
     IReadOnlyDictionary<string, string>? RequestHeaders,
     string? RequestBody,
-    IReadOnlyDictionary<string, string>? Auth)
+    IReadOnlyDictionary<string, string>? Auth,
+    // Network checks (dns/tcp/ping): per-kind config; null for other kinds.
+    NetConfig? NetConfig)
 {
     public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
@@ -81,7 +83,8 @@ public record CheckSummaryDto(
         Assertions: c.Assertions,
         RequestHeaders: c.RequestHeaders,
         RequestBody: c.RequestBody,
-        Auth: c.Auth);
+        Auth: c.Auth,
+        NetConfig: c.NetConfig);
 }
 
 /// <summary>Per-check computed metrics (ported SQL), merged into the check summary by id.</summary>
@@ -125,6 +128,7 @@ public record CheckDetailDto(
     IReadOnlyDictionary<string, string>? RequestHeaders,
     string? RequestBody,
     IReadOnlyDictionary<string, string>? Auth,
+    NetConfig? NetConfig,
     string CurrentStatus,
     string CurrentHealth,
     IReadOnlyList<RunDto> RecentRuns)
@@ -138,6 +142,7 @@ public record CheckDetailDto(
         RequestHeaders: c.RequestHeaders,
         RequestBody: c.RequestBody,
         Auth: c.Auth,
+        NetConfig: c.NetConfig,
         CurrentStatus: !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
         CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
@@ -169,6 +174,7 @@ public class CreateCheckRequest
     public Dictionary<string, string>? RequestHeaders { get; set; }
     public string? RequestBody { get; set; }
     public Dictionary<string, string>? Auth { get; set; }
+    public NetConfig? NetConfig { get; set; }
 }
 
 /// <summary>Body for PATCH /api/checks/{id}. Every field optional; only present fields change.</summary>
@@ -195,4 +201,5 @@ public class UpdateCheckRequest
     public Dictionary<string, string>? RequestHeaders { get; set; }
     public string? RequestBody { get; set; }
     public Dictionary<string, string>? Auth { get; set; }
+    public NetConfig? NetConfig { get; set; }
 }
