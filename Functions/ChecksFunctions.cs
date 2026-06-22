@@ -72,13 +72,23 @@ public class ChecksFunctions
         var checks = await _db.Checks.AsNoTracking().OrderBy(c => c.Name).ToListAsync(ct);
         var ids = checks.Select(c => c.Id).ToList();
 
-        // Latest run per check in one round-trip.
-        var latestRuns = await _db.Runs.AsNoTracking()
+        // Latest run per (check, location) in one round-trip. Gives the per-location rollup AND,
+        // by taking the most recent across a check's locations, the overall latest run.
+        var latestPerLocation = await _db.Runs.AsNoTracking()
             .Where(r => ids.Contains(r.CheckId))
-            .GroupBy(r => r.CheckId)
+            .GroupBy(r => new { r.CheckId, r.Location })
             .Select(g => g.OrderByDescending(r => r.StartedAt).First())
             .ToListAsync(ct);
-        var latestByCheck = latestRuns.ToDictionary(r => r.CheckId);
+        var byCheck = latestPerLocation.GroupBy(r => r.CheckId).ToDictionary(g => g.Key, g => g.ToList());
+        // Overall latest run per check = the most recent across its locations (unchanged semantics).
+        var latestByCheck = byCheck.ToDictionary(
+            kv => kv.Key, kv => kv.Value.OrderByDescending(r => r.StartedAt).First());
+        // Per-location rollup: one {location, status} per location, ordered by location name.
+        var rollupByCheck = byCheck.ToDictionary(
+            kv => kv.Key,
+            kv => (IReadOnlyList<LocationStatusDto>)kv.Value
+                .OrderBy(r => r.Location, StringComparer.Ordinal)
+                .Select(r => new LocationStatusDto(r.Location, r.Status)).ToList());
 
         // Ported lateral-join metrics (p50/p95, runs24h, sparkline, open-incident rollup),
         // one round-trip for all checks. Open-incident count also backs hasOpenIncident.
@@ -87,10 +97,12 @@ public class ChecksFunctions
             m.P50Ms, m.P95Ms, m.Runs24h, m.OpenIncidentCount, m.MaxOpenSeverity,
             JsonSerializer.Deserialize<List<SparkPoint>>(m.Spark) ?? new List<SparkPoint>()));
 
+        var emptyRollup = (IReadOnlyList<LocationStatusDto>)Array.Empty<LocationStatusDto>();
         var result = checks.Select(c => CheckSummaryDto.From(
             c,
             latestByCheck.GetValueOrDefault(c.Id),
-            metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty)));
+            metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty),
+            rollupByCheck.GetValueOrDefault(c.Id, emptyRollup)));
 
         // Short cache so the dashboard's polling doesn't hit the DB every tick; current status
         // moves run-to-run, so keep it brief (10s). Vary on Origin since platform CORS echoes a

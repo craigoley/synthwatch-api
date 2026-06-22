@@ -151,6 +151,9 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.ResolvedRunId).HasColumnName("resolved_run_id");
             e.Property(x => x.ConsecutiveFailures).HasColumnName("consecutive_failures");
             e.Property(x => x.Summary).HasColumnName("summary");
+            var (rcaConv, rcaCmp) = JsonbColumn<IncidentRca?>();
+            e.Property(x => x.Rca).HasColumnName("rca").HasColumnType("jsonb")
+                .HasConversion(rcaConv, rcaCmp);
             e.HasOne(x => x.Check).WithMany(c => c.Incidents).HasForeignKey(x => x.CheckId);
         });
 

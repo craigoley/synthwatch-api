@@ -1,7 +1,7 @@
 namespace SynthWatch.Api.Data.Entities;
 
 /// <summary>
-/// Open/resolved incident lifecycle per check. Maps to <c>incidents</c> (10 columns).
+/// Open/resolved incident lifecycle per check. Maps to <c>incidents</c>.
 /// Partial unique index allows at most one open incident per check.
 /// </summary>
 public class Incident
@@ -27,6 +27,9 @@ public class Incident
     public int ConsecutiveFailures { get; set; }
 
     public string? Summary { get; set; }
+
+    // AI root-cause analysis (migration 0015; jsonb). Null when RCA is off / failed / pre-existing.
+    public IncidentRca? Rca { get; set; }
 
     // Navigation (read-mostly).
     public Check? Check { get; set; }

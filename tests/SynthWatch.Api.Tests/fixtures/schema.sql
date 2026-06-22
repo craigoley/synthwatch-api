@@ -167,6 +167,7 @@ CREATE TABLE public.incidents (
     resolved_run_id bigint,
     consecutive_failures integer DEFAULT 0 NOT NULL,
     summary text,
+    rca jsonb,
     CONSTRAINT incidents_severity_check CHECK ((severity = ANY (ARRAY['critical'::text, 'warning'::text]))),
     CONSTRAINT incidents_status_check CHECK ((status = ANY (ARRAY['open'::text, 'resolved'::text])))
 );
