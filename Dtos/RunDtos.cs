@@ -49,12 +49,15 @@ public record RunMetricDto(
     long? JsHeapBytes,
     int? CpuTimeMs,
     int? LayoutCount,
-    int? RecalcStyleCount)
+    int? RecalcStyleCount,
+    // Core Web Vitals. cls is unitless (double); inpMs is ms and is often null (no interaction).
+    double? Cls,
+    int? InpMs)
 {
     public static RunMetricDto From(RunMetric m) => new(
         m.RunId, m.CapturedAt, m.TtfbMs, m.DomContentLoadedMs, m.LoadEventMs, m.FcpMs,
         m.LcpMs, m.TransferBytes, m.ResourceCount, m.DomNodeCount, m.JsHeapBytes,
-        m.CpuTimeMs, m.LayoutCount, m.RecalcStyleCount);
+        m.CpuTimeMs, m.LayoutCount, m.RecalcStyleCount, m.Cls, m.InpMs);
 }
 
 public record IncidentDto(

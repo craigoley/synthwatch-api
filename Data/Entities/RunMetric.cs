@@ -37,6 +37,11 @@ public class RunMetric
 
     public int? RecalcStyleCount { get; set; }
 
+    // Core Web Vitals (runner PR #36). CLS is unitless (double); INP is ms (int) and is often
+    // null for synthetic loads with no interaction — keep nullable (0 != "not measured").
+    public double? Cls { get; set; }
+    public int? InpMs { get; set; }
+
     public DateTimeOffset CapturedAt { get; set; }
 
     // Navigation (read-mostly).
