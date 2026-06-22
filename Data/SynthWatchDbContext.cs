@@ -71,6 +71,9 @@ public class SynthWatchDbContext : DbContext
             var (netConv, netCmp) = JsonbColumn<NetConfig?>();
             e.Property(x => x.NetConfig).HasColumnName("net_config").HasColumnType("jsonb")
                 .HasConversion(netConv, netCmp);
+            var (stepsConv, stepsCmp) = JsonbColumn<List<ChainStep>?>();
+            e.Property(x => x.Steps).HasColumnName("steps").HasColumnType("jsonb")
+                .HasConversion(stepsConv, stepsCmp);
         });
 
         modelBuilder.Entity<Run>(e =>
