@@ -302,6 +302,7 @@ CREATE TABLE public.runs (
     screenshot_url text,
     cert_days_remaining integer,
     trace_url text,
+    location text DEFAULT 'default'::text,
     CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text, 'error'::text, 'running'::text])))
 );
 

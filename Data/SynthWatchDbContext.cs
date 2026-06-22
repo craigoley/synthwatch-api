@@ -92,6 +92,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.ScreenshotUrl).HasColumnName("screenshot_url");
             e.Property(x => x.TraceUrl).HasColumnName("trace_url");
             e.Property(x => x.CertDaysRemaining).HasColumnName("cert_days_remaining");
+            e.Property(x => x.Location).HasColumnName("location");
             e.HasOne(x => x.Check).WithMany(c => c.Runs).HasForeignKey(x => x.CheckId);
             e.HasIndex(x => new { x.CheckId, x.StartedAt });
         });

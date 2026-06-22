@@ -20,14 +20,19 @@ public record RunDto(
     int? CertDaysRemaining,
     // Downloadable Playwright trace: the API proxy path (GET /api/runs/{id}/trace), or null when
     // the run has no trace (passing/non-browser runs). Not the raw blob URL — the proxy streams it.
-    string? TraceUrl)
+    string? TraceUrl,
+    // Multi-location: the region this run executed from. "default" for single-location/legacy runs
+    // (never null). The dashboard aggregates per-location verdicts ("up from eastus2, down from
+    // westus"); the API serves the raw per-run value.
+    string Location)
 {
     public static RunDto From(Run r) => new(
         r.Id, r.CheckId, r.Status, r.StartedAt, r.FinishedAt, r.DurationMs,
         r.HttpStatus, r.ErrorMessage, r.FailedStep,
         ScreenshotUrl: string.IsNullOrEmpty(r.ScreenshotUrl) ? null : $"/api/runs/{r.Id}/screenshot",
         CertDaysRemaining: r.CertDaysRemaining,
-        TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace");
+        TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace",
+        Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location);
 }
 
 public record RunStepDto(
