@@ -55,47 +55,60 @@ jobs:
 
       # Reconcile critical config so a code-only deploy or a manual change can't silently drop it
       # (the 2026-06-22 CORS outage: siteConfig.cors lived in Bicep but CD never re-asserted it).
-      # SAFE BY DESIGN — non-destructive: CORS is reconciled ADDITIVELY (ensure required origins are
-      # present; never remove one, so a deliberately-added preview origin is preserved), and missing
-      # critical app settings only WARN. This step never deletes/overwrites, so it cannot itself
-      # become an outage source. Runs before the code deploy, reusing the azure/login session.
+      # SAFE BY DESIGN — non-destructive AND non-blocking: CORS is reconciled ADDITIVELY (ensure
+      # required origins are present; never remove one, so a deliberately-added preview origin is
+      # preserved); missing app settings only WARN; and continue-on-error means a transient Azure
+      # read can never gate the code deploy. So this guard cannot itself become an outage source.
+      # A FAILED read => skip + warn (never misreported as "everything missing"). Reuses azure/login.
       - name: Reconcile critical config (CORS) + drift check
+        continue-on-error: true
         env:
           REQUIRED_CORS_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
           RG: synthwatch-rg
         run: |
-          set -euo pipefail
+          set -uo pipefail   # NOT -e: a transient az read must not abort the job / block deploy
           APP="$AZURE_FUNCTIONAPP_NAME"
 
           # --- CORS: ensure each required origin is present (additive; restores drift) ---
           if [ -z "${REQUIRED_CORS_ORIGINS:-}" ]; then
             echo "::warning::CORS_ALLOWED_ORIGINS repo variable is not set — skipping CORS reconcile."
+          elif ! current="$(az functionapp cors show -g "$RG" -n "$APP" --query "allowedOrigins" -o tsv)"; then
+            # Read FAILED (az non-zero) — skip rather than misreport every origin as missing.
+            echo "::warning::could not read live CORS (transient Azure error) — skipping reconcile this run."
           else
-            mapfile -t current < <(az functionapp cors show -g "$RG" -n "$APP" --query "allowedOrigins[]" -o tsv)
-            echo "Current CORS origins: ${current[*]:-<none>}"
+            # current is newline-separated (empty string => genuinely zero origins, which we DO restore).
+            echo "Current CORS origins: $(echo "$current" | paste -sd, -)"
             IFS=',' read -ra want <<< "$REQUIRED_CORS_ORIGINS"
             for raw in "${want[@]}"; do
               o="$(echo "$raw" | xargs)"; [ -z "$o" ] && continue
-              if printf '%s\n' "${current[@]:-}" | grep -qxF "$o"; then
+              if grep -qxF "$o" <<< "$current"; then
                 echo "  present: $o"
               else
                 echo "::warning::CORS origin '$o' was MISSING — restoring it (drift reconciled)."
-                az functionapp cors add -g "$RG" -n "$APP" --allowed-origins "$o"
+                az functionapp cors add -g "$RG" -n "$APP" --allowed-origins "$o" \
+                  || echo "::warning::failed to restore CORS origin '$o' — needs manual fix."
               fi
             done
+            # Invariant: CORS must never be "*". Warn (don't remove) if an over-permissive origin appears.
+            if grep -qxF '*' <<< "$current"; then
+              echo "::warning::live CORS contains '*' — this must never be wildcard; remove it manually."
+            fi
           fi
 
           # --- App settings: WARN (never fail/mutate) if a critical setting is absent ---
-          names="$(az functionapp config appsettings list -g "$RG" -n "$APP" --query "[].name" -o tsv)"
-          for key in AzureWebJobsStorage__accountName APPLICATIONINSIGHTS_CONNECTION_STRING \
-                     Postgres__Host Postgres__Database Postgres__Username; do
-            if printf '%s\n' "$names" | grep -qxF "$key"; then echo "  present: $key"
-            else echo "::warning::critical app setting MISSING: $key"; fi
-          done
+          if names="$(az functionapp config appsettings list -g "$RG" -n "$APP" --query "[].name" -o tsv)"; then
+            for key in AzureWebJobsStorage__accountName APPLICATIONINSIGHTS_CONNECTION_STRING \
+                       Postgres__Host Postgres__Database Postgres__Username; do
+              if grep -qxF "$key" <<< "$names"; then echo "  present: $key"
+              else echo "::warning::critical app setting MISSING: $key"; fi
+            done
+          else
+            echo "::warning::could not read app settings (transient Azure error) — skipping drift check this run."
+          fi
 
           {
             echo "### Config reconcile"
-            echo "- CORS origins now: $(az functionapp cors show -g "$RG" -n "$APP" --query "join(', ', allowedOrigins)" -o tsv)"
+            echo "- CORS origins now: $(az functionapp cors show -g "$RG" -n "$APP" --query "join(', ', allowedOrigins)" -o tsv 2>/dev/null || echo '(read failed)')"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # functions-action uses the azure/login (RBAC) session — no publish profile/secret.
