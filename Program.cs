@@ -25,6 +25,10 @@ builder.Services.Configure<PostgresOptions>(builder.Configuration.GetSection("Po
 // Single managed-identity-authenticated Npgsql data source for the whole app.
 builder.Services.AddSingleton(PostgresDataSourceFactory.Create);
 
+// Managed-identity credential for reading trace blobs from the artifacts storage account
+// (the trace-download proxy). Same DefaultAzureCredential family the DB token uses.
+builder.Services.AddSingleton<Azure.Core.TokenCredential>(_ => new Azure.Identity.DefaultAzureCredential());
+
 // Read-mostly EF Core context over the runner-owned schema (no migrations).
 builder.Services.AddDbContext<SynthWatchDbContext>((sp, options) =>
 {
