@@ -56,53 +56,81 @@ public class RunsFunctions
         long id,
         CancellationToken ct)
     {
-        var traceUrl = await _db.Runs.AsNoTracking()
-            .Where(r => r.Id == id)
-            .Select(r => r.TraceUrl)
-            .FirstOrDefaultAsync(ct);
+        var url = await _db.Runs.AsNoTracking()
+            .Where(r => r.Id == id).Select(r => r.TraceUrl).FirstOrDefaultAsync(ct);
+        return await StreamRunArtifact(req, id, url, "trace", "application/zip",
+            $"attachment; filename=\"trace-run-{id}.zip\"", ct);
+    }
 
-        if (string.IsNullOrEmpty(traceUrl))
-            return ApiResults.NotFound($"No trace for run {id}.");
+    /// <summary>
+    /// GET /api/runs/{id}/screenshot — streams the run's failure screenshot from Blob via the same
+    /// proxy as traces (the artifacts account blocks public access, so the raw blob URL 409s). 404
+    /// when the run has no screenshot. Served inline so the dashboard &lt;img&gt; renders it.
+    /// </summary>
+    [Function("GetRunScreenshot")]
+    public async Task<IActionResult> GetRunScreenshot(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "runs/{id:long}/screenshot")] HttpRequest req,
+        long id,
+        CancellationToken ct)
+    {
+        var url = await _db.Runs.AsNoTracking()
+            .Where(r => r.Id == id).Select(r => r.ScreenshotUrl).FirstOrDefaultAsync(ct);
+        return await StreamRunArtifact(req, id, url, "screenshot", "image/png",
+            $"inline; filename=\"screenshot-run-{id}.png\"", ct);
+    }
 
-        // Defence-in-depth: trace_url is runner-written, but never attach the API's managed-identity
+    /// <summary>
+    /// Streams a run artifact blob through the API using its managed identity, so artifacts stay
+    /// behind the API (the artifacts account has public access disabled). Validates the blob host
+    /// before attaching the token. 404 for no/invalid url or a missing blob; other blob errors are
+    /// logged and shielded as a generic 500.
+    /// </summary>
+    private async Task<IActionResult> StreamRunArtifact(
+        HttpRequest req, long id, string? blobUrl, string artifact, string contentType,
+        string contentDisposition, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(blobUrl))
+            return ApiResults.NotFound($"No {artifact} for run {id}.");
+
+        // Defence-in-depth: the *_url is runner-written, but never attach the API's managed-identity
         // token to an arbitrary host. Only proxy Azure Blob endpoints.
-        if (!Uri.TryCreate(traceUrl, UriKind.Absolute, out var blobUri) ||
+        if (!Uri.TryCreate(blobUrl, UriKind.Absolute, out var blobUri) ||
             !blobUri.Host.EndsWith(".blob.core.windows.net", StringComparison.OrdinalIgnoreCase))
         {
-            TraceLog.InvalidTraceUrl(_logger, id);
-            return ApiResults.NotFound($"No trace for run {id}.");
+            ArtifactLog.InvalidUrl(_logger, artifact, id);
+            return ApiResults.NotFound($"No {artifact} for run {id}.");
         }
 
         try
         {
             var blob = new BlobClient(blobUri, _credential);
             var resp = await blob.DownloadStreamingAsync(cancellationToken: ct);
-            return new FileStreamResult(resp.Value.Content, "application/zip")
-            {
-                FileDownloadName = $"trace-run-{id}.zip"
-            };
+            // Set Content-Disposition explicitly (inline for images, attachment for downloads); do
+            // NOT use FileStreamResult.FileDownloadName, which would force attachment.
+            req.HttpContext.Response.Headers.ContentDisposition = contentDisposition;
+            return new FileStreamResult(resp.Value.Content, contentType);
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
         {
-            // trace_url recorded but the blob is gone (retention/cleanup).
-            return ApiResults.NotFound($"Trace blob for run {id} is no longer available.");
+            // url recorded but the blob is gone (retention/cleanup).
+            return ApiResults.NotFound($"{artifact} blob for run {id} is no longer available.");
         }
         catch (RequestFailedException ex)
         {
-            TraceLog.BlobError(_logger, id, ex.Status, ex);
+            ArtifactLog.BlobError(_logger, artifact, id, ex.Status, ex);
             throw; // surfaced as a generic 500 by the exception middleware (no blob detail leaked)
         }
     }
 }
 
-/// <summary>High-performance (CA1848) log delegates for the trace proxy.</summary>
-internal static partial class TraceLog
+/// <summary>High-performance (CA1848) log delegates for the artifact (trace/screenshot) proxy.</summary>
+internal static partial class ArtifactLog
 {
     [LoggerMessage(EventId = 4000, Level = LogLevel.Error,
-        Message = "Trace blob download failed for run {RunId} (status {Status})")]
-    public static partial void BlobError(ILogger logger, long runId, int status, Exception ex);
+        Message = "{Artifact} blob download failed for run {RunId} (status {Status})")]
+    public static partial void BlobError(ILogger logger, string artifact, long runId, int status, Exception ex);
 
     [LoggerMessage(EventId = 4001, Level = LogLevel.Warning,
-        Message = "Run {RunId} has a trace_url that is not an Azure Blob endpoint; refusing to proxy it")]
-    public static partial void InvalidTraceUrl(ILogger logger, long runId);
+        Message = "Run {RunId} {Artifact} url is not an Azure Blob endpoint; refusing to proxy it")]
+    public static partial void InvalidUrl(ILogger logger, string artifact, long runId);
 }
