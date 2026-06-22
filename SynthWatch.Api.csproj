@@ -27,11 +27,15 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
-    <!-- Pinned to the 2.x line: the 3.x major pulls Microsoft.ApplicationInsights 3.x, whose
+    <!-- HARD PIN to the 2.x line. The 3.x major pulls Microsoft.ApplicationInsights 3.x, whose
          type layout is incompatible with Microsoft.Azure.Functions.Worker.ApplicationInsights
-         (2.x), causing a TypeLoadException on ITelemetryInitializer that crashes the isolated
-         worker at startup. 2.22.x is the version pairing the Functions worker AI integration. -->
-    <PackageReference Include="Microsoft.ApplicationInsights.WorkerService" Version="3.1.2" />
+         (2.x): it throws a TypeLoadException on ITelemetryInitializer that crashes the isolated
+         worker at startup (host serves 502). First fixed in PR #6; regressed when Dependabot
+         bumped it to 3.1.2 (PR #22) and auto-merge/CD shipped it, causing the 2026-06-22 prod
+         outage. The REAL guard is the `ignore` rule in .github/dependabot.yml (this comment is
+         only documentation). Do NOT raise this to 3.x until Worker.ApplicationInsights ships a
+         3.x-compatible release. -->
+    <PackageReference Include="Microsoft.ApplicationInsights.WorkerService" Version="2.22.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.52.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.ApplicationInsights" Version="2.51.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Http.AspNetCore" Version="2.1.0" />

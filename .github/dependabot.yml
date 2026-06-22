@@ -7,6 +7,16 @@ updates:
       day: monday
       time: "05:00"
     open-pull-requests-limit: 10
+    ignore:
+      # HARD PIN — do not let Dependabot re-propose the 2.x -> 3.x major. WorkerService 3.x pulls
+      # Microsoft.ApplicationInsights 3.x, which is incompatible with the Functions worker AI
+      # integration (2.x) and crashes the isolated worker at startup (TypeLoadException on
+      # ITelemetryInitializer). This bump caused the 2026-06-22 prod outage (PR #22 reverted the
+      # PR #6 pin). This ignore rule is the real enforcement; see the csproj comment for context.
+      - dependency-name: "Microsoft.ApplicationInsights.WorkerService"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Microsoft.ApplicationInsights"
+        update-types: ["version-update:semver-major"]
     groups:
       # Batch low-risk minor/patch bumps into a single PR.
       nuget-minor-patch:
