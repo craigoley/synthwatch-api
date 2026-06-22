@@ -35,7 +35,7 @@
          outage. The REAL guard is the `ignore` rule in .github/dependabot.yml (this comment is
          only documentation). Do NOT raise this to 3.x until Worker.ApplicationInsights ships a
          3.x-compatible release. -->
-    <PackageReference Include="Microsoft.ApplicationInsights.WorkerService" Version="2.22.0" />
+    <PackageReference Include="Microsoft.ApplicationInsights.WorkerService" Version="2.23.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.52.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.ApplicationInsights" Version="2.51.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Http.AspNetCore" Version="2.1.0" />
