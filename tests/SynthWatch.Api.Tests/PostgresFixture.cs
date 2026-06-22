@@ -7,7 +7,7 @@ using Xunit;
 namespace SynthWatch.Api.Tests;
 
 /// <summary>
-/// Spins up a real postgres:17 (Testcontainers) seeded with the runner-owned schema snapshot
+/// Spins up a real postgres:16 (Testcontainers) seeded with the runner-owned schema snapshot
 /// (fixtures/schema.sql — includes the sla_availability function/views + JSONB columns) plus
 /// deterministic fixtures. Lets the DB-dependent behavior (SLA SQL, parity lateral joins, JSONB
 /// round-trips) be tested faithfully. If Docker is unavailable (e.g. local dev), <see cref="Available"/>
@@ -58,7 +58,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         try
         {
             // Build() AND StartAsync() both probe Docker; treat either failing as "unavailable".
-            _container = new PostgreSqlBuilder().WithImage("postgres:17").Build();
+            _container = new PostgreSqlBuilder().WithImage("postgres:16").Build();
             await _container.StartAsync();
         }
         catch (Exception ex)
@@ -74,7 +74,10 @@ public sealed class PostgresFixture : IAsyncLifetime
         await using (var conn = new NpgsqlConnection(_connectionString))
         {
             await conn.OpenAsync();
-            await new NpgsqlCommand(schema, conn).ExecuteNonQueryAsync();
+            // pg_dump emits the sla_availability function before the tables its body references; with
+            // body validation on, CREATE FUNCTION would fail ("relation checks does not exist"). Defer
+            // body checks for the schema batch (this is what pg_dump's own SET preamble does).
+            await new NpgsqlCommand("SET check_function_bodies = false;\n" + schema, conn).ExecuteNonQueryAsync();
             await new NpgsqlCommand(SeedSql, conn).ExecuteNonQueryAsync();
         }
         Available = true;
