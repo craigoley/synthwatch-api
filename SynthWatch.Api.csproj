@@ -12,6 +12,9 @@
     <!-- Isolated worker model. NOT in-process. -->
     <_FunctionsSkipCleanOutput>true</_FunctionsSkipCleanOutput>
     <RootNamespace>SynthWatch.Api</RootNamespace>
+    <!-- The test project lives under tests/ (same tree as this project's root); keep its sources
+         out of the API project's default globs so root `dotnet build`/publish/CodeQL ignore them. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
