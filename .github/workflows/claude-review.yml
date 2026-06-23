@@ -90,26 +90,29 @@ jobs:
               - Do NOT merge. Merging is deterministic (the separate Auto-merge workflow, gated to
                 trusted authors via GitHub native auto-merge). You do NOT run `gh pr merge`.
 
-            ★ VERDICT — the LAST line of your final message MUST be EXACTLY ONE of these, with
-            nothing after it:
-              REVIEW_VERDICT: BLOCK
-              REVIEW_VERDICT: PASS
-            This single line gates the merge (the "Claude review" check fails on BLOCK, holding the
-            merge; passes on PASS). Be CONSERVATIVE — emit BLOCK ONLY for a real, confident
-            correctness bug, security issue, data loss, or breaking change. EVERYTHING else is PASS:
-            style, naming, nits, suggestions, "consider…", or speculative concerns still post as
-            comments but do NOT block. If you are unsure, emit PASS. Never block on advisory nits.
+            ★ VERDICT — the LAST line of your final message MUST be exactly:
+              REVIEW_VERDICT: <DECISION>
+            where you replace <DECISION> with the single literal word BLOCK or the single literal word
+            PASS — nothing else on that line, nothing after it. (This instruction uses the <DECISION>
+            placeholder ON PURPOSE so the prompt itself contains no literal verdict the gate could
+            mis-parse; emit the real word.) This line gates the merge (the "Claude review" check fails
+            on BLOCK, holding the merge; passes on PASS). Be CONSERVATIVE — choose BLOCK ONLY for a
+            real, confident correctness bug, security issue, data loss, or breaking change. EVERYTHING
+            else is PASS: style, naming, nits, suggestions, "consider…", or speculative concerns still
+            post as comments but do NOT block. If unsure, choose PASS. Never block on advisory nits.
 
-      # ★ LAYER 2 — findings gate. Read the LAST `REVIEW_VERDICT:` line from the action's
-      # execution_file (the authoritative Claude Code execution log) — NOT the posted comment. Recon
-      # proved the verdict reliably lands in execution_file but NOT in the displayed tracking comment
-      # (present in only 1 of 9 real runner reviews), so comment-parsing was inert (always fail-open).
-      # This is the runner's proven gate, copied EXACTLY so all repos parse identically (it live-BLOCKs
-      # there). BLOCK => fail this step => the "Claude review" check fails => native auto-merge holds.
-      # PASS => succeed. FAIL-OPEN: empty/missing execution_file (a no-op or errored review) => PASS +
-      # ::warning:: (a transient LLM hiccup must never deadlock merge; Layer 1 already required the
-      # review to RUN). Check-run name is the job name ("Claude review") — unchanged, so the Layer-1
-      # required context still matches exactly. `if: always()` so it decides even if the review errored.
+      # ★ LAYER 2 — findings gate (UNION-SOURCE, the reference for all repos). Take the LAST
+      # `REVIEW_VERDICT:` line across the UNION of every place Claude's final message can carry it:
+      #   (a) execution_file — result entries + assistant text blocks (the runner's verdict lands here)
+      #   (b) Claude's posted PR comments + review bodies (THIS repo's verdict landed here, NOT in
+      #       execution_file's .result — live-proven on #57). Neither source alone is universal.
+      # The user/prompt message is NOT in any parsed source (jq selects only result/assistant; comments
+      # & reviews are Claude's output) AND the prompt uses a <DECISION> placeholder, so the prompt's
+      # text can never be mis-parsed as a verdict. BLOCK => exit 1 => the "Claude review" check fails
+      # => native auto-merge holds. PASS => succeed. FAIL-OPEN: NO source yields a verdict (a no-op or
+      # errored review) => PASS + ::warning:: (a transient LLM hiccup must never deadlock merge; Layer 1
+      # already required the review to RUN). Check-run name is the job name ("Claude review") —
+      # unchanged, so the Layer-1 required context matches. `if: always()` so it decides even on error.
       - name: Gate merge on review verdict
         if: always()
         env:
