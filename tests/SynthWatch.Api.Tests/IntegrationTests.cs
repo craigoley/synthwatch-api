@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Azure.Identity;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -33,6 +34,16 @@ public class IntegrationTests
     {
         var ctx = new DefaultHttpContext();
         if (queryString is not null) ctx.Request.QueryString = new QueryString(queryString);
+        return ctx.Request;
+    }
+
+    private static HttpRequest JsonRequest(object body)
+    {
+        var ctx = new DefaultHttpContext();
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(body);
+        ctx.Request.Body = new MemoryStream(bytes);
+        ctx.Request.ContentType = "application/json";
+        ctx.Request.ContentLength = bytes.Length;
         return ctx.Request;
     }
 
@@ -564,6 +575,49 @@ public class IntegrationTests
 
             db.Checks.Remove(c);
             await db.SaveChangesAsync(); // clean up so reruns stay deterministic
+        }
+    }
+
+    [SkippableFact]
+    public async Task Create_check_seeds_default_location_cursor_at_create_time()
+    {
+        // 4-MLACT step 2: the POST handler seeds per-location cadence cursors AT create (replicating the
+        // runner's assignDefaultLocations()), not implicitly on first run. With only 'default' active,
+        // this is exactly one 'default' cursor — identical to today's lazy-insert, just explicit.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new ChecksFunctions(db);
+        var body = new CreateCheckRequest { Name = "loc-seed-test", Kind = "http", TargetUrl = "https://l.example" };
+
+        var res = Assert.IsType<ObjectResult>(await fn.CreateCheck(JsonRequest(body), default));
+        Assert.Equal(201, res.StatusCode);
+        var id = Assert.IsType<CheckDetailDto>(res.Value!).Id;
+
+        await using var db2 = _pg.NewDbContext(); // fresh connection => reads committed state
+        var conn = (NpgsqlConnection)db2.Database.GetDbConnection();
+        await conn.OpenAsync();
+        try
+        {
+            // (1) the cursor exists immediately AT CREATE (not after first run);
+            // (2) backward-compat: exactly one 'default' cursor with only 'default' active.
+            Assert.Equal(1L, Convert.ToInt64(await Scalar(conn, $"SELECT count(*) FROM check_locations WHERE check_id = {id}")));
+            Assert.Equal("default", (string?)await Scalar(conn, $"SELECT location FROM check_locations WHERE check_id = {id}"));
+            // last_run_at is NULL — matches assignDefaultLocations; the #68 claim loop's IS-NULL arm
+            // treats that as due-now, so the first run behaves exactly like today's no-cursor check.
+            Assert.True((bool)(await Scalar(conn, $"SELECT last_run_at IS NULL FROM check_locations WHERE check_id = {id}"))!);
+
+            // (3) idempotency: replay the runner's lazy-insert hitting the same cursor -> ON CONFLICT
+            // DO NOTHING no-ops (0 rows, no error), so API seeding + runner lazy-insert coexist safely.
+            await using var dup = conn.CreateCommand();
+            dup.CommandText = $"INSERT INTO check_locations (check_id, location) SELECT {id}, name FROM locations WHERE enabled ON CONFLICT (check_id, location) DO NOTHING";
+            Assert.Equal(0, await dup.ExecuteNonQueryAsync());
+        }
+        finally
+        {
+            await using var del = conn.CreateCommand();
+            del.CommandText = $"DELETE FROM checks WHERE id = {id}"; // cascades check_locations
+            await del.ExecuteNonQueryAsync();
+            await conn.CloseAsync();
         }
     }
 }

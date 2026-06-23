@@ -631,3 +631,27 @@ CREATE VIEW public.sla_availability_90d AS
     down_runs,
     availability_pct
    FROM public.sla_availability((now() - '90 days'::interval), now()) sla_availability(check_id, check_name, kind, window_from, window_to, completed_runs, up_runs, down_runs, availability_pct);
+
+
+--
+-- Multi-location (runner migration #73 / 4-MLACT step 1): the `locations` registry + per-check cadence
+-- cursors. Added to this test snapshot (the pg_dump predates #73) so the API create-path cursor seeding
+-- — assignDefaultLocations() replicated in C# — runs against the same shape as prod. Seeded 'default'
+-- active, matching #73.
+--
+CREATE TABLE public.locations (
+    name text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT locations_pkey PRIMARY KEY (name)
+);
+
+INSERT INTO public.locations (name, enabled) VALUES ('default', true);
+
+CREATE TABLE public.check_locations (
+    check_id bigint NOT NULL,
+    location text NOT NULL,
+    last_run_at timestamp with time zone,
+    CONSTRAINT check_locations_pkey PRIMARY KEY (check_id, location),
+    CONSTRAINT check_locations_check_id_fkey FOREIGN KEY (check_id) REFERENCES public.checks(id) ON DELETE CASCADE
+);
