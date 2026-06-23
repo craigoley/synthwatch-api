@@ -193,7 +193,24 @@ public class ChecksFunctions
             return ApiResults.ValidationError(errors);
 
         _db.Checks.Add(check);
-        await _db.SaveChangesAsync(ct);
+
+        // Seed per-location cadence cursors in the SAME transaction as the check insert, so a check is
+        // never persisted without them. This REPLICATES the runner's assignDefaultLocations() (#73,
+        // locations.ts) in C# across the language boundary (runner-owns-schema / API-serves-writes):
+        // one check_locations row per ACTIVE registry location, columns (check_id, location) only ->
+        // last_run_at stays NULL, which the #68 claim loop's IS-NULL arm treats as due-now (identical to
+        // a never-run check). ON CONFLICT DO NOTHING makes it idempotent, so it coexists with the
+        // runner's lazy-insert fallback (claim()'s ON CONFLICT DO UPDATE) without colliding. With only
+        // 'default' active, this seeds exactly one 'default' cursor — identical to today's implicit
+        // lazy-insert-on-first-run, just made explicit at create. (Enforcement + lazy-insert removal are
+        // a later step; this is create-path seeding only.)
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        await _db.SaveChangesAsync(ct);   // generates check.Id
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $@"INSERT INTO check_locations (check_id, location)
+               SELECT {check.Id}, name FROM locations WHERE enabled
+               ON CONFLICT (check_id, location) DO NOTHING", ct);
+        await tx.CommitAsync(ct);
 
         return ApiResults.Created($"/api/checks/{check.Id}", CheckDetailDto.From(check, Array.Empty<Run>()));
     }
