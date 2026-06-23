@@ -196,3 +196,5 @@ tables), execute the SLA function, and manage `checks` — with no secret of any
 access beyond `checks`.
 
 <!-- claude-review end-to-end validation: trivial docs touch, safe to merge. -->
+
+<!-- require-review-gate validation: confirms merge waits for Claude review (safe to remove) -->
