@@ -179,6 +179,24 @@ public record SlaResponseDto(
     SlaFleetDto Fleet,
     IReadOnlyList<SlaDto> Items);
 
+/// <summary>One bucket of the availability-over-time series; availabilityPct is null for a no-data
+/// bucket (a gap in the line, not 0% which would read as "down").</summary>
+public record AvailabilityPointDto(
+    DateTimeOffset Ts,
+    decimal? AvailabilityPct,
+    long UpRuns,
+    long DownRuns);
+
+/// <summary>
+/// GET /api/checks/{id}/availability-series — uptime % per bucket over the window. Uses the SAME
+/// up=pass|warn / down=fail|error taxonomy + maintenance exclusion as sla_availability, so the series
+/// integrated over the window matches the SLA panel's headline % (locked by a reconciliation test).
+/// </summary>
+public record AvailabilitySeriesDto(
+    string Window,
+    string Bucket,
+    IReadOnlyList<AvailabilityPointDto> Points);
+
 /// <summary>A browser flow from the runner-owned flow_manifest (the catalogue of flows).</summary>
 public record FlowDto(
     string Name,
