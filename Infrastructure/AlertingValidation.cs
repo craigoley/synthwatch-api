@@ -28,10 +28,10 @@ public static class AlertingValidation
         switch (type)
         {
             case "email":
+                // 'to' (recipients) only — the sender ('from') is transport env (ALERT_EMAIL_FROM), not
+                // a channel field; a stale 'from' key in the body is harmlessly ignored (not modeled).
                 if (cfg.To is null || cfg.To.Count == 0 || cfg.To.Any(string.IsNullOrWhiteSpace))
                     return "email channel config requires a non-empty 'to' list.";
-                if (string.IsNullOrWhiteSpace(cfg.From))
-                    return "email channel config requires 'from'.";
                 break;
             case "webhook":
                 if (string.IsNullOrWhiteSpace(cfg.Url))
@@ -61,7 +61,6 @@ public static class AlertingValidation
 
     private static IEnumerable<string?> ConfigStrings(ChannelConfig c)
     {
-        yield return c.From;
         yield return c.Url;
         yield return c.AuthHeader;
         if (c.To is not null)

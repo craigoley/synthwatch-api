@@ -700,7 +700,7 @@ public class IntegrationTests
             // Create email (to[]+from) + webhook (url).
             var em = Assert.IsType<ObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
                 Name = "ops-email", Type = "email",
-                Config = new ChannelConfig { To = new() { "ops@x.com" }, From = "alerts@x.com" } }), default));
+                Config = new ChannelConfig { To = new() { "ops@x.com" } } }), default));
             Assert.Equal(201, em.StatusCode);
             var emailId = Assert.IsType<ChannelDto>(em.Value!).Id;
             var wh = Assert.IsType<ObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
@@ -710,19 +710,19 @@ public class IntegrationTests
             // List includes both (config round-trips).
             var list = Assert.IsAssignableFrom<IEnumerable<ChannelDto>>(
                 Assert.IsType<OkObjectResult>(await ch.GetChannels(Request(), default)).Value!).ToList();
-            Assert.Contains(list, c => c.Id == emailId && c.Config.To!.Contains("ops@x.com") && c.Config.From == "alerts@x.com");
+            Assert.Contains(list, c => c.Id == emailId && c.Config.To!.Contains("ops@x.com"));
             Assert.Contains(list, c => c.Id == hookId && c.Config.Url == "https://hooks.x.com/y");
 
             // Update: new recipients + disable.
             var upd = Assert.IsType<ChannelDto>(Assert.IsType<OkObjectResult>(await ch.UpdateChannel(JsonRequest(new ChannelWriteRequest {
                 Name = "ops-email", Type = "email", Enabled = false,
-                Config = new ChannelConfig { To = new() { "a@x.com", "b@x.com" }, From = "alerts@x.com" } }), emailId, default)).Value!);
+                Config = new ChannelConfig { To = new() { "a@x.com", "b@x.com" } } }), emailId, default)).Value!);
             Assert.False(upd.Enabled);
             Assert.Equal(2, upd.Config.To!.Count);
 
             // Validation: email without to[] -> 400; webhook without url -> 400.
             Assert.IsType<BadRequestObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
-                Name = "bad-email", Type = "email", Config = new ChannelConfig { From = "x@y.com" } }), default));
+                Name = "bad-email", Type = "email", Config = new ChannelConfig() }), default)); // no to[] -> 400
             Assert.IsType<BadRequestObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
                 Name = "bad-hook", Type = "webhook", Config = new ChannelConfig() }), default));
             // No-secret: an ACS connection string anywhere in config -> 400.

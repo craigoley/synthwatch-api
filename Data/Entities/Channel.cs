@@ -18,15 +18,15 @@ public class Channel
 }
 
 /// <summary>
-/// Channel delivery config (jsonb). email: <see cref="To"/> + <see cref="From"/>; webhook:
-/// <see cref="Url"/> (+ optional <see cref="AuthHeader"/>). Nulls are omitted on write (so an empty
-/// config round-trips as {}). NEVER holds a transport secret — write-validation rejects connection
-/// strings.
+/// Channel delivery config (jsonb). email: <see cref="To"/> (recipients) only; webhook: <see cref="Url"/>
+/// (+ optional <see cref="AuthHeader"/>). The email SENDER ("from") is NOT here — it's a transport
+/// property (a verified sender on the ACS-owned domain), set once in runner env (ALERT_EMAIL_FROM)
+/// alongside the connection string, never per-channel user data. Nulls are omitted on write (empty
+/// config round-trips as {}). NEVER holds a transport secret — write-validation rejects connection strings.
 /// </summary>
 public class ChannelConfig
 {
     [JsonPropertyName("to")] public List<string>? To { get; set; }
-    [JsonPropertyName("from")] public string? From { get; set; }
     [JsonPropertyName("url")] public string? Url { get; set; }
     [JsonPropertyName("authHeader")] public string? AuthHeader { get; set; }
 }
