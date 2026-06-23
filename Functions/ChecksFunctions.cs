@@ -87,8 +87,9 @@ public class ChecksFunctions
         var rollupByCheck = byCheck.ToDictionary(
             kv => kv.Key,
             kv => (IReadOnlyList<LocationStatusDto>)kv.Value
-                .OrderBy(r => r.Location, StringComparer.Ordinal)
-                .Select(r => new LocationStatusDto(r.Location, r.Status)).ToList());
+                .Select(r => new LocationStatusDto(
+                    string.IsNullOrEmpty(r.Location) ? "default" : r.Location, r.Status))
+                .OrderBy(d => d.Location, StringComparer.Ordinal).ToList());
 
         // Ported lateral-join metrics (p50/p95, runs24h, sparkline, open-incident rollup),
         // one round-trip for all checks. Open-incident count also backs hasOpenIncident.
