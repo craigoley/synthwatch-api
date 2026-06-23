@@ -56,6 +56,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.PerfBudgetLcpMs).HasColumnName("perf_budget_lcp_ms");
             e.Property(x => x.PerfBudgetTransferBytes).HasColumnName("perf_budget_transfer_bytes");
             e.Property(x => x.CertExpiryWarnDays).HasColumnName("cert_expiry_warn_days");
+            e.Property(x => x.SloTarget).HasColumnName("slo_target");
 
             // No-code assertion model + request config (jsonb / text). Typed CLR models are
             // (de)serialized to jsonb via System.Text.Json value converters (camelCase keys,

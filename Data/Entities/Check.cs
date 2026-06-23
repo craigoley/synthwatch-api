@@ -11,7 +11,8 @@ public class Check
 
     public string Name { get; set; } = null!;
 
-    // CHECK: kind IN ('http','browser')
+    // CHECK: kind IN ('http','browser','ssl','dns','tcp','ping','multistep') — widened by the runner
+    // across migrations; the authoritative allowlist is Infrastructure/CheckValidation.Kinds.
     public string Kind { get; set; } = null!;
 
     public string TargetUrl { get; set; } = null!;
@@ -66,6 +67,11 @@ public class Check
 
     // Multistep API chains (kind='multistep'): ordered step list (migration 0013; jsonb). Null otherwise.
     public List<ChainStep>? Steps { get; set; }
+
+    // SLO target as a fraction (migration 0016; real, nullable). Null = no SLO (opt-in). A meaningful
+    // target is in (0,1); the API only computes the SLO when so — slo_status divides by (1 - target),
+    // so target = 1.0 would div-by-zero (and 500 GetCheck) and target outside (0,1) is nonsensical.
+    public float? SloTarget { get; set; }
 
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();

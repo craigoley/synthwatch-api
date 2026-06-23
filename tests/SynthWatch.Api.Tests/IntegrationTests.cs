@@ -124,6 +124,38 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Check_detail_does_not_500_when_slo_target_is_1_0()
+    {
+        // Regression (orphaned #47 finding): slo_status divides by (1 - slo_target), so a check with
+        // slo_target = 1.0 AND runs in the window made the function div-by-zero -> GetCheck 500. The
+        // API now guards (computes SLO only for a target in (0,1)) and serves Slo = null instead.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, slo_target)
+                VALUES ('slo-100', 'http', 'https://s.example', 1.0) RETURNING id INTO cid;
+              INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms)
+                VALUES (cid, 'fail', now() - interval '1 hour', now(), 40),
+                       (cid, 'pass', now() - interval '2 hours', now(), 40);
+            END $$;
+            """);
+        try
+        {
+            var fn = new ChecksFunctions(db);
+            var id = await db.Checks.Where(c => c.Name == "slo-100").Select(c => c.Id).FirstAsync();
+            var ok = Assert.IsType<OkObjectResult>(await fn.GetCheck(Request(), id, default)); // 200, not 500
+            Assert.Null(Assert.IsType<CheckDetailDto>(ok.Value!).Slo);                          // SLO skipped
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'slo-100';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Sla_24h_window_is_sufficient_30d_is_insufficient()
     {
         RequireDocker();
