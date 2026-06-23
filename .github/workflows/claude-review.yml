@@ -100,17 +100,20 @@ jobs:
             style, naming, nits, suggestions, "consider…", or speculative concerns still post as
             comments but do NOT block. If you are unsure, emit PASS. Never block on advisory nits.
 
-      # ★ LAYER 2 — findings gate. Parse the LAST `REVIEW_VERDICT:` line from the review's execution
-      # output: BLOCK => fail this step => the "Claude review" check fails => native auto-merge holds.
-      # PASS => succeed. FAIL-OPEN by design: if the review step didn't succeed, the output file is
-      # missing/unreadable, or no clear verdict is found, this SUCCEEDS with a warning and NEVER
-      # blocks (a flaky/errored review must not wedge the merge queue). The check-run name is the job
+      # ★ LAYER 2 — findings gate. Parse the LAST `REVIEW_VERDICT:` line from Claude's POSTED review
+      # (its tracking comment + formal review body — the action's execution_file output is empty in
+      # tag/track_progress mode, confirmed live). BLOCK => fail this step => the "Claude review" check
+      # fails => native auto-merge holds. PASS => succeed. FAIL-OPEN by design: review step didn't
+      # succeed, no claude comment/review yet, or no clear verdict => SUCCEED with a warning and NEVER
+      # block (a flaky/errored review must not wedge the merge queue). The check-run name is the job
       # name ("Claude review") — unchanged, so the Layer-1 required context still matches exactly.
       - name: Gate merge on review verdict
         if: always()
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
           REVIEW_OUTCOME: ${{ steps.review.outcome }}
-          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
         run: |
           set -uo pipefail
           # Fail-open: the review step itself errored/cancelled/skipped -> do not block.
@@ -118,14 +121,14 @@ jobs:
             echo "::warning::Claude review step outcome was '$REVIEW_OUTCOME' — failing open (not blocking merge)."
             exit 0
           fi
-          # Fail-open: no readable execution output -> do not block.
-          if [ -z "${EXEC_FILE:-}" ] || [ ! -f "$EXEC_FILE" ]; then
-            echo "::warning::No review execution output ('${EXEC_FILE:-}') — failing open (not blocking merge)."
-            exit 0
-          fi
-          # Last REVIEW_VERDICT wins (the final-message verdict; tolerates earlier mentions).
-          verdict=$(grep -oE 'REVIEW_VERDICT:[[:space:]]*(BLOCK|PASS)' "$EXEC_FILE" \
-                    | grep -oE '(BLOCK|PASS)' | tail -1 || true)
+          # Gather Claude's posted text: issue/tracking comments + formal review bodies (its login is
+          # claude / claude[bot]). The verdict is the last line of the final message it posted.
+          comments=$(gh pr view "$PR" --json comments \
+            -q '[.comments[] | select(.author.login | ascii_downcase | test("claude")) | .body] | join("\n")' 2>/dev/null || echo "")
+          reviews=$(gh api "repos/$GH_REPO/pulls/$PR/reviews" \
+            -q '[.[] | select(.user.login | ascii_downcase | test("claude")) | .body] | join("\n")' 2>/dev/null || echo "")
+          verdict=$(printf '%s\n%s\n' "$comments" "$reviews" \
+            | grep -oE 'REVIEW_VERDICT:[[:space:]]*(BLOCK|PASS)' | grep -oE '(BLOCK|PASS)' | tail -1 || true)
           case "$verdict" in
             BLOCK)
               echo "::error::Claude review verdict: BLOCK — a confident correctness/security/data-loss/breaking finding. Holding merge."
@@ -133,5 +136,5 @@ jobs:
             PASS)
               echo "Claude review verdict: PASS — no blocking findings." ;;
             *)
-              echo "::warning::No REVIEW_VERDICT (BLOCK|PASS) found in the review output — failing open (not blocking merge)." ;;
+              echo "::warning::No REVIEW_VERDICT (BLOCK|PASS) found in Claude's posted review — failing open (not blocking merge)." ;;
           esac
