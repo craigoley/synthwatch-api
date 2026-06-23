@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
@@ -56,7 +57,7 @@ public class ChannelsFunctions
         {
             await _db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException) // channels_name_key unique violation
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex)) // channels_name_key
         {
             return ApiResults.BadRequest($"a channel named '{channel.Name}' already exists.");
         }
@@ -87,7 +88,7 @@ public class ChannelsFunctions
         {
             await _db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex)) // channels_name_key
         {
             return ApiResults.BadRequest($"a channel named '{channel.Name}' already exists.");
         }
@@ -121,6 +122,11 @@ public class ChannelsFunctions
         await _db.SaveChangesAsync(ct);
         return new NoContentResult();
     }
+
+    // Only a unique-constraint violation (the channels_name_key) maps to "name already exists";
+    // any other DB error propagates (a real 500) rather than masquerading as a name collision.
+    private static bool IsUniqueViolation(DbUpdateException ex) =>
+        (ex.InnerException as PostgresException)?.SqlState == PostgresErrorCodes.UniqueViolation;
 
     private static async Task<(ChannelWriteRequest?, IActionResult?)> ReadBodyAsync(HttpRequest req, CancellationToken ct)
     {

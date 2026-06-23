@@ -60,7 +60,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Name).HasColumnName("name");
             e.Property(x => x.Type).HasColumnName("type");
             e.Property(x => x.Enabled).HasColumnName("enabled");
-            e.Property(x => x.CreatedAt).HasColumnName("created_at");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
             var (cfgConv, cfgCmp) = JsonbColumn<ChannelConfig>();
             e.Property(x => x.Config).HasColumnName("config").HasColumnType("jsonb")
                 .HasConversion(cfgConv, cfgCmp);
@@ -74,7 +74,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Severity).HasColumnName("severity");
             e.Property(x => x.CheckId).HasColumnName("check_id");
             e.Property(x => x.ChannelId).HasColumnName("channel_id");
-            e.Property(x => x.CreatedAt).HasColumnName("created_at");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
         });
 
         modelBuilder.Entity<Check>(e =>

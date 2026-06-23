@@ -707,6 +707,14 @@ public class IntegrationTests
                 Name = "ops-hook", Type = "webhook", Config = new ChannelConfig { Url = "https://hooks.x.com/y" } }), default));
             var hookId = Assert.IsType<ChannelDto>(wh.Value!).Id;
 
+            // created_at is DB-generated (ValueGeneratedOnAdd) — NOT the 0001-01-01 CLR default that an
+            // un-marked mapping would write over the DEFAULT now(). (Verified via the entity; not in the DTO.)
+            await using (var db2 = _pg.NewDbContext())
+            {
+                var createdAt = await db2.Channels.Where(c => c.Id == emailId).Select(c => c.CreatedAt).FirstAsync();
+                Assert.True(createdAt.Year >= 2024, $"created_at should be DB now(), was {createdAt:o}");
+            }
+
             // List includes both (config round-trips).
             var list = Assert.IsAssignableFrom<IEnumerable<ChannelDto>>(
                 Assert.IsType<OkObjectResult>(await ch.GetChannels(Request(), default)).Value!).ToList();
