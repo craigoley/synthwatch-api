@@ -30,6 +30,8 @@ public class SynthWatchDbContext : DbContext
     public DbSet<FlowManifest> FlowManifests => Set<FlowManifest>();
     public DbSet<Location> Locations => Set<Location>();
     public DbSet<CheckLocation> CheckLocations => Set<CheckLocation>();
+    public DbSet<Channel> Channels => Set<Channel>();
+    public DbSet<AlertRoute> AlertRoutes => Set<AlertRoute>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -48,6 +50,31 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.CheckId).HasColumnName("check_id");
             e.Property(x => x.Location).HasColumnName("location");
             e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
+        });
+
+        modelBuilder.Entity<Channel>(e =>
+        {
+            e.ToTable("channels");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Name).HasColumnName("name");
+            e.Property(x => x.Type).HasColumnName("type");
+            e.Property(x => x.Enabled).HasColumnName("enabled");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
+            var (cfgConv, cfgCmp) = JsonbColumn<ChannelConfig>();
+            e.Property(x => x.Config).HasColumnName("config").HasColumnType("jsonb")
+                .HasConversion(cfgConv, cfgCmp);
+        });
+
+        modelBuilder.Entity<AlertRoute>(e =>
+        {
+            e.ToTable("alert_routes");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Severity).HasColumnName("severity");
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.ChannelId).HasColumnName("channel_id");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
         });
 
         modelBuilder.Entity<Check>(e =>
