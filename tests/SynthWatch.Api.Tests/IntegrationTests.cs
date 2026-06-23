@@ -127,6 +127,35 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Incident_with_missing_check_still_appears_via_left_join()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // incidents.check_id has ON DELETE CASCADE, so an orphan can't arise normally — simulate the
+        // (defensive) orphan state via an FK-bypassed insert (session_replication_role=replica),
+        // then assert the LEFT JOIN still surfaces it with a null check name (INNER JOIN would drop it).
+        await db.Database.ExecuteSqlRawAsync(
+            "SET session_replication_role = replica; " +
+            "INSERT INTO incidents (check_id, status, severity, opened_at) " +
+            "VALUES (999999, 'open', 'critical', now()); " +
+            "SET session_replication_role = origin;");
+        try
+        {
+            var fn = new IncidentsFunctions(db);
+            var ok = Assert.IsType<OkObjectResult>(await fn.ListIncidents(Request(), default));
+            var incidents = Assert.IsAssignableFrom<IEnumerable<IncidentDto>>(ok.Value!).ToList();
+
+            var orphan = Assert.Single(incidents, i => i.CheckId == 999999);
+            Assert.Null(orphan.CheckName);  // LEFT JOIN -> null name, but the incident SURVIVES
+            Assert.Null(orphan.CheckKind);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM incidents WHERE check_id = 999999;");
+        }
+    }
+
+    [SkippableFact]
     public async Task Run_without_a_trace_returns_404()
     {
         RequireDocker();
