@@ -184,7 +184,11 @@ public class IntegrationTests
                         now() - interval '2 days' + interval '10 min', 2);
               INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures, rca)
                 VALUES (cid, 'resolved', 'critical', now() - interval '30 min', now() - interval '10 min', 3,
-                        '{"classification":"real-outage","confidence":"high","observed":["HTTP 503"],"inferred":["origin down"],"summary":"s"}'::jsonb);
+                        jsonb_build_object(
+                          'classification', 'real-outage', 'confidence', 'high',
+                          'observed', jsonb_build_array('HTTP 503'),
+                          'inferred', jsonb_build_array('origin down'),
+                          'summary', 's'));
               INSERT INTO incidents (check_id, status, severity, opened_at, consecutive_failures)
                 VALUES (cid, 'open', 'critical', now() - interval '5 min', 1);
               INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms) VALUES
