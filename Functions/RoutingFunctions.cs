@@ -55,6 +55,17 @@ public class RoutingFunctions
         }
         if (body is null) return ApiResults.BadRequest("Request body is required.");
 
+        // GUARD (defense-in-depth against contract drift): deserialization maps unrecognized keys to
+        // null, so BOTH null means the payload was empty ({}) or used the wrong keys (e.g. a stale
+        // {defaults, overrides} dashboard). Reject rather than wiping every route with a silent 200 —
+        // this PUT is replace-all, so an empty desired set would ExecuteDelete all rows. An INTENTIONAL
+        // clear must send the recognized keys explicitly: {"severity":{},"perCheck":{}} (present-but-empty
+        // -> non-null -> allowed below, clears all). A well-formed partial ({"severity":{...}}) is fine.
+        if (body.Severity is null && body.PerCheck is null)
+            return ApiResults.BadRequest(
+                "routing payload empty or unrecognized — expected { severity, perCheck }. " +
+                "To clear all routing, send an explicit { \"severity\": {}, \"perCheck\": {} }.");
+
         // Build the desired routes from the body + validate as we go.
         var desired = new List<AlertRoute>();
 
