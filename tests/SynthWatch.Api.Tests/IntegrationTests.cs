@@ -688,4 +688,101 @@ public class IntegrationTests
                 "DELETE FROM checks WHERE name = 'loc-ep-test'; DELETE FROM locations WHERE name IN ('eastus2','centralus','westus');");
         }
     }
+
+    [SkippableFact]
+    public async Task Channel_crud_and_config_validation()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var ch = new ChannelsFunctions(db);
+        try
+        {
+            // Create email (to[]+from) + webhook (url).
+            var em = Assert.IsType<ObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
+                Name = "ops-email", Type = "email",
+                Config = new ChannelConfig { To = new() { "ops@x.com" }, From = "alerts@x.com" } }), default));
+            Assert.Equal(201, em.StatusCode);
+            var emailId = Assert.IsType<ChannelDto>(em.Value!).Id;
+            var wh = Assert.IsType<ObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
+                Name = "ops-hook", Type = "webhook", Config = new ChannelConfig { Url = "https://hooks.x.com/y" } }), default));
+            var hookId = Assert.IsType<ChannelDto>(wh.Value!).Id;
+
+            // List includes both (config round-trips).
+            var list = Assert.IsAssignableFrom<IEnumerable<ChannelDto>>(
+                Assert.IsType<OkObjectResult>(await ch.GetChannels(Request(), default)).Value!).ToList();
+            Assert.Contains(list, c => c.Id == emailId && c.Config.To!.Contains("ops@x.com") && c.Config.From == "alerts@x.com");
+            Assert.Contains(list, c => c.Id == hookId && c.Config.Url == "https://hooks.x.com/y");
+
+            // Update: new recipients + disable.
+            var upd = Assert.IsType<ChannelDto>(Assert.IsType<OkObjectResult>(await ch.UpdateChannel(JsonRequest(new ChannelWriteRequest {
+                Name = "ops-email", Type = "email", Enabled = false,
+                Config = new ChannelConfig { To = new() { "a@x.com", "b@x.com" }, From = "alerts@x.com" } }), emailId, default)).Value!);
+            Assert.False(upd.Enabled);
+            Assert.Equal(2, upd.Config.To!.Count);
+
+            // Validation: email without to[] -> 400; webhook without url -> 400.
+            Assert.IsType<BadRequestObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
+                Name = "bad-email", Type = "email", Config = new ChannelConfig { From = "x@y.com" } }), default));
+            Assert.IsType<BadRequestObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
+                Name = "bad-hook", Type = "webhook", Config = new ChannelConfig() }), default));
+            // No-secret: an ACS connection string anywhere in config -> 400.
+            Assert.IsType<BadRequestObjectResult>(await ch.CreateChannel(JsonRequest(new ChannelWriteRequest {
+                Name = "bad-secret", Type = "webhook",
+                Config = new ChannelConfig { Url = "https://h", AuthHeader = "endpoint=https://x.communication.azure.com/;accesskey=Zm9vYmFy==" } }), default));
+
+            // Delete (not referenced) -> 204.
+            Assert.IsType<NoContentResult>(await ch.DeleteChannel(Request(), hookId, default));
+            Assert.IsType<NoContentResult>(await ch.DeleteChannel(Request(), emailId, default));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM channels WHERE name IN ('ops-email','ops-hook','bad-email','bad-hook','bad-secret');");
+        }
+    }
+
+    [SkippableFact]
+    public async Task Routing_get_set_validation_and_delete_guard()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var rt = new RoutingFunctions(db);
+        var ch = new ChannelsFunctions(db);
+        try
+        {
+            // GET assembles the seeded routing: critical+warning -> [1,2] (channels 1=email,2=webhook).
+            var got = Assert.IsType<RoutingDto>(Assert.IsType<OkObjectResult>(await rt.GetRouting(Request(), default)).Value!);
+            Assert.Equal(new long[] { 1, 2 }, got.Severity!["critical"].ChannelIds);
+            Assert.Equal(new long[] { 1, 2 }, got.Severity!["warning"].ChannelIds);
+
+            // PUT with an unknown channelId -> 400 (referential validation).
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                Severity = new() { ["critical"] = new ChannelIdsDto(new long[] { 999999 }) } }), default));
+            // PUT with an unknown severity -> 400.
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                Severity = new() { ["info"] = new ChannelIdsDto(new long[] { 1 }) } }), default));
+
+            // PUT a valid config (severity defaults + a per-check override) -> replaces, returns it.
+            var checkId = await db.Checks.Where(c => c.Name == "seed-http").Select(c => c.Id).FirstAsync();
+            var put = Assert.IsType<RoutingDto>(Assert.IsType<OkObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                Severity = new() { ["critical"] = new ChannelIdsDto(new long[] { 1 }), ["warning"] = new ChannelIdsDto(new long[] { 2 }) },
+                PerCheck = new() { [checkId.ToString(System.Globalization.CultureInfo.InvariantCulture)] = new ChannelIdsDto(new long[] { 1 }) } }), default)).Value!);
+            Assert.Equal(new long[] { 1 }, put.Severity!["critical"].ChannelIds);
+            Assert.Equal(new long[] { 2 }, put.Severity!["warning"].ChannelIds);
+            Assert.Equal(new long[] { 1 }, put.PerCheck![checkId.ToString(System.Globalization.CultureInfo.InvariantCulture)].ChannelIds);
+
+            // Delete-guard: channel 1 is now referenced (critical + the per-check override) -> 409 (DB FK
+            // is CASCADE, so the API enforces the block).
+            Assert.IsType<ConflictObjectResult>(await ch.DeleteChannel(Request(), 1, default));
+        }
+        finally
+        {
+            // Restore the seeded routing (PUT replaces ALL rows; keep the shared snapshot baseline intact).
+            await db.Database.ExecuteSqlRawAsync("""
+                DELETE FROM alert_routes;
+                INSERT INTO alert_routes (severity, channel_id)
+                  SELECT s, c.id FROM (VALUES ('critical'), ('warning')) v(s) CROSS JOIN channels c WHERE c.name IN ('email','webhook');
+                """);
+        }
+    }
 }

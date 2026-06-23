@@ -655,3 +655,36 @@ CREATE TABLE public.check_locations (
     CONSTRAINT check_locations_pkey PRIMARY KEY (check_id, location),
     CONSTRAINT check_locations_check_id_fkey FOREIGN KEY (check_id) REFERENCES public.checks(id) ON DELETE CASCADE
 );
+
+
+--
+-- Dashboard-managed alerting (runner migration 0023 / #81): delivery channels + routing. Added to the
+-- test snapshot to mirror the live schema (channel_id FK is ON DELETE CASCADE — the API enforces the
+-- delete-referenced-channel 409 guard in code, not the DB). Seeded like #81 (email/webhook + critical/
+-- warning routes) so tests exercise the assembled routing shape.
+--
+CREATE TABLE public.channels (
+    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name       text NOT NULL UNIQUE,
+    type       text NOT NULL,
+    config     jsonb NOT NULL DEFAULT '{}'::jsonb,
+    enabled    boolean NOT NULL DEFAULT true,
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT channels_type_check CHECK (type = ANY (ARRAY['email'::text, 'webhook'::text]))
+);
+
+CREATE TABLE public.alert_routes (
+    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    severity   text,
+    check_id   bigint REFERENCES public.checks(id) ON DELETE CASCADE,
+    channel_id bigint NOT NULL REFERENCES public.channels(id) ON DELETE CASCADE,
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT alert_route_one_dimension CHECK (severity IS NOT NULL AND check_id IS NULL OR severity IS NULL AND check_id IS NOT NULL),
+    CONSTRAINT alert_routes_severity_check CHECK (severity IS NULL OR (severity = ANY (ARRAY['critical'::text, 'warning'::text])))
+);
+CREATE UNIQUE INDEX alert_routes_check_uq ON public.alert_routes (check_id, channel_id) WHERE check_id IS NOT NULL;
+CREATE UNIQUE INDEX alert_routes_severity_uq ON public.alert_routes (severity, channel_id) WHERE check_id IS NULL;
+
+INSERT INTO public.channels (name, type) VALUES ('email', 'email'), ('webhook', 'webhook');
+INSERT INTO public.alert_routes (severity, channel_id)
+  SELECT s, c.id FROM (VALUES ('critical'), ('warning')) v(s) CROSS JOIN public.channels c;
