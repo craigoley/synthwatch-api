@@ -15,7 +15,7 @@ public class SlaFunctions
     public SlaFunctions(SynthWatchDbContext db) => _db = db;
 
     /// <summary>
-    /// GET /api/sla?window=24h|7d|30d — per-check availability from the runner-owned SLA views,
+    /// GET /api/sla?window=24h|7d|30d|90d — per-check availability from the runner-owned SLA views,
     /// plus a run-weighted fleet rollup. Per-check and fleet carry an <c>insufficientData</c> flag
     /// (with a null percentage) when the window lacks enough data to report a trustworthy number.
     /// </summary>
@@ -32,11 +32,12 @@ public class SlaFunctions
             "" or "24h" => "SELECT * FROM sla_availability_24h",
             "7d" => "SELECT * FROM sla_availability_7d",
             "30d" => "SELECT * FROM sla_availability_30d",
+            "90d" => "SELECT * FROM sla_availability_90d",
             _ => null
         };
 
         if (sql is null)
-            return ApiResults.BadRequest("window must be one of: 24h, 7d, 30d.");
+            return ApiResults.BadRequest("window must be one of: 24h, 7d, 30d, 90d.");
 
         var rows = await _db.SlaAvailability.FromSqlRaw(sql).AsNoTracking().ToListAsync(ct);
 

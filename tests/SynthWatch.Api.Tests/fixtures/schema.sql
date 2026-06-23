@@ -617,3 +617,17 @@ AS $function$
     FROM agg
 $function$
 ;
+
+-- sla_availability_90d view (migration 0018). Added to the test snapshot (predates 0018);
+-- identical to _30d with a 90-day interval.
+CREATE VIEW public.sla_availability_90d AS
+ SELECT check_id,
+    check_name,
+    kind,
+    window_from,
+    window_to,
+    completed_runs,
+    up_runs,
+    down_runs,
+    availability_pct
+   FROM public.sla_availability((now() - '90 days'::interval), now()) sla_availability(check_id, check_name, kind, window_from, window_to, completed_runs, up_runs, down_runs, availability_pct);
