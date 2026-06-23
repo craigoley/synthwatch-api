@@ -461,6 +461,57 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Incident_detail_perlocation_is_window_scoped_and_null_safe()
+    {
+        // #46: a RESOLVED incident's perLocation must reflect the status DURING its window
+        // [opened_at, resolved_at], not the present. #39: a null-location run coalesces to "default",
+        // not its own bogus group. Seed: a resolved incident whose window has eastus=fail / westus=fail
+        // / (null-location)=fail, then an AFTER-window eastus=pass (recovery) that must NOT leak in.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url)
+                VALUES ('perloc-test', 'http', 'https://p.example') RETURNING id INTO cid;
+              INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures)
+                VALUES (cid, 'resolved', 'critical', now() - interval '1 day',
+                        now() - interval '1 day' + interval '30 min', 0);
+              -- IN-WINDOW runs (one per location; one with an explicit NULL location)
+              INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms, location) VALUES
+                (cid, 'fail', now() - interval '1 day' + interval '10 min', now() - interval '1 day' + interval '10 min', 50, 'eastus'),
+                (cid, 'fail', now() - interval '1 day' + interval '12 min', now() - interval '1 day' + interval '12 min', 50, 'westus'),
+                (cid, 'fail', now() - interval '1 day' + interval '14 min', now() - interval '1 day' + interval '14 min', 50, NULL);
+              -- AFTER the window: eastus recovered. This is the CURRENT status; it must NOT appear.
+              INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms, location)
+                VALUES (cid, 'pass', now() - interval '1 hour', now() - interval '1 hour', 50, 'eastus');
+            END $$;
+            """);
+        try
+        {
+            var checkId = await db.Checks.Where(c => c.Name == "perloc-test").Select(c => c.Id).FirstAsync();
+            var incId = await db.Incidents.Where(i => i.CheckId == checkId).Select(i => i.Id).FirstAsync();
+
+            var fn = new IncidentsFunctions(db);
+            var ok = Assert.IsType<OkObjectResult>(await fn.GetIncident(Request(), incId, default));
+            var d = Assert.IsType<IncidentDetailDto>(ok.Value!);
+
+            // Three locations, ordinal-sorted, all null-safe ("default" not null/empty).
+            Assert.Equal(new[] { "default", "eastus", "westus" }, d.PerLocation.Select(p => p.Location));
+            Assert.All(d.PerLocation, p => Assert.False(string.IsNullOrEmpty(p.Location)));
+            // eastus reflects the IN-WINDOW status (fail), NOT the post-window recovery (pass).
+            Assert.Equal("fail", d.PerLocation.Single(p => p.Location == "eastus").Status);
+            // The null-location run surfaced as "default".
+            Assert.Equal("fail", d.PerLocation.Single(p => p.Location == "default").Status);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'perloc-test';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Run_without_a_trace_returns_404()
     {
         RequireDocker();

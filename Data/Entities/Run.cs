@@ -35,9 +35,11 @@ public class Run
     // SSL checks: measured cert days-remaining at run time. Nullable (null for non-ssl runs).
     public int? CertDaysRemaining { get; set; }
 
-    // Multi-location: the region this run executed from (runner multi-location migration). NOT NULL
-    // in the DB, default 'default' for legacy/single-location rows — so this is never null.
-    public string Location { get; set; } = "default";
+    // Multi-location: the region this run executed from (runner multi-location migration). text with
+    // DEFAULT 'default' but NULLABLE in the live schema — an explicit NULL is allowed, so the CLR
+    // property must be nullable or EF throws InvalidCastException materializing a null row. Every
+    // consumer coalesces null/empty -> "default" (RunDto/TimelineEntryDto + the per-location rollups).
+    public string? Location { get; set; }
 
     // Navigation (read-mostly).
     public Check? Check { get; set; }

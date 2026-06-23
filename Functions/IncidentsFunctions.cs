@@ -103,14 +103,17 @@ public class IncidentsFunctions
             .Select(TimelineEntryDto.From)
             .ToList();
 
-        // Per-location current status of the check (latest run per location).
-        var perLocation = (await _db.Runs.AsNoTracking()
-            .Where(r => r.CheckId == inc.CheckId)
-            .GroupBy(r => r.Location)
-            .Select(g => g.OrderByDescending(r => r.StartedAt).First())
-            .ToListAsync(ct))
-            .OrderBy(r => r.Location, StringComparer.Ordinal)
-            .Select(r => new LocationStatusDto(r.Location, r.Status))
+        // Per-location status DURING the incident window [opened_at, to] — the latest IN-WINDOW run per
+        // location, derived from `core` (the same window the timeline uses). For a RESOLVED incident
+        // this is the per-location state as of the incident (not now); for an OPEN incident `to` = now()
+        // so it tracks the live state. (Previously this used the latest run per location across ALL time,
+        // so a resolved incident's panel showed the present, not the incident.) Coalesce a null/empty
+        // location to "default" (the runs.location DEFAULT) — matching RunDto/TimelineEntryDto — so a
+        // null never becomes its own bogus group. Reuses `core`, so no extra query.
+        var perLocation = core
+            .GroupBy(r => string.IsNullOrEmpty(r.Location) ? "default" : r.Location)
+            .Select(g => new LocationStatusDto(g.Key, g.OrderByDescending(r => r.StartedAt).First().Status))
+            .OrderBy(d => d.Location, StringComparer.Ordinal)
             .ToList();
 
         // Recurrence: recent incidents on the same check, newest first, excluding this one.
