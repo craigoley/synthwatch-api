@@ -24,6 +24,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<RunMetric> RunMetrics => Set<RunMetric>();
     public DbSet<Incident> Incidents => Set<Incident>();
     public DbSet<SlaAvailabilityRow> SlaAvailability => Set<SlaAvailabilityRow>();
+    public DbSet<SloStatusRow> SloStatus => Set<SloStatusRow>();
     public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
     public DbSet<FlowManifest> FlowManifests => Set<FlowManifest>();
 
@@ -171,6 +172,24 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.UpRuns).HasColumnName("up_runs");
             e.Property(x => x.DownRuns).HasColumnName("down_runs");
             e.Property(x => x.AvailabilityPct).HasColumnName("availability_pct");
+        });
+
+        // Keyless: read from the slo_status(check_id, from, to) function via raw SQL only.
+        modelBuilder.Entity<SloStatusRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.SloTarget).HasColumnName("slo_target");
+            e.Property(x => x.WindowFrom).HasColumnName("window_from");
+            e.Property(x => x.WindowTo).HasColumnName("window_to");
+            e.Property(x => x.TotalRuns).HasColumnName("total_runs");
+            e.Property(x => x.DownRuns).HasColumnName("down_runs");
+            e.Property(x => x.Budget).HasColumnName("budget");
+            e.Property(x => x.Consumed).HasColumnName("consumed");
+            e.Property(x => x.Remaining).HasColumnName("remaining");
+            e.Property(x => x.RemainingPct).HasColumnName("remaining_pct");
+            e.Property(x => x.BurnRate).HasColumnName("burn_rate");
         });
 
         modelBuilder.Entity<FlowManifest>(e =>

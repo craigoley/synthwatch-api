@@ -78,6 +78,51 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Check_detail_serves_slo_when_target_set_and_null_otherwise()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // Self-contained: a check WITH slo_target=0.99 + 100 runs over ~4 days, 5 of them fail
+        // (budget = 100 * 0.01 = 1; consumed = 5 => over budget, burn > 0). started_at is
+        // ValueGeneratedOnAdd, so seed via raw SQL.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, slo_target)
+                VALUES ('slo-test', 'http', 'https://s.example', 0.99) RETURNING id INTO cid;
+              FOR i IN 1..100 LOOP
+                INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms)
+                  VALUES (cid, CASE WHEN i <= 5 THEN 'fail' ELSE 'pass' END,
+                          now() - (i || ' hours')::interval, now(), 40);
+              END LOOP;
+            END $$;
+            """);
+        try
+        {
+            var fn = new ChecksFunctions(db);
+            var sloId = await db.Checks.Where(c => c.Name == "slo-test").Select(c => c.Id).FirstAsync();
+
+            var ok = Assert.IsType<OkObjectResult>(await fn.GetCheck(Request(), sloId, default));
+            var d = Assert.IsType<CheckDetailDto>(ok.Value!);
+            Assert.NotNull(d.Slo);
+            Assert.Equal(0.99, (double)d.Slo!.Target, 2);
+            Assert.True(d.Slo.Budget > 0);     // 100 * (1 - 0.99) = 1
+            Assert.Equal(5, d.Slo.Consumed);   // 5 fail runs in the 30d window
+            Assert.True(d.Slo.BurnRate > 0);   // consumed > budget -> burning
+
+            // A check with NO slo_target -> slo is null (opt-in; not fabricated).
+            var seedId = await db.Checks.Where(c => c.Name == "seed-http").Select(c => c.Id).FirstAsync();
+            var ok2 = Assert.IsType<OkObjectResult>(await fn.GetCheck(Request(), seedId, default));
+            Assert.Null(Assert.IsType<CheckDetailDto>(ok2.Value!).Slo);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'slo-test';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Sla_24h_window_is_sufficient_30d_is_insufficient()
     {
         RequireDocker();

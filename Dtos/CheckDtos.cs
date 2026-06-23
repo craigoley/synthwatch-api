@@ -142,11 +142,13 @@ public record CheckDetailDto(
     IReadOnlyDictionary<string, string>? Auth,
     NetConfig? NetConfig,
     IReadOnlyList<ChainStep>? Steps,
+    // SLO error-budget + burn rate (migration 0016). Null when the check has no slo_target (opt-in).
+    SloDto? Slo,
     string CurrentStatus,
     string CurrentHealth,
     IReadOnlyList<RunDto> RecentRuns)
 {
-    public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns) => new(
+    public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, SloDto? slo = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.BodyMustContain, c.IntervalSeconds, c.LastRunAt, c.TimeoutMs, c.FailureThreshold,
         c.Severity, c.Enabled, c.CreatedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
@@ -157,11 +159,27 @@ public record CheckDetailDto(
         Auth: c.Auth,
         NetConfig: c.NetConfig,
         Steps: c.Steps,
+        Slo: slo,
         CurrentStatus: !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
         CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
         RecentRuns: recentRuns.Select(RunDto.From).ToList());
 }
+
+/// <summary>
+/// SLO error-budget + burn rate for a check (from slo_status, migration 0016). target/budget/
+/// consumed/remaining/burnRate are over the 30-day SLO window. fastBurn/slowBurn are the canonical
+/// Google-SRE multi-window burn alerts: fastBurn = 1h burn rate &gt;= 14.4 (page-now), slowBurn = 6h
+/// burn rate &gt;= 6 (sustained). Null whole object when the check has no slo_target (opt-in).
+/// </summary>
+public record SloDto(
+    float Target,
+    decimal Budget,
+    long Consumed,
+    decimal Remaining,
+    decimal BurnRate,
+    bool FastBurn,
+    bool SlowBurn);
 
 /// <summary>Body for POST /api/checks. Id, created_at, last_run_at are server/runner owned.</summary>
 public class CreateCheckRequest

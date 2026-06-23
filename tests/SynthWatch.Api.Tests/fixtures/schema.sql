@@ -111,6 +111,7 @@ CREATE TABLE public.checks (
     last_warn_notified_at timestamp with time zone,
     warn_renotify_seconds integer DEFAULT 86400 NOT NULL,
     assertions jsonb DEFAULT '[]'::jsonb NOT NULL,
+    slo_target real,
     request_headers jsonb,
     request_body text,
     auth jsonb,
@@ -568,3 +569,51 @@ ALTER TABLE ONLY public.runs
 --
 
 
+
+-- SLO error-budget/burn (migration 0016). Added to the test snapshot (predates 0016).
+CREATE OR REPLACE FUNCTION public.slo_status(p_check_id bigint, p_from timestamp with time zone, p_to timestamp with time zone)
+ RETURNS TABLE(check_id bigint, slo_target real, window_from timestamp with time zone, window_to timestamp with time zone, total_runs bigint, down_runs bigint, budget numeric, consumed bigint, remaining numeric, remaining_pct numeric, burn_rate numeric)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH agg AS (
+        SELECT
+            c.id         AS check_id,
+            c.slo_target AS slo_target,
+            count(*) FILTER (WHERE r.status IN ('pass', 'warn', 'fail', 'error')) AS total_runs,
+            count(*) FILTER (WHERE r.status IN ('fail', 'error'))                 AS down_runs
+        FROM checks c
+        LEFT JOIN runs r
+               ON r.check_id   = c.id
+              AND r.started_at >= p_from
+              AND r.started_at <  p_to
+        -- Maintenance-window anti-join (mirrors sla_availability): drop runs inside
+        -- an active window for this check OR a fleet-wide window.
+        LEFT JOIN maintenance_windows mw
+               ON (mw.check_id = c.id OR mw.check_id IS NULL)
+              AND r.started_at >= mw.starts_at
+              AND r.started_at <  mw.ends_at
+        WHERE c.id = p_check_id
+          AND c.slo_target IS NOT NULL   -- opt-in: no target => no rows
+          AND mw.id IS NULL
+        GROUP BY c.id, c.slo_target
+    )
+    SELECT
+        check_id,
+        slo_target,
+        p_from AS window_from,
+        p_to   AS window_to,
+        total_runs,
+        down_runs,
+        (1::numeric - slo_target::numeric) * total_runs                         AS budget,
+        down_runs                                                      AS consumed,
+        (1::numeric - slo_target::numeric) * total_runs - down_runs             AS remaining,
+        CASE WHEN (1::numeric - slo_target::numeric) * total_runs > 0
+             THEN round(1 - down_runs::numeric / ((1::numeric - slo_target::numeric) * total_runs), 6)
+             END                                                       AS remaining_pct,
+        CASE WHEN total_runs > 0
+             THEN round((down_runs::numeric / total_runs) / (1::numeric - slo_target::numeric), 4)
+             ELSE 0 END                                                AS burn_rate
+    FROM agg
+$function$
+;
