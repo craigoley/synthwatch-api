@@ -129,14 +129,21 @@ public class ChecksFunctions
             .Take(20)
             .ToListAsync(ct);
 
-        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await BuildSloAsync(id, ct)));
+        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await BuildSloAsync(id, check.SloTarget, ct)));
     }
 
     // SLO error-budget + burn. Mirrors the SLA function-read pattern (keyless entity + raw SQL),
     // calling slo_status per window: 30d for budget/burn, 1h + 6h for the multi-window burn alerts.
-    // Returns null when the check has no slo_target (slo_status returns no rows — opt-in; not fabricated).
-    private async Task<SloDto?> BuildSloAsync(long checkId, CancellationToken ct)
+    // Guard: compute ONLY when slo_target is a meaningful fraction in (0,1). null => no SLO (opt-in).
+    // target = 1.0 would make slo_status divide by (1 - target) = 0 -> the function errors -> GetCheck
+    // 500s; target outside (0,1) is nonsensical. The guard also skips the 3 slo_status round-trips for
+    // the common no-SLO check. (The runner-owned slo_status SHOULD also guard slo_target < 1 / constrain
+    // the column — this is the API-side defense so a check config can never 500 the detail endpoint.)
+    private async Task<SloDto?> BuildSloAsync(long checkId, float? sloTarget, CancellationToken ct)
     {
+        if (sloTarget is not (> 0f and < 1f))
+            return null;
+
         var to = DateTimeOffset.UtcNow;
         var primary = await SloAtAsync(checkId, to - TimeSpan.FromDays(30), to, ct);
         if (primary is null)
@@ -226,7 +233,7 @@ public class ChecksFunctions
             .Take(20)
             .ToListAsync(ct);
 
-        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await BuildSloAsync(id, ct)));
+        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await BuildSloAsync(id, check.SloTarget, ct)));
     }
 
     /// <summary>DELETE /api/checks/{id} — soft delete (enabled=false) by default; ?hard=true removes the row.</summary>
