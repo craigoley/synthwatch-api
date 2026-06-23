@@ -6,6 +6,7 @@ namespace SynthWatch.Api.Data.Entities;
 /// maintenance-window exclusion, so the series reconciles with the SLA panel's headline %).
 /// AvailabilityPct is NULL for a bucket with no completed runs (a gap, not 0%).
 /// </summary>
+// (verdict-gate live-proof: harmless clarifying comment — safe to remove)
 public class AvailabilitySeriesPointRow
 {
     public DateTimeOffset Ts { get; set; }
