@@ -23,6 +23,7 @@ jobs:
           fetch-depth: 0
 
       - name: Claude review
+        id: review
         uses: anthropics/claude-code-action@2fee15510437d71399d9139ed60433470484a8fb # v1
         env:
           # Authenticate the `gh` CLI used by the Bash tool (gh pr merge/comment).
@@ -86,6 +87,51 @@ jobs:
               - Post actionable findings as inline comments. If the PR author asks you to,
                 you may commit fixes to the PR branch (verify with
                 `dotnet build -c Release -warnaserror`).
-              - Do NOT merge. Merging is handled deterministically by the separate Auto-merge
-                workflow, which is gated to trusted authors and uses GitHub native auto-merge
-                (it waits for the required checks). Your review here is advisory.
+              - Do NOT merge. Merging is deterministic (the separate Auto-merge workflow, gated to
+                trusted authors via GitHub native auto-merge). You do NOT run `gh pr merge`.
+
+            ★ VERDICT — the LAST line of your final message MUST be EXACTLY ONE of these, with
+            nothing after it:
+              REVIEW_VERDICT: BLOCK
+              REVIEW_VERDICT: PASS
+            This single line gates the merge (the "Claude review" check fails on BLOCK, holding the
+            merge; passes on PASS). Be CONSERVATIVE — emit BLOCK ONLY for a real, confident
+            correctness bug, security issue, data loss, or breaking change. EVERYTHING else is PASS:
+            style, naming, nits, suggestions, "consider…", or speculative concerns still post as
+            comments but do NOT block. If you are unsure, emit PASS. Never block on advisory nits.
+
+      # ★ LAYER 2 — findings gate. Parse the LAST `REVIEW_VERDICT:` line from the review's execution
+      # output: BLOCK => fail this step => the "Claude review" check fails => native auto-merge holds.
+      # PASS => succeed. FAIL-OPEN by design: if the review step didn't succeed, the output file is
+      # missing/unreadable, or no clear verdict is found, this SUCCEEDS with a warning and NEVER
+      # blocks (a flaky/errored review must not wedge the merge queue). The check-run name is the job
+      # name ("Claude review") — unchanged, so the Layer-1 required context still matches exactly.
+      - name: Gate merge on review verdict
+        if: always()
+        env:
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+        run: |
+          set -uo pipefail
+          # Fail-open: the review step itself errored/cancelled/skipped -> do not block.
+          if [ "$REVIEW_OUTCOME" != "success" ]; then
+            echo "::warning::Claude review step outcome was '$REVIEW_OUTCOME' — failing open (not blocking merge)."
+            exit 0
+          fi
+          # Fail-open: no readable execution output -> do not block.
+          if [ -z "${EXEC_FILE:-}" ] || [ ! -f "$EXEC_FILE" ]; then
+            echo "::warning::No review execution output ('${EXEC_FILE:-}') — failing open (not blocking merge)."
+            exit 0
+          fi
+          # Last REVIEW_VERDICT wins (the final-message verdict; tolerates earlier mentions).
+          verdict=$(grep -oE 'REVIEW_VERDICT:[[:space:]]*(BLOCK|PASS)' "$EXEC_FILE" \
+                    | grep -oE '(BLOCK|PASS)' | tail -1 || true)
+          case "$verdict" in
+            BLOCK)
+              echo "::error::Claude review verdict: BLOCK — a confident correctness/security/data-loss/breaking finding. Holding merge."
+              exit 1 ;;
+            PASS)
+              echo "Claude review verdict: PASS — no blocking findings." ;;
+            *)
+              echo "::warning::No REVIEW_VERDICT (BLOCK|PASS) found in the review output — failing open (not blocking merge)." ;;
+          esac
