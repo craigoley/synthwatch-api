@@ -145,6 +145,16 @@ public class IntegrationTests
         Assert.True(item30.InsufficientData);
         Assert.Null(item30.AvailabilityPct);      // misleading precise % suppressed
         Assert.True(item30.CompletedRuns > 0);    // raw counts still present
+
+        // 90d: the window is served (sla_availability_90d); the ~10-day-old check is even thinner
+        // coverage -> insufficient ("building baseline"), raw counts still present.
+        var ok90 = Assert.IsType<OkObjectResult>(await fn.GetSla(Request("?window=90d"), default));
+        var r90 = Assert.IsType<SlaResponseDto>(ok90.Value!);
+        Assert.Equal("90d", r90.Window);
+        var item90 = Assert.Single(r90.Items, i => i.CheckName == "seed-http");
+        Assert.True(item90.InsufficientData);
+        Assert.Null(item90.AvailabilityPct);
+        Assert.True(item90.CompletedRuns > 0);
     }
 
     [SkippableFact]
