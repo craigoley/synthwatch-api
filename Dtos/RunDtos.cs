@@ -85,13 +85,14 @@ public record IncidentDto(
     long? ResolvedRunId,
     int ConsecutiveFailures,
     string? Summary,
-    // Dashboard-parity: the incident's check name/kind (join to checks).
-    string CheckName,
-    string CheckKind,
+    // Dashboard-parity: the incident's check name/kind (LEFT JOIN to checks). Null when the check
+    // is missing — an incident must surface regardless, never join-dropped by its check.
+    string? CheckName,
+    string? CheckKind,
     // AI root-cause analysis (incidents.rca); null when RCA is off/failed/pre-existing.
     IncidentRca? Rca)
 {
-    public static IncidentDto From(Incident i, string checkName, string checkKind) => new(
+    public static IncidentDto From(Incident i, string? checkName, string? checkKind) => new(
         i.Id, i.CheckId, i.Status, i.Severity, i.OpenedAt, i.ResolvedAt,
         i.OpenedRunId, i.ResolvedRunId, i.ConsecutiveFailures, i.Summary,
         checkName, checkKind, i.Rca);

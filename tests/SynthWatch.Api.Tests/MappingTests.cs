@@ -121,4 +121,15 @@ public class MappingTests
         Assert.False(rca.Cached);
         Assert.Equal("2026-06-22T12:00:00Z", rca.GeneratedAt); // snake_case key mapped correctly
     }
+
+    [Fact]
+    public void IncidentDto_tolerates_null_check_name() // LEFT JOIN: missing check -> null, not dropped
+    {
+        var inc = new Incident { Id = 18, CheckId = 58, Status = "open", Severity = "critical" };
+        var dto = IncidentDto.From(inc, null, null);
+        Assert.Equal(18, dto.Id);
+        Assert.Equal(58, dto.CheckId);
+        Assert.Null(dto.CheckName);
+        Assert.Null(dto.CheckKind);
+    }
 }
