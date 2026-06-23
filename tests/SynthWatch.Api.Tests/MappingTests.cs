@@ -132,4 +132,24 @@ public class MappingTests
         Assert.Null(dto.CheckName);
         Assert.Null(dto.CheckKind);
     }
+
+    [Fact]
+    public void TimelineEntry_uses_proxy_paths_and_default_location()
+    {
+        var withArtifacts = TimelineEntryDto.From(new Run
+        {
+            Id = 5, CheckId = 1, Status = "fail",
+            ScreenshotUrl = "https://acct.blob.core.windows.net/c/run-5.png",
+            TraceUrl = "https://acct.blob.core.windows.net/c/run-5.zip"
+        });
+        Assert.Equal(5, withArtifacts.RunId);
+        Assert.Equal("/api/runs/5/screenshot", withArtifacts.ScreenshotUrl); // proxy path, not blob URL
+        Assert.Equal("/api/runs/5/trace", withArtifacts.TraceUrl);
+        Assert.Equal("default", withArtifacts.Location);                     // empty -> default
+
+        var bare = TimelineEntryDto.From(new Run { Id = 6, CheckId = 1, Status = "pass", Location = "westus" });
+        Assert.Null(bare.ScreenshotUrl);
+        Assert.Null(bare.TraceUrl);
+        Assert.Equal("westus", bare.Location);
+    }
 }
