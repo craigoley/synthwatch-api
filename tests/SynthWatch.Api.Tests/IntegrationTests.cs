@@ -793,4 +793,48 @@ public class IntegrationTests
                 """);
         }
     }
+
+    [SkippableFact]
+    public async Task Routing_put_rejects_unrecognized_payload_without_wiping_routes()
+    {
+        // Defense-in-depth: a wrong-key payload (the dashboard contract-drift {defaults,overrides}) or an
+        // empty {} must 400 and leave existing routes UNTOUCHED — never silently delete-all + return 200.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var rt = new RoutingFunctions(db);
+        async Task<int> RouteCount()
+        {
+            await using var c = _pg.NewDbContext();
+            return await c.AlertRoutes.CountAsync();
+        }
+        try
+        {
+            // Establish a known state: critical -> channel 1.
+            Assert.IsType<OkObjectResult>(await rt.SetRouting(
+                JsonRequest(new RoutingDto { Severity = new() { ["critical"] = new ChannelIdsDto(new long[] { 1 }) } }), default));
+            Assert.Equal(1, await RouteCount());
+
+            // Wrong keys ({defaults,overrides}, the stale dashboard) -> 400, routes UNTOUCHED (not wiped).
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(
+                JsonRequest(new { defaults = new { critical = new { channelIds = new[] { 1 } } }, overrides = new { } }), default));
+            Assert.Equal(1, await RouteCount());
+
+            // Empty object {} -> 400, still untouched.
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(JsonRequest(new { }), default));
+            Assert.Equal(1, await RouteCount());
+
+            // Explicit well-formed clear {severity:{},perCheck:{}} -> 200, routes cleared.
+            Assert.IsType<OkObjectResult>(await rt.SetRouting(
+                JsonRequest(new RoutingDto { Severity = new(), PerCheck = new() }), default));
+            Assert.Equal(0, await RouteCount());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                DELETE FROM alert_routes;
+                INSERT INTO alert_routes (severity, channel_id)
+                  SELECT s, c.id FROM (VALUES ('critical'), ('warning')) v(s) CROSS JOIN channels c WHERE c.name IN ('email','webhook');
+                """);
+        }
+    }
 }
