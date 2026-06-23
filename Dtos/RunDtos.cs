@@ -98,6 +98,58 @@ public record IncidentDto(
         checkName, checkKind, i.Rca);
 }
 
+/// <summary>One run in an incident's timeline (GET /api/incidents/{id}). Artifact URLs are the API
+/// proxy paths (null when absent) — same as RunDto, not the raw blob URLs.</summary>
+public record TimelineEntryDto(
+    long RunId,
+    string Status,
+    DateTimeOffset StartedAt,
+    int? DurationMs,
+    int? HttpStatus,
+    string? ErrorMessage,
+    string? FailedStep,
+    string? ScreenshotUrl,
+    string? TraceUrl,
+    string Location)
+{
+    public static TimelineEntryDto From(Run r) => new(
+        r.Id, r.Status, r.StartedAt, r.DurationMs, r.HttpStatus, r.ErrorMessage, r.FailedStep,
+        ScreenshotUrl: string.IsNullOrEmpty(r.ScreenshotUrl) ? null : $"/api/runs/{r.Id}/screenshot",
+        TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace",
+        Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location);
+}
+
+/// <summary>A prior incident on the same check (recurrence history; excludes the current one).</summary>
+public record RecurrenceDto(
+    long Id,
+    DateTimeOffset OpenedAt,
+    DateTimeOffset? ResolvedAt,
+    string Status,
+    string? Summary);
+
+/// <summary>
+/// GET /api/incidents/{id} — one incident enriched for the investigation detail page: the incident
+/// itself, its per-location current status, the timeline of runs in its window, and recurrence
+/// history on the same check.
+/// </summary>
+public record IncidentDetailDto(
+    long Id,
+    long CheckId,
+    string? CheckName,
+    string? CheckKind,
+    string Status,
+    string Severity,
+    DateTimeOffset OpenedAt,
+    DateTimeOffset? ResolvedAt,
+    // Open -> now; resolved -> resolved_at - opened_at, in seconds. Null while the incident is open.
+    double? DurationSeconds,
+    int ConsecutiveFailures,
+    string? Summary,
+    IncidentRca? Rca,
+    IReadOnlyList<LocationStatusDto> PerLocation,
+    IReadOnlyList<TimelineEntryDto> Timeline,
+    IReadOnlyList<RecurrenceDto> Recurrence);
+
 public record SlaDto(
     long CheckId,
     string CheckName,

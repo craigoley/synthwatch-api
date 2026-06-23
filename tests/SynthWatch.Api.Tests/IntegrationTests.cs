@@ -211,6 +211,91 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Incident_detail_unknown_id_returns_404()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new IncidentsFunctions(db);
+        var result = await fn.GetIncident(Request(), 999999, default);
+        Assert.IsType<NotFoundObjectResult>(result);
+    }
+
+    [SkippableFact]
+    public async Task Incident_detail_returns_timeline_recurrence_rca_and_open_case()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // Self-contained fixture: opened_at/started_at are ValueGeneratedOnAdd, so set them via raw
+        // SQL. One check; an older resolved incident (recurrence), a current resolved incident WITH
+        // rca, and an open incident; runs in/around the current window + the open window.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url)
+                VALUES ('detail-test', 'http', 'https://d.example') RETURNING id INTO cid;
+              INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures)
+                VALUES (cid, 'resolved', 'critical', now() - interval '2 days',
+                        now() - interval '2 days' + interval '10 min', 2);
+              INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures, rca)
+                VALUES (cid, 'resolved', 'critical', now() - interval '30 min', now() - interval '10 min', 3,
+                        jsonb_build_object(
+                          'classification', 'real-outage', 'confidence', 'high',
+                          'observed', jsonb_build_array('HTTP 503'),
+                          'inferred', jsonb_build_array('origin down'),
+                          'summary', 's'));
+              INSERT INTO incidents (check_id, status, severity, opened_at, consecutive_failures)
+                VALUES (cid, 'open', 'critical', now() - interval '5 min', 1);
+              INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms) VALUES
+                (cid, 'fail', now() - interval '25 min', now() - interval '25 min', 50),   -- current window
+                (cid, 'fail', now() - interval '15 min', now() - interval '15 min', 60),   -- current window
+                (cid, 'fail', now() - interval '31 min', now() - interval '31 min', 40),   -- lead (just before opened)
+                (cid, 'fail', now() - interval '2 min',  now() - interval '2 min',  70);   -- open window
+            END $$;
+            """);
+        try
+        {
+            var checkId = await db.Checks.Where(c => c.Name == "detail-test").Select(c => c.Id).FirstAsync();
+            var incs = await db.Incidents.Where(i => i.CheckId == checkId)
+                .OrderByDescending(i => i.OpenedAt).Select(i => i.Id).ToListAsync();
+            var openId = incs[0];     // opened 5 min ago (newest)
+            var currentId = incs[1];  // opened 30 min ago (resolved, has rca)
+            var olderId = incs[2];    // opened 2 days ago
+
+            var fn = new IncidentsFunctions(db);
+
+            // --- current resolved incident: timeline + recurrence + rca + duration ---
+            var ok = Assert.IsType<OkObjectResult>(await fn.GetIncident(Request(), currentId, default));
+            var d = Assert.IsType<IncidentDetailDto>(ok.Value!);
+            Assert.Equal("detail-test", d.CheckName);
+            Assert.Equal("http", d.CheckKind);
+            Assert.NotNull(d.Rca);
+            Assert.Equal("real-outage", d.Rca!.Classification);
+            Assert.Equal("high", d.Rca.Confidence);
+            Assert.NotNull(d.DurationSeconds);                 // resolved -> non-null (~1200s)
+            Assert.True(d.DurationSeconds > 0);
+            // 2 in-window runs + 1 lead run, ASC by startedAt
+            Assert.Equal(3, d.Timeline.Count);
+            Assert.True(d.Timeline.SequenceEqual(d.Timeline.OrderBy(t => t.StartedAt)));
+            // recurrence: the older incident, excluding self
+            Assert.Contains(d.Recurrence, r => r.Id == olderId);
+            Assert.DoesNotContain(d.Recurrence, r => r.Id == currentId);
+
+            // --- open incident: durationSeconds null, resolvedAt null, window runs through now() ---
+            var okOpen = Assert.IsType<OkObjectResult>(await fn.GetIncident(Request(), openId, default));
+            var open = Assert.IsType<IncidentDetailDto>(okOpen.Value!);
+            Assert.Null(open.ResolvedAt);
+            Assert.Null(open.DurationSeconds);
+            Assert.Contains(open.Timeline, t => t.DurationMs == 70); // the in-window run (now-2min)
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM checks WHERE name = 'detail-test';"); // cascades incidents + runs
+        }
+    }
+
+    [SkippableFact]
     public async Task Run_without_a_trace_returns_404()
     {
         RequireDocker();
