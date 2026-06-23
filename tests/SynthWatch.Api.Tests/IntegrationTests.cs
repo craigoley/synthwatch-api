@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
 using SynthWatch.Api.Functions;
@@ -232,6 +233,72 @@ public class IntegrationTests
         var seedId = await db.Checks.Where(c => c.Name == "seed-http").Select(c => c.Id).FirstAsync();
         var bad = await fn.GetAvailabilitySeries(Request("?window=banana"), seedId, default);
         Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(bad).StatusCode);
+    }
+
+    [SkippableFact]
+    public async Task Availability_day_buckets_reconcile_in_non_utc_session_across_dst()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+        await conn.OpenAsync();
+        // A run "survives" the series only if its date_bin(stride) bucket is a generate_series(stride)
+        // grid point (the handler's a.ts = b.ts join). Count survivors for a given stride.
+        async Task<long> Survivors(string stride) => Convert.ToInt64(await Scalar(conn,
+            $"""
+            SELECT count(*) FROM runs r
+            WHERE r.check_id = (SELECT id FROM checks WHERE name='dst-test')
+              AND r.started_at >= '2026-03-07 00:00 America/New_York'
+              AND r.started_at <  '2026-03-12 00:00 America/New_York'
+              AND date_bin('{stride}'::interval, r.started_at, '2026-03-07 00:00 America/New_York'::timestamptz)
+                  IN (SELECT g FROM generate_series('2026-03-07 00:00 America/New_York'::timestamptz,
+                                                     '2026-03-12 00:00 America/New_York'::timestamptz,
+                                                     '{stride}'::interval) g)
+            """));
+        try
+        {
+            // Non-UTC session spanning the 2026 US spring-forward (Mar 8). The day-bucket grid
+            // (generate_series) and per-bucket assignment (date_bin) must share a fixed-24h basis,
+            // else runs across the DST boundary are dropped by the join (the #49 latent bug).
+            await Exec(conn, "SET TIME ZONE 'America/New_York'");
+            await Exec(conn, "INSERT INTO checks (name, kind, target_url) VALUES ('dst-test','http','https://d.example')");
+            var cid = Convert.ToInt64(await Scalar(conn, "SELECT id FROM checks WHERE name='dst-test'"));
+            // 3 runs on POST-DST days (noon, unambiguous), absolute NY timestamps.
+            await Exec(conn, $"""
+                INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms) VALUES
+                  ({cid},'pass','2026-03-09 12:00 America/New_York','2026-03-09 12:00 America/New_York',40),
+                  ({cid},'fail','2026-03-10 12:00 America/New_York','2026-03-10 12:00 America/New_York',40),
+                  ({cid},'pass','2026-03-11 12:00 America/New_York','2026-03-11 12:00 America/New_York',40)
+                """);
+
+            // FIX: fixed-24h stride (the handler's day stride) — every run buckets onto a grid point,
+            // so none is dropped and the series reconciles with the SLA count.
+            Assert.Equal(3, await Survivors("24 hours"));
+            // BUG (pre-fix): calendar '1 day' diverges from date_bin across the DST boundary -> the
+            // post-DST runs' bins are not grid points -> dropped -> series would NOT reconcile.
+            Assert.True(await Survivors("1 day") < 3,
+                "'1 day' must drop post-DST runs in a non-UTC session (the divergence the '24 hours' fix removes)");
+        }
+        finally
+        {
+            await Exec(conn, "SET TIME ZONE 'UTC'");
+            await Exec(conn, "DELETE FROM checks WHERE name='dst-test'");
+            await conn.CloseAsync();
+        }
+    }
+
+    private static async Task Exec(NpgsqlConnection c, string sql)
+    {
+        await using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<object?> Scalar(NpgsqlConnection c, string sql)
+    {
+        await using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        return await cmd.ExecuteScalarAsync();
     }
 
     [SkippableFact]

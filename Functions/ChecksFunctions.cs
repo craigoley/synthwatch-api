@@ -329,10 +329,15 @@ public class ChecksFunctions
         var window = req.Query["window"].ToString();
         (string Stride, string Bucket, TimeSpan Span)? cfg = window switch
         {
+            // Strides are FIXED-WIDTH (hours), never '1 day': generate_series treats '1 day' as a
+            // DST-aware CALENDAR day but date_bin treats it as fixed 24h, so in a non-UTC session the
+            // bucket grid and the per-bucket assignment drift ±1h across a DST boundary and the
+            // a.ts=b.ts join silently drops runs (breaking reconciliation). '24 hours' bins identically
+            // in both, in any session timezone. (Bucket label stays "day".)
             "" or "24h" => ("1 hour", "hour", TimeSpan.FromHours(24)),
             "7d" => ("6 hours", "6h", TimeSpan.FromDays(7)),
-            "30d" => ("1 day", "day", TimeSpan.FromDays(30)),
-            "90d" => ("1 day", "day", TimeSpan.FromDays(90)),
+            "30d" => ("24 hours", "day", TimeSpan.FromDays(30)),
+            "90d" => ("24 hours", "day", TimeSpan.FromDays(90)),
             _ => null
         };
         if (cfg is null)
@@ -344,8 +349,9 @@ public class ChecksFunctions
 
         // Bucket grid (generate_series) LEFT JOIN per-bucket up/down. The inner aggregate mirrors
         // sla_availability exactly (same status taxonomy + maintenance anti-join), so summing the
-        // series' up/down equals the SLA function's. date_bin (PG14+) anchors buckets to `from`,
-        // matching the generate_series grid. availability_pct is null for a bucket with no runs.
+        // series' up/down equals the SLA function's. date_bin (PG14+) anchors buckets to `from`; the
+        // grid and the bins use the SAME fixed-width stride (hours, never '1 day') so they align in
+        // any session timezone — see the stride note above. availability_pct is null for an empty bucket.
         var rows = await _db.AvailabilitySeries.FromSql(
             $"""
             SELECT b.ts AS ts,
