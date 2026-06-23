@@ -28,9 +28,28 @@ public class SynthWatchDbContext : DbContext
     public DbSet<AvailabilitySeriesPointRow> AvailabilitySeries => Set<AvailabilitySeriesPointRow>();
     public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
     public DbSet<FlowManifest> FlowManifests => Set<FlowManifest>();
+    public DbSet<Location> Locations => Set<Location>();
+    public DbSet<CheckLocation> CheckLocations => Set<CheckLocation>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<Location>(e =>
+        {
+            e.ToTable("locations");
+            e.HasKey(x => x.Name);
+            e.Property(x => x.Name).HasColumnName("name");
+            e.Property(x => x.Enabled).HasColumnName("enabled");
+        });
+
+        modelBuilder.Entity<CheckLocation>(e =>
+        {
+            e.ToTable("check_locations");
+            e.HasKey(x => new { x.CheckId, x.Location });
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.Location).HasColumnName("location");
+            e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
+        });
+
         modelBuilder.Entity<Check>(e =>
         {
             e.ToTable("checks");
