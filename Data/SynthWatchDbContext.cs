@@ -25,6 +25,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<Incident> Incidents => Set<Incident>();
     public DbSet<SlaAvailabilityRow> SlaAvailability => Set<SlaAvailabilityRow>();
     public DbSet<SloStatusRow> SloStatus => Set<SloStatusRow>();
+    public DbSet<AvailabilitySeriesPointRow> AvailabilitySeries => Set<AvailabilitySeriesPointRow>();
     public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
     public DbSet<FlowManifest> FlowManifests => Set<FlowManifest>();
 
@@ -190,6 +191,17 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Remaining).HasColumnName("remaining");
             e.Property(x => x.RemainingPct).HasColumnName("remaining_pct");
             e.Property(x => x.BurnRate).HasColumnName("burn_rate");
+        });
+
+        // Keyless: read the inline availability-over-time bucketed query via raw SQL only.
+        modelBuilder.Entity<AvailabilitySeriesPointRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Ts).HasColumnName("ts");
+            e.Property(x => x.UpRuns).HasColumnName("up_runs");
+            e.Property(x => x.DownRuns).HasColumnName("down_runs");
+            e.Property(x => x.AvailabilityPct).HasColumnName("availability_pct");
         });
 
         modelBuilder.Entity<FlowManifest>(e =>

@@ -309,4 +309,78 @@ public class ChecksFunctions
 
         return ApiResults.Ok(new PagedResult<RunMetricDto>(metrics, page, pageSize, total));
     }
+
+    /// <summary>
+    /// GET /api/checks/{id}/availability-series?window=24h|7d|30d|90d — uptime % per time bucket for
+    /// graphing. ONE inline bucketed query that mirrors sla_availability's up=pass|warn /
+    /// down=fail|error taxonomy + maintenance-window exclusion, so the series integrated over the
+    /// window reconciles with the SLA panel's headline %. Empty buckets carry availabilityPct=null
+    /// (a gap in the line, not 0%) with up/down = 0. Bucket: 24h->hour, 7d->6h, 30d/90d->day.
+    /// </summary>
+    [Function("GetAvailabilitySeries")]
+    public async Task<IActionResult> GetAvailabilitySeries(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "checks/{id:long}/availability-series")] HttpRequest req,
+        long id,
+        CancellationToken ct)
+    {
+        if (!await _db.Checks.AnyAsync(c => c.Id == id, ct))
+            return ApiResults.NotFound($"Check {id} not found.");
+
+        var window = req.Query["window"].ToString();
+        (string Stride, string Bucket, TimeSpan Span)? cfg = window switch
+        {
+            "" or "24h" => ("1 hour", "hour", TimeSpan.FromHours(24)),
+            "7d" => ("6 hours", "6h", TimeSpan.FromDays(7)),
+            "30d" => ("1 day", "day", TimeSpan.FromDays(30)),
+            "90d" => ("1 day", "day", TimeSpan.FromDays(90)),
+            _ => null
+        };
+        if (cfg is null)
+            return ApiResults.BadRequest("window must be one of: 24h, 7d, 30d, 90d.");
+        var (stride, bucket, span) = cfg.Value;
+
+        var to = DateTimeOffset.UtcNow;
+        var from = to - span;
+
+        // Bucket grid (generate_series) LEFT JOIN per-bucket up/down. The inner aggregate mirrors
+        // sla_availability exactly (same status taxonomy + maintenance anti-join), so summing the
+        // series' up/down equals the SLA function's. date_bin (PG14+) anchors buckets to `from`,
+        // matching the generate_series grid. availability_pct is null for a bucket with no runs.
+        var rows = await _db.AvailabilitySeries.FromSql(
+            $"""
+            SELECT b.ts AS ts,
+                   coalesce(a.up_runs, 0)   AS up_runs,
+                   coalesce(a.down_runs, 0) AS down_runs,
+                   CASE WHEN coalesce(a.completed, 0) > 0
+                        THEN round(100.0 * a.up_runs / a.completed, 4) END AS availability_pct
+            FROM generate_series({from}, {to}, {stride}::interval) AS b(ts)
+            LEFT JOIN (
+                SELECT date_bin({stride}::interval, r.started_at, {from}) AS ts,
+                       count(*) FILTER (WHERE r.status IN ('pass','warn','fail','error')) AS completed,
+                       count(*) FILTER (WHERE r.status IN ('pass','warn'))                AS up_runs,
+                       count(*) FILTER (WHERE r.status IN ('fail','error'))               AS down_runs
+                FROM runs r
+                LEFT JOIN maintenance_windows mw
+                       ON (mw.check_id = r.check_id OR mw.check_id IS NULL)
+                      AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at
+                WHERE r.check_id = {id} AND r.started_at >= {from} AND r.started_at < {to}
+                  AND mw.id IS NULL
+                GROUP BY 1
+            ) a ON a.ts = b.ts
+            """)
+            .AsNoTracking()
+            .OrderBy(p => p.Ts)
+            .ToListAsync(ct);
+
+        var points = rows
+            .Select(r => new AvailabilityPointDto(r.Ts, r.AvailabilityPct, r.UpRuns, r.DownRuns))
+            .ToList();
+
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(new AvailabilitySeriesDto(
+            Window: string.IsNullOrEmpty(window) ? "24h" : window,
+            Bucket: bucket,
+            Points: points));
+    }
 }

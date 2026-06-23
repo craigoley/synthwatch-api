@@ -169,6 +169,72 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Availability_series_buckets_nulls_and_reconciles_with_sla()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // 4 runs (3 pass, 1 fail) across a few hours in the last 24h; the rest of the 24h is empty.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url)
+                VALUES ('avail-test', 'http', 'https://a.example') RETURNING id INTO cid;
+              INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms) VALUES
+                (cid, 'pass', now() - interval '1 hour',  now() - interval '1 hour',  40),
+                (cid, 'pass', now() - interval '2 hours', now() - interval '2 hours', 40),
+                (cid, 'fail', now() - interval '2 hours', now() - interval '2 hours', 40),
+                (cid, 'pass', now() - interval '5 hours', now() - interval '5 hours', 40);
+            END $$;
+            """);
+        try
+        {
+            var cid = await db.Checks.Where(c => c.Name == "avail-test").Select(c => c.Id).FirstAsync();
+            var checks = new ChecksFunctions(db);
+
+            var okS = Assert.IsType<OkObjectResult>(await checks.GetAvailabilitySeries(Request("?window=24h"), cid, default));
+            var series = Assert.IsType<AvailabilitySeriesDto>(okS.Value!);
+            Assert.Equal("24h", series.Window);
+            Assert.Equal("hour", series.Bucket);
+
+            // No-data buckets are null (a gap), NOT 0% — most of the 24h has no runs.
+            Assert.Contains(series.Points, p => p.AvailabilityPct is null && p.UpRuns == 0 && p.DownRuns == 0);
+            // A bucket with runs carries a non-null pct + counts.
+            Assert.Contains(series.Points, p => p.AvailabilityPct is not null && p.UpRuns + p.DownRuns > 0);
+            // Points are ascending by ts.
+            Assert.True(series.Points.SequenceEqual(series.Points.OrderBy(p => p.Ts)));
+
+            // Reconcile with the SLA panel for the SAME 24h window: identical up/down totals (same
+            // taxonomy + maintenance exclusion), so the graph can't disagree with the headline %.
+            var seriesUp = series.Points.Sum(p => p.UpRuns);
+            var seriesDown = series.Points.Sum(p => p.DownRuns);
+            var okSla = Assert.IsType<OkObjectResult>(await new SlaFunctions(db).GetSla(Request("?window=24h"), default));
+            var slaItem = Assert.Single(Assert.IsType<SlaResponseDto>(okSla.Value!).Items, i => i.CheckId == cid);
+            Assert.Equal(slaItem.UpRuns, seriesUp);
+            Assert.Equal(slaItem.DownRuns, seriesDown);
+            Assert.Equal(3, seriesUp);    // 3 pass
+            Assert.Equal(1, seriesDown);  // 1 fail
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'avail-test';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task Availability_series_404_and_bad_window()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new ChecksFunctions(db);
+        Assert.IsType<NotFoundObjectResult>(await fn.GetAvailabilitySeries(Request("?window=24h"), 999999, default));
+
+        var seedId = await db.Checks.Where(c => c.Name == "seed-http").Select(c => c.Id).FirstAsync();
+        var bad = await fn.GetAvailabilitySeries(Request("?window=banana"), seedId, default);
+        Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(bad).StatusCode);
+    }
+
+    [SkippableFact]
     public async Task Incidents_carry_check_name_and_kind()
     {
         RequireDocker();
