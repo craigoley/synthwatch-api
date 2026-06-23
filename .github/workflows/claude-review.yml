@@ -100,41 +100,44 @@ jobs:
             style, naming, nits, suggestions, "consider…", or speculative concerns still post as
             comments but do NOT block. If you are unsure, emit PASS. Never block on advisory nits.
 
-      # ★ LAYER 2 — findings gate. Parse the LAST `REVIEW_VERDICT:` line from Claude's POSTED review
-      # (its tracking comment + formal review body — the action's execution_file output is empty in
-      # tag/track_progress mode, confirmed live). BLOCK => fail this step => the "Claude review" check
-      # fails => native auto-merge holds. PASS => succeed. FAIL-OPEN by design: review step didn't
-      # succeed, no claude comment/review yet, or no clear verdict => SUCCEED with a warning and NEVER
-      # block (a flaky/errored review must not wedge the merge queue). The check-run name is the job
-      # name ("Claude review") — unchanged, so the Layer-1 required context still matches exactly.
+      # ★ LAYER 2 — findings gate. Read the LAST `REVIEW_VERDICT:` line from the action's
+      # execution_file (the authoritative Claude Code execution log) — NOT the posted comment. Recon
+      # proved the verdict reliably lands in execution_file but NOT in the displayed tracking comment
+      # (present in only 1 of 9 real runner reviews), so comment-parsing was inert (always fail-open).
+      # This is the runner's proven gate, copied EXACTLY so all repos parse identically (it live-BLOCKs
+      # there). BLOCK => fail this step => the "Claude review" check fails => native auto-merge holds.
+      # PASS => succeed. FAIL-OPEN: empty/missing execution_file (a no-op or errored review) => PASS +
+      # ::warning:: (a transient LLM hiccup must never deadlock merge; Layer 1 already required the
+      # review to RUN). Check-run name is the job name ("Claude review") — unchanged, so the Layer-1
+      # required context still matches exactly. `if: always()` so it decides even if the review errored.
       - name: Gate merge on review verdict
         if: always()
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
         run: |
           set -uo pipefail
-          # Fail-open: the review step itself errored/cancelled/skipped -> do not block.
-          if [ "$REVIEW_OUTCOME" != "success" ]; then
-            echo "::warning::Claude review step outcome was '$REVIEW_OUTCOME' — failing open (not blocking merge)."
+          verdict='<none>'
+          if [ -n "${EXECUTION_FILE:-}" ] && [ -f "$EXECUTION_FILE" ]; then
+            # Extract the model's FINAL text only (result entries, else the last assistant text block)
+            # — recursive so it works whether the log is a JSON array or NDJSON-slurped. Excludes the
+            # user/prompt message (which quotes the verdict strings and would contaminate the parse).
+            text=$(jq -rs '[.. | objects | select(.type=="result") | .result? | strings] | last // ""' "$EXECUTION_FILE" 2>/dev/null || echo "")
+            if [ -z "$text" ]; then
+              text=$(jq -rs '[.. | objects | select(.type=="assistant") | (.message?.content? // [])[]? | select(.type=="text") | .text] | last // ""' "$EXECUTION_FILE" 2>/dev/null || echo "")
+            fi
+            parsed=$(printf '%s' "$text" | grep -oiE 'REVIEW_VERDICT:[[:space:]]*(BLOCK|PASS)' | tail -1 | grep -oiE '(BLOCK|PASS)' | tr '[:lower:]' '[:upper:]' || true)
+            [ -n "$parsed" ] && verdict="$parsed"
+            echo "[review] execution_file=$EXECUTION_FILE  final_text_len=${#text}  parsed_verdict='$verdict'"
+          else
+            echo "[review] no execution_file (review errored/skipped) — parsed_verdict='<none>'"
+          fi
+          if [ "$verdict" = "BLOCK" ]; then
+            echo "::error::Claude review verdict: BLOCK — a blocking finding holds this merge until resolved."
+            exit 1
+          fi
+          if [ "$verdict" = "PASS" ]; then
+            echo "[review] verdict PASS — merge may proceed."
             exit 0
           fi
-          # Gather Claude's posted text: issue/tracking comments + formal review bodies (its login is
-          # claude / claude[bot]). The verdict is the last line of the final message it posted.
-          comments=$(gh pr view "$PR" --json comments \
-            -q '[.comments[] | select(.author.login | ascii_downcase | test("claude")) | .body] | join("\n")' 2>/dev/null || echo "")
-          reviews=$(gh api "repos/$GH_REPO/pulls/$PR/reviews" \
-            -q '[.[] | select(.user.login | ascii_downcase | test("claude")) | .body] | join("\n")' 2>/dev/null || echo "")
-          verdict=$(printf '%s\n%s\n' "$comments" "$reviews" \
-            | grep -oE 'REVIEW_VERDICT:[[:space:]]*(BLOCK|PASS)' | grep -oE '(BLOCK|PASS)' | tail -1 || true)
-          case "$verdict" in
-            BLOCK)
-              echo "::error::Claude review verdict: BLOCK — a confident correctness/security/data-loss/breaking finding. Holding merge."
-              exit 1 ;;
-            PASS)
-              echo "Claude review verdict: PASS — no blocking findings." ;;
-            *)
-              echo "::warning::No REVIEW_VERDICT (BLOCK|PASS) found in Claude's posted review — failing open (not blocking merge)." ;;
-          esac
+          echo "::warning::[review] no verdict parsed — failing open to PASS (an LLM hiccup must not deadlock merge)."
+          exit 0
