@@ -620,4 +620,72 @@ public class IntegrationTests
             await conn.CloseAsync();
         }
     }
+
+    [SkippableFact]
+    public async Task Location_endpoints_list_get_and_set_with_validation()
+    {
+        // 4-MLACT: the selector's API half. Seed extra registry locations (2 enabled, 1 disabled) + a
+        // check assigned to {default, eastus2} with a known eastus2 cursor, then exercise all three
+        // endpoints + validation. eastus2 keeps its cursor across a PUT (set preserved, cadence not reset).
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO locations (name, enabled) VALUES ('eastus2', true), ('centralus', true), ('westus', false)
+              ON CONFLICT (name) DO NOTHING;
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url) VALUES ('loc-ep-test','http','https://le.example') RETURNING id INTO cid;
+              INSERT INTO check_locations (check_id, location, last_run_at) VALUES
+                (cid, 'default', NULL),
+                (cid, 'eastus2', timestamptz '2026-01-01 00:00:00+00');
+            END $$;
+            """);
+        var id = await db.Checks.Where(c => c.Name == "loc-ep-test").Select(c => c.Id).FirstAsync();
+        var fn = new LocationsFunctions(db);
+        try
+        {
+            // GET /api/locations -> registry with enabled flags.
+            var reg = Assert.IsType<LocationsResponse>(
+                Assert.IsType<OkObjectResult>(await fn.GetLocations(Request(), default)).Value!);
+            Assert.True(reg.Locations.Single(l => l.Name == "eastus2").Enabled);
+            Assert.False(reg.Locations.Single(l => l.Name == "westus").Enabled);
+
+            // GET /api/checks/{id}/locations -> the current set (sorted).
+            var cur = Assert.IsType<CheckLocationsResponse>(
+                Assert.IsType<OkObjectResult>(await fn.GetCheckLocations(Request(), id, default)).Value!);
+            Assert.Equal(new[] { "default", "eastus2" }, cur.Locations);
+
+            // PUT to {eastus2, centralus}: drops 'default', keeps eastus2, adds centralus.
+            var put = Assert.IsType<CheckLocationsResponse>(Assert.IsType<OkObjectResult>(
+                await fn.SetCheckLocations(JsonRequest(new SetLocationsRequest { Locations = new() { "centralus", "eastus2" } }), id, default)).Value!);
+            Assert.Equal(new[] { "centralus", "eastus2" }, put.Locations);
+
+            await using var db2 = _pg.NewDbContext(); // fresh read of committed cursors
+            var rows = await db2.CheckLocations.AsNoTracking().Where(cl => cl.CheckId == id)
+                .OrderBy(cl => cl.Location).ToListAsync();
+            Assert.Equal(new[] { "centralus", "eastus2" }, rows.Select(r => r.Location));
+            Assert.Null(rows.Single(r => r.Location == "centralus").LastRunAt);                  // newly added -> due-now
+            Assert.NotNull(rows.Single(r => r.Location == "eastus2").LastRunAt);                 // kept -> cursor preserved (cadence NOT reset)
+
+            // Validation: disabled location -> 400.
+            Assert.IsType<BadRequestObjectResult>(
+                await fn.SetCheckLocations(JsonRequest(new SetLocationsRequest { Locations = new() { "westus" } }), id, default));
+            // Validation: unknown location -> 400.
+            Assert.IsType<BadRequestObjectResult>(
+                await fn.SetCheckLocations(JsonRequest(new SetLocationsRequest { Locations = new() { "atlantis" } }), id, default));
+            // Validation: empty set -> 400 (a check must run from >= 1 location).
+            Assert.IsType<BadRequestObjectResult>(
+                await fn.SetCheckLocations(JsonRequest(new SetLocationsRequest { Locations = new() }), id, default));
+
+            // A rejected PUT changed nothing.
+            var after = await db2.CheckLocations.AsNoTracking().Where(cl => cl.CheckId == id).CountAsync();
+            Assert.Equal(2, after);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM checks WHERE name = 'loc-ep-test'; DELETE FROM locations WHERE name IN ('eastus2','centralus','westus');");
+        }
+    }
 }
