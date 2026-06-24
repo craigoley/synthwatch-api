@@ -741,3 +741,41 @@ CREATE TABLE public.tag_routes (
     CONSTRAINT tag_routes_uq UNIQUE (tag_key, tag_value, channel_id)
 );
 CREATE INDEX tag_routes_key_value_idx ON public.tag_routes (tag_key, tag_value);
+
+
+--
+-- Reporting Layer 1 (runner migration 0028 / #88): daily_check_rollup — one row per check per UTC day.
+-- Added to the snapshot to mirror the live schema so the report endpoints aggregate against the prod
+-- shape. (Availability is additive from these counts; multi-day percentiles are recomputed from raw runs.)
+--
+CREATE TABLE public.daily_check_rollup (
+    check_id           bigint NOT NULL REFERENCES public.checks(id) ON DELETE CASCADE,
+    day                date NOT NULL,
+    up_count           integer NOT NULL DEFAULT 0,
+    down_count         integer NOT NULL DEFAULT 0,
+    total_count        integer NOT NULL DEFAULT 0,
+    availability_pct   numeric,
+    latency_count      integer NOT NULL DEFAULT 0,
+    duration_avg_ms    numeric,
+    duration_p50_ms    integer,
+    duration_p95_ms    integer,
+    duration_p99_ms    integer,
+    duration_min_ms    integer,
+    duration_max_ms    integer,
+    vitals_count       integer NOT NULL DEFAULT 0,
+    lcp_avg_ms         numeric,
+    lcp_p75_ms         integer,
+    fcp_avg_ms         numeric,
+    fcp_p75_ms         integer,
+    ttfb_avg_ms        numeric,
+    ttfb_p75_ms        integer,
+    cls_avg            double precision,
+    cls_p75            double precision,
+    load_event_avg_ms  numeric,
+    transfer_bytes_avg bigint,
+    incidents_opened   integer NOT NULL DEFAULT 0,
+    downtime_minutes   numeric NOT NULL DEFAULT 0,
+    computed_at        timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT daily_check_rollup_pkey PRIMARY KEY (check_id, day)
+);
+CREATE INDEX daily_check_rollup_day_idx ON public.daily_check_rollup (day);

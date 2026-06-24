@@ -370,6 +370,99 @@ public class IntegrationTests
         }
     }
 
+    [SkippableFact]
+    public async Task Reports_availability_is_additive_and_performance_p95_is_recomputed_from_raw()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // rep-api (http, team:platform): day-2 has 90 UP @100ms (daily p95=100); day-1 has 4 UP @1000ms
+        // (daily p95=1000). Window p95 over the 94 combined raw runs is ~100 (the 90 lows dominate) —
+        // NOT the average of daily p95s (550). rep-web (browser, team:web): 10 runs w/ web-vitals.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE api_id bigint; web_id bigint; rid bigint; i int;
+            BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('rep-api','http','https://a.example') RETURNING id INTO api_id;
+              INSERT INTO checks (name,kind,target_url,flow_name) VALUES ('rep-web','browser','https://w.example','rep-flow') RETURNING id INTO web_id;
+              INSERT INTO check_tags (check_id,key,value) VALUES (api_id,'team','platform'), (web_id,'team','web');
+              INSERT INTO daily_check_rollup (check_id,day,up_count,down_count,total_count,availability_pct,latency_count,duration_avg_ms,duration_p95_ms)
+                VALUES (api_id, CURRENT_DATE-2, 90,10,100, 90.0, 90, 100, 100),
+                       (api_id, CURRENT_DATE-1, 4,0,4, 100.0, 4, 1000, 1000);
+              FOR i IN 1..90 LOOP
+                INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms)
+                  VALUES (api_id,'pass',(CURRENT_DATE-2)::timestamptz + interval '6 hours',(CURRENT_DATE-2)::timestamptz + interval '6 hours',100);
+              END LOOP;
+              FOR i IN 1..4 LOOP
+                INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms)
+                  VALUES (api_id,'pass',(CURRENT_DATE-1)::timestamptz + interval '6 hours',(CURRENT_DATE-1)::timestamptz + interval '6 hours',1000);
+              END LOOP;
+              INSERT INTO daily_check_rollup (check_id,day,up_count,down_count,total_count,availability_pct,latency_count,duration_avg_ms,duration_p95_ms,vitals_count,lcp_p75_ms)
+                VALUES (web_id, CURRENT_DATE-1, 10,0,10, 100.0, 10, 200, 250, 10, 1200);
+              FOR i IN 1..10 LOOP
+                INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms)
+                  VALUES (web_id,'pass',(CURRENT_DATE-1)::timestamptz + interval '6 hours',(CURRENT_DATE-1)::timestamptz + interval '6 hours',200) RETURNING id INTO rid;
+                INSERT INTO run_metrics (run_id,lcp_ms,fcp_ms,ttfb_ms,cls) VALUES (rid,1200,800,150,0.05);
+              END LOOP;
+            END $$;
+            """);
+        try
+        {
+            var fn = new ReportsFunctions(db);
+
+            // ── AVAILABILITY by team (additive from rollup counts, NOT averaged daily %) ──
+            var avail = Assert.IsType<AvailabilityReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetAvailabilityReport(Request("?window=30d&groupBy=team"), default)).Value!);
+            Assert.Equal("team", avail.GroupBy);
+            var platform = avail.Groups.Single(g => g.Group == "platform");
+            Assert.Equal(94, platform.UpCount);   // 90 + 4
+            Assert.Equal(10, platform.DownCount);  // 10 + 0
+            Assert.Equal(Math.Round(100m * 94 / 104, 4), platform.AvailabilityPct); // = sum(up)/sum(up+down)
+            Assert.NotEqual(95m, platform.AvailabilityPct);   // NOT the avg of daily pcts (90, 100)
+            Assert.Single(platform.Checks, c => c.CheckName == "rep-api");
+            Assert.True(platform.Series.Count >= 2);          // daily trend present
+            Assert.Contains(avail.Groups, g => g.Group == "web");
+
+            // ── PERFORMANCE by team: p95 RECOMPUTED FROM RAW (~100), not avg-of-daily-p95s (550) ──
+            var perf = Assert.IsType<PerformanceReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetPerformanceReport(Request("?window=30d&groupBy=team"), default)).Value!);
+            var pPlatform = perf.Groups.Single(g => g.Group == "platform");
+            Assert.NotNull(pPlatform.Latency.P95Ms);
+            Assert.True(pPlatform.Latency.P95Ms < 550, $"p95 {pPlatform.Latency.P95Ms} must be raw-recomputed, not the 550 avg of daily p95s");
+            Assert.True(pPlatform.Latency.P95Ms <= 200);
+
+            // The report's p95 MATCHES a direct raw percentile query (proves recompute-from-raw).
+            var apiId = await db.Checks.Where(c => c.Name == "rep-api").Select(c => c.Id).FirstAsync();
+            var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+            await conn.OpenAsync();
+            try
+            {
+                var directP95 = Convert.ToInt32(await Scalar(conn,
+                    $"SELECT round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms))::int FROM runs WHERE check_id={apiId} AND status IN ('pass','warn')"));
+                Assert.Equal(directP95, pPlatform.Latency.P95Ms);
+            }
+            finally { await conn.CloseAsync(); }
+
+            // Web-vitals scoped to browser: platform (http) → null; web (browser) → present.
+            Assert.Null(pPlatform.WebVitals);
+            var pWeb = perf.Groups.Single(g => g.Group == "web");
+            Assert.NotNull(pWeb.WebVitals);
+            Assert.Equal(1200, pWeb.WebVitals!.LcpP75Ms);
+            Assert.NotEmpty(pPlatform.Series);   // daily latency trend present
+
+            // Ungrouped → one fleet group (group=null).
+            var ung = Assert.IsType<PerformanceReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetPerformanceReport(Request("?window=30d"), default)).Value!);
+            Assert.Null(Assert.Single(ung.Groups).Group);
+
+            // Bad window → 400.
+            Assert.IsType<BadRequestObjectResult>(await fn.GetAvailabilityReport(Request("?window=1y"), default));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name IN ('rep-api','rep-web');"); // cascades rollup/runs/tags
+        }
+    }
+
     private static async Task Exec(NpgsqlConnection c, string sql)
     {
         await using var cmd = c.CreateCommand();
