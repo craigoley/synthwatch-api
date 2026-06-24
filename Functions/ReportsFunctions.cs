@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
@@ -215,4 +216,56 @@ public class ReportsFunctions
     private static WebVitalsDto? Vit(VitalsReportRow? v) =>
         v is null || v.VitalsCount == 0 ? null
             : new WebVitalsDto(v.VitalsCount, v.LcpP75Ms, v.FcpP75Ms, v.TtfbP75Ms, v.ClsP75);
+
+    /// <summary>
+    /// GET /api/reports/narrative?scope=fleet|monitor&amp;key=&lt;checkId|'fleet'&gt;&amp;window=7d|30d|90d —
+    /// serve the LATEST runner-generated narrative (Layer 3) read-only. No generation here (the AOAI lives
+    /// in the runner). Missing row → 404 so the dashboard hides the card cleanly.
+    /// </summary>
+    [Function("GetNarrative")]
+    public async Task<IActionResult> GetNarrative(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/narrative")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var scope = req.Query["scope"].ToString();
+        if (scope is not ("fleet" or "monitor"))
+            return ApiResults.BadRequest("scope must be 'fleet' or 'monitor'.");
+        var window = req.Query["window"].ToString();
+        if (WindowDays(window) is not int days)
+            return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
+
+        // fleet → the 'fleet' sentinel key; monitor → the check id.
+        var key = scope == "fleet" ? "fleet" : req.Query["key"].ToString();
+        if (scope == "monitor" && string.IsNullOrWhiteSpace(key))
+            return ApiResults.BadRequest("key (the check id) is required when scope=monitor.");
+
+        // highlights + fact_pack as raw jsonb text → re-emitted verbatim (cited numbers pass through).
+        var row = (await _db.ReportNarratives.FromSql(
+            $@"SELECT scope_type, scope_key, report_window, generated_at, headline, body,
+                      highlights::text AS highlights, fact_pack::text AS fact_pack, model
+               FROM report_narratives
+               WHERE scope_type = {scope} AND scope_key = {key} AND report_window = {window}
+               ORDER BY generated_at DESC
+               LIMIT 1").AsNoTracking().ToListAsync(ct)).FirstOrDefault();
+
+        if (row is null)
+            return ApiResults.NotFound($"No narrative for scope='{scope}', key='{key}', window='{window}'.");
+
+        var stale = DateTimeOffset.UtcNow - row.GeneratedAt > TimeSpan.FromDays(days);
+        return ApiResults.Ok(new NarrativeDto(scope, key, window, row.Headline, row.Body,
+            SafeStringList(row.Highlights), row.GeneratedAt, stale, row.Model, SafeJson(row.FactPack)));
+    }
+
+    // Parse runner-written jsonb (read as text) defensively — a malformed value degrades, never throws.
+    private static IReadOnlyList<string> SafeStringList(string? json)
+    {
+        try { return JsonSerializer.Deserialize<List<string>>(string.IsNullOrWhiteSpace(json) ? "[]" : json) ?? new List<string>(); }
+        catch (JsonException) { return Array.Empty<string>(); }
+    }
+
+    private static JsonElement SafeJson(string? json)
+    {
+        try { return JsonSerializer.Deserialize<JsonElement>(string.IsNullOrWhiteSpace(json) ? "{}" : json); }
+        catch (JsonException) { return JsonSerializer.Deserialize<JsonElement>("{}"); }
+    }
 }

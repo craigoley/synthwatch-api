@@ -401,6 +401,54 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Narrative_serves_stored_row_with_factpack_and_404s_when_missing()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new ReportsFunctions(db);
+        // jsonb via builders (no literal braces for ExecuteSqlRaw). report_window (window is reserved).
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO report_narratives (scope_type, scope_key, report_window, generated_at, headline, body, highlights, fact_pack, model)
+            VALUES ('fleet','fleet','7d', now() - interval '2 days', 'All green',
+                    'Availability 99.1%, 1 real-outage incident; p95 +15% w/w.',
+                    jsonb_build_array('99.1% availability','p95 +15% w/w'),
+                    jsonb_build_object('current', jsonb_build_object('availabilityPct', 99.1, 'p95Ms', 320), 'incidents', 1),
+                    'gpt-5-mini');
+            """);
+        try
+        {
+            var dto = Assert.IsType<NarrativeDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetNarrative(Request("?scope=fleet&window=7d"), default)).Value!);
+            Assert.Equal("All green", dto.Headline);
+            Assert.Contains("99.1%", dto.Body);
+            Assert.Equal(new[] { "99.1% availability", "p95 +15% w/w" }, dto.Highlights);
+            Assert.Equal("gpt-5-mini", dto.Model);
+            Assert.False(dto.Stale); // 2 days old, 7d window → fresh
+            // ★ factPack carries the cited numbers verbatim (auditability).
+            Assert.Equal(320, dto.FactPack.GetProperty("current").GetProperty("p95Ms").GetInt32());
+
+            // stale: a narrative older than its window period.
+            await db.Database.ExecuteSqlRawAsync(
+                "UPDATE report_narratives SET generated_at = now() - interval '10 days' WHERE scope_type='fleet' AND report_window='7d';");
+            await using var db2 = _pg.NewDbContext();
+            var staleDto = Assert.IsType<NarrativeDto>(Assert.IsType<OkObjectResult>(
+                await new ReportsFunctions(db2).GetNarrative(Request("?scope=fleet&window=7d"), default)).Value!);
+            Assert.True(staleDto.Stale);
+
+            // Missing narrative → 404 (the dashboard hides the card cleanly).
+            Assert.IsType<NotFoundObjectResult>(await fn.GetNarrative(Request("?scope=monitor&key=999999&window=7d"), default));
+            // Validation: bad scope / window / monitor-without-key → 400.
+            Assert.IsType<BadRequestObjectResult>(await fn.GetNarrative(Request("?scope=bogus&window=7d"), default));
+            Assert.IsType<BadRequestObjectResult>(await fn.GetNarrative(Request("?scope=fleet&window=1y"), default));
+            Assert.IsType<BadRequestObjectResult>(await fn.GetNarrative(Request("?scope=monitor&window=7d"), default));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM report_narratives WHERE scope_type='fleet' AND report_window='7d';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Reports_availability_is_additive_and_performance_p95_is_recomputed_from_raw()
     {
         RequireDocker();
