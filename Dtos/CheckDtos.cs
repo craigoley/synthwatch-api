@@ -65,10 +65,12 @@ public record CheckSummaryDto(
     // Per-location rollup: each location's latest-run status (multi-location migration). One entry
     // per location that has run; single-location checks carry one "default" entry so the dashboard
     // grid's regional indicator is uniform. Empty only when the check has never run.
-    IReadOnlyList<LocationStatusDto> Locations)
+    IReadOnlyList<LocationStatusDto> Locations,
+    // key:value tags (Phase 9a) joined from check_tags, so the grid/detail can show + filter by them.
+    IReadOnlyList<TagDto> Tags)
 {
     public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m,
-        IReadOnlyList<LocationStatusDto> locations) => new(
+        IReadOnlyList<LocationStatusDto> locations, IReadOnlyList<TagDto> tags) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.IntervalSeconds, c.TimeoutMs, c.FailureThreshold, c.Severity, c.Enabled,
         c.LighthouseEnabled, c.LastRunAt, c.CreatedAt,
@@ -93,7 +95,8 @@ public record CheckSummaryDto(
         Auth: c.Auth,
         NetConfig: c.NetConfig,
         Steps: c.Steps,
-        Locations: locations);
+        Locations: locations,
+        Tags: tags);
 }
 
 /// <summary>A check's latest-run status from one location (per-location rollup for the grid).</summary>
@@ -146,9 +149,11 @@ public record CheckDetailDto(
     SloDto? Slo,
     string CurrentStatus,
     string CurrentHealth,
-    IReadOnlyList<RunDto> RecentRuns)
+    IReadOnlyList<RunDto> RecentRuns,
+    // key:value tags (Phase 9a) joined from check_tags.
+    IReadOnlyList<TagDto> Tags)
 {
-    public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, SloDto? slo = null) => new(
+    public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, IReadOnlyList<TagDto> tags, SloDto? slo = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.BodyMustContain, c.IntervalSeconds, c.LastRunAt, c.TimeoutMs, c.FailureThreshold,
         c.Severity, c.Enabled, c.CreatedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
@@ -163,7 +168,8 @@ public record CheckDetailDto(
         CurrentStatus: !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
         CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
-        RecentRuns: recentRuns.Select(RunDto.From).ToList());
+        RecentRuns: recentRuns.Select(RunDto.From).ToList(),
+        Tags: tags);
 }
 
 /// <summary>
