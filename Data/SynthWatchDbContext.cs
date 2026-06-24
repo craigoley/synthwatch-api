@@ -32,6 +32,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<CheckLocation> CheckLocations => Set<CheckLocation>();
     public DbSet<Channel> Channels => Set<Channel>();
     public DbSet<AlertRoute> AlertRoutes => Set<AlertRoute>();
+    public DbSet<CheckTag> CheckTags => Set<CheckTag>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -64,6 +65,15 @@ public class SynthWatchDbContext : DbContext
             var (cfgConv, cfgCmp) = JsonbColumn<ChannelConfig>();
             e.Property(x => x.Config).HasColumnName("config").HasColumnType("jsonb")
                 .HasConversion(cfgConv, cfgCmp);
+        });
+
+        modelBuilder.Entity<CheckTag>(e =>
+        {
+            e.ToTable("check_tags");
+            e.HasKey(x => new { x.CheckId, x.Key });
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.Key).HasColumnName("key");
+            e.Property(x => x.Value).HasColumnName("value");
         });
 
         modelBuilder.Entity<AlertRoute>(e =>

@@ -688,3 +688,19 @@ CREATE UNIQUE INDEX alert_routes_severity_uq ON public.alert_routes (severity, c
 INSERT INTO public.channels (name, type) VALUES ('email', 'email'), ('webhook', 'webhook');
 INSERT INTO public.alert_routes (severity, channel_id)
   SELECT s, c.id FROM (VALUES ('critical'), ('warning')) v(s) CROSS JOIN public.channels c;
+
+
+--
+-- Tags (runner migration 0024 / #84): normalized key:value tags on checks. Added to the test snapshot
+-- to mirror the live schema (PK (check_id,key) = one value per key; lowercase/whitespace-free CHECKs;
+-- value non-empty; key may be ''; FK CASCADE).
+--
+CREATE TABLE public.check_tags (
+    check_id bigint NOT NULL REFERENCES public.checks(id) ON DELETE CASCADE,
+    key      text NOT NULL DEFAULT ''::text,
+    value    text NOT NULL,
+    CONSTRAINT check_tags_pkey PRIMARY KEY (check_id, key),
+    CONSTRAINT check_tags_key_check CHECK (key = lower(key) AND key !~ '[[:space:]]'::text),
+    CONSTRAINT check_tags_value_check CHECK (value <> ''::text AND value = lower(value) AND value !~ '[[:space:]]'::text)
+);
+CREATE INDEX check_tags_key_value_idx ON public.check_tags (key, value);

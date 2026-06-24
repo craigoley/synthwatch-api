@@ -837,4 +837,62 @@ public class IntegrationTests
                 """);
         }
     }
+
+    [SkippableFact]
+    public async Task Tag_crud_normalization_distinct_and_suggested()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new TagsFunctions(db);
+        await db.Database.ExecuteSqlRawAsync("INSERT INTO checks (name,kind,target_url) VALUES ('tag-test','http','https://t.example');");
+        var id = await db.Checks.Where(c => c.Name == "tag-test").Select(c => c.Id).FirstAsync();
+        try
+        {
+            // PUT exercises normalization (lowercase/trim/ws→_), last-wins dedupe, empty-value drop, bare value:
+            //   "Env":"Prod"         -> env:prod, then "env":"staging" -> last wins -> env:staging
+            //   "service":"Prod Web" -> service:prod_web (internal whitespace -> _)
+            //   "team":"  "          -> value empty after normalize -> DROPPED
+            //   "":"adhoc"           -> bare value (empty key)
+            var put = Assert.IsType<CheckTagsResponse>(Assert.IsType<OkObjectResult>(await fn.SetCheckTags(
+                JsonRequest(new SetTagsRequest { Tags = new() {
+                    new TagDto("Env", "Prod"), new TagDto("service", "Prod Web"),
+                    new TagDto("env", "staging"), new TagDto("team", "  "), new TagDto("", "adhoc") } }), id, default)).Value!);
+            Assert.Equal(new[] { ("", "adhoc"), ("env", "staging"), ("service", "prod_web") },
+                put.Tags.Select(t => (t.Key, t.Value)).ToArray());
+
+            // GET returns the same set.
+            var got = Assert.IsType<CheckTagsResponse>(Assert.IsType<OkObjectResult>(await fn.GetCheckTags(Request(), id, default)).Value!);
+            Assert.Equal(3, got.Tags.Count);
+
+            // PUT a new EXACT set -> add (criticality) + remove (the bare value, old service value).
+            var put2 = Assert.IsType<CheckTagsResponse>(Assert.IsType<OkObjectResult>(await fn.SetCheckTags(
+                JsonRequest(new SetTagsRequest { Tags = new() {
+                    new TagDto("env", "staging"), new TagDto("service", "synthwatch"), new TagDto("criticality", "tier-1") } }), id, default)).Value!);
+            Assert.Equal(new[] { ("criticality", "tier-1"), ("env", "staging"), ("service", "synthwatch") },
+                put2.Tags.Select(t => (t.Key, t.Value)).ToArray());
+            Assert.DoesNotContain(put2.Tags, t => t.Value == "prod_web" || t.Value == "adhoc");
+
+            // GET /api/tags — distinct in-use tags with check counts (includes this check's).
+            var inUse = Assert.IsType<TagsInUseResponse>(Assert.IsType<OkObjectResult>(await fn.GetTagsInUse(Request(), default)).Value!);
+            Assert.True(inUse.Tags.Single(t => t.Key == "criticality" && t.Value == "tier-1").Count >= 1);
+
+            // GET /api/tags/suggested.
+            var sug = Assert.IsType<string[]>(Assert.IsType<OkObjectResult>(TagsFunctions.GetSuggestedTagKeys(Request())).Value!);
+            Assert.Equal(new[] { "env", "service", "team", "criticality" }, sug);
+
+            // Guard: a missing `tags` key -> 400, tags UNTOUCHED (no silent wipe).
+            Assert.IsType<BadRequestObjectResult>(await fn.SetCheckTags(JsonRequest(new { notTags = 1 }), id, default));
+            await using (var db2 = _pg.NewDbContext())
+                Assert.Equal(3, await db2.CheckTags.CountAsync(t => t.CheckId == id));
+
+            // Explicit clear { tags: [] } -> 200, empty.
+            var cleared = Assert.IsType<CheckTagsResponse>(Assert.IsType<OkObjectResult>(await fn.SetCheckTags(
+                JsonRequest(new SetTagsRequest { Tags = new() }), id, default)).Value!);
+            Assert.Empty(cleared.Tags);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'tag-test';"); // cascades tags
+        }
+    }
 }
