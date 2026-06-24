@@ -782,20 +782,20 @@ CREATE INDEX daily_check_rollup_day_idx ON public.daily_check_rollup (day);
 
 
 --
--- Reporting Layer 3 (runner narrative job, design contract — migration pending): report_narratives.
--- The runner generates these (it owns the AOAI plumbing); the API serves the latest row read-only.
--- Added to the snapshot to mirror the design shape so the serve endpoint can be tested. Reconcile column
--- names if the landed runner migration differs.
+-- Reporting Layer 3 (runner migration 0029, LIVE): report_narratives. The runner generates these (it owns
+-- the AOAI plumbing); the API serves the latest row read-only. ★ Mirrors \d report_narratives EXACTLY —
+-- the column is "window" (quoted: it's a Postgres reserved word). PK uses "window".
 --
 CREATE TABLE public.report_narratives (
-    scope_type   text NOT NULL,                       -- 'fleet' | 'monitor' | 'tag'
-    scope_key    text NOT NULL,                        -- 'fleet' sentinel | check id (text) | tag value
-    report_window text NOT NULL,                        -- '7d' | '30d' | '90d'
+    scope_type   text NOT NULL,                          -- 'fleet' | 'monitor'
+    scope_key    text NOT NULL,                          -- 'fleet' sentinel | check id (text)
+    "window"     text NOT NULL,                           -- '7d' | '30d' | '90d' (reserved word → quoted)
     generated_at timestamp with time zone NOT NULL DEFAULT now(),
-    headline     text NOT NULL,
-    body         text NOT NULL,
-    highlights   jsonb NOT NULL DEFAULT '[]'::jsonb,    -- string[]
-    fact_pack    jsonb NOT NULL DEFAULT '{}'::jsonb,    -- the cited-numbers fact pack
+    headline     text,
+    body         text,
+    highlights   jsonb NOT NULL DEFAULT '[]'::jsonb,      -- string[]
     model        text,
-    CONSTRAINT report_narratives_pkey PRIMARY KEY (scope_type, scope_key, report_window)
+    fact_pack    jsonb NOT NULL,                          -- the cited-numbers fact pack
+    CONSTRAINT report_narratives_scope_type_check CHECK (scope_type = ANY (ARRAY['fleet'::text, 'monitor'::text])),
+    CONSTRAINT report_narratives_pkey PRIMARY KEY (scope_type, scope_key, "window")
 );
