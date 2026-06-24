@@ -46,3 +46,16 @@ public class RoutingDto
     [JsonPropertyName("perCheck")] public Dictionary<string, ChannelIdsDto>? PerCheck { get; set; }
     [JsonPropertyName("tagRules")] public List<TagRuleDto>? TagRules { get; set; }
 }
+
+/// <summary>
+/// GET /api/notifications/health — alerting deliverability readiness, reporting ONLY what the API can
+/// verify. channelsConfigured + routingConfigured are read from the DB (the API owns that state).
+/// transportConfigured is the ACS email transport (ACS_EMAIL_CONNECTION_STRING + ALERT_EMAIL_FROM),
+/// which lives in RUNNER env — so it is true only if those vars are present ON THE API, otherwise null
+/// = UNKNOWN. The API never asserts a transport state it can't see.
+/// </summary>
+public record NotificationsReadinessDto(
+    [property: JsonPropertyName("channelsConfigured")] bool ChannelsConfigured,
+    [property: JsonPropertyName("routingConfigured")] bool RoutingConfigured,
+    [property: JsonPropertyName("transportConfigured")] bool? TransportConfigured,
+    [property: JsonPropertyName("detail")] string Detail);
