@@ -409,7 +409,7 @@ public class IntegrationTests
         // jsonb via builders (no literal braces for ExecuteSqlRaw). "window" is quoted — reserved word.
         await db.Database.ExecuteSqlRawAsync("""
             INSERT INTO report_narratives (scope_type, scope_key, "window", generated_at, headline, body, highlights, fact_pack, model)
-            VALUES ('fleet','fleet','7d', now() - interval '2 days', 'All green',
+            VALUES ('fleet','','7d', now() - interval '2 days', 'All green',
                     'Availability 99.1%, 1 real-outage incident; p95 +15% w/w.',
                     jsonb_build_array('99.1% availability','p95 +15% w/w'),
                     jsonb_build_object('current', jsonb_build_object('availabilityPct', 99.1, 'p95Ms', 320), 'incidents', 1),
@@ -426,6 +426,12 @@ public class IntegrationTests
             Assert.False(dto.Stale); // 2 days old, 7d window → fresh
             // ★ factPack carries the cited numbers verbatim (auditability).
             Assert.Equal(320, dto.FactPack.GetProperty("current").GetProperty("p95Ms").GetInt32());
+            // ★ fleet is keyed by an EMPTY scope_key (runner contract); the ?key param is ignored for fleet
+            // — a stray key still resolves the one fleet narrative, and the echoed key is "".
+            Assert.Equal("", dto.Key);
+            var withStrayKey = Assert.IsType<NarrativeDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetNarrative(Request("?scope=fleet&key=fleet&window=7d"), default)).Value!);
+            Assert.Equal("All green", withStrayKey.Headline);
 
             // stale: a narrative older than its window period.
             await db.Database.ExecuteSqlRawAsync(
