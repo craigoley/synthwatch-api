@@ -3,6 +3,7 @@ using Azure.Identity;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using SynthWatch.Api.Data.Entities;
@@ -965,5 +966,86 @@ public class IntegrationTests
                   SELECT s, c.id FROM (VALUES ('critical'), ('warning')) v(s) CROSS JOIN channels c WHERE c.name IN ('email','webhook');
                 """);
         }
+    }
+
+    [Fact]
+    public void Channel_test_message_is_clearly_marked_test_and_names_the_channel()
+    {
+        var (subject, body) = ChannelTestMessage.Build("on-call");
+        Assert.Contains("[TEST]", subject);
+        Assert.Contains("on-call", subject);
+        Assert.Contains("TEST", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Channel_test_email_without_transport_env_fails_gracefully()
+    {
+        // ACS env absent (as it currently is on the API) -> a clear "not configured" reason, not a crash.
+        var transport = new AcsChannelTestTransport(new ConfigurationBuilder().Build(), new StubHttpFactory());
+        var res = await transport.SendEmailAsync(new[] { "a@x.com" }, "[TEST] x", "body", default);
+        Assert.False(res.Ok);
+        Assert.Contains("not configured", res.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [SkippableFact]
+    public async Task Channel_test_sends_via_transport_marks_test_and_creates_no_incident()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // jsonb_build_object/array (no literal { } — ExecuteSqlRaw treats braces as format placeholders).
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO channels (name,type,config) VALUES ('test-ch','email', jsonb_build_object('to', jsonb_build_array('a@x.com','b@x.com'))), ('test-ch-empty','email', jsonb_build_object());");
+        var id = await db.Channels.Where(c => c.Name == "test-ch").Select(c => c.Id).FirstAsync();
+        var incidentsBefore = await db.Incidents.CountAsync();
+        var fake = new FakeTransport();
+        var fn = new ChannelTestFunctions(db, fake);
+        try
+        {
+            var res = Assert.IsType<ChannelTestResult>(Assert.IsType<OkObjectResult>(await fn.TestChannel(Request(), id, default)).Value!);
+            Assert.True(res.Ok);
+            // The transport got the channel's recipients + a clearly-marked [TEST] subject.
+            Assert.Equal(new[] { "a@x.com", "b@x.com" }, fake.EmailRecipients);
+            Assert.Contains("[TEST]", fake.EmailSubject);
+            Assert.Contains("test-ch", fake.EmailSubject);
+            // No incident created (pure channel test).
+            Assert.Equal(incidentsBefore, await db.Incidents.CountAsync());
+
+            // Unknown channel -> 404.
+            Assert.IsType<NotFoundObjectResult>(await fn.TestChannel(Request(), 999999, default));
+
+            // A channel with no recipients (config '{}') -> graceful ok:false (no crash, no transport call).
+            var emptyId = await db.Channels.Where(c => c.Name == "test-ch-empty").Select(c => c.Id).FirstAsync();
+            var emptyRes = Assert.IsType<ChannelTestResult>(Assert.IsType<OkObjectResult>(
+                await fn.TestChannel(Request(), emptyId, default)).Value!);
+            Assert.False(emptyRes.Ok);
+            Assert.Contains("recipient", emptyRes.Detail, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM channels WHERE name IN ('test-ch','test-ch-empty');");
+        }
+    }
+
+    private sealed class FakeTransport : IChannelTestTransport
+    {
+        public IReadOnlyList<string>? EmailRecipients;
+        public string? EmailSubject;
+        public string? WebhookUrl;
+        public Task<ChannelTestResult> SendEmailAsync(IReadOnlyList<string> recipients, string subject, string body, CancellationToken ct)
+        {
+            EmailRecipients = recipients;
+            EmailSubject = subject;
+            return Task.FromResult(new ChannelTestResult(true, "sent (fake)"));
+        }
+        public Task<ChannelTestResult> SendWebhookAsync(string url, string? authHeader, string jsonPayload, CancellationToken ct)
+        {
+            WebhookUrl = url;
+            return Task.FromResult(new ChannelTestResult(true, "sent (fake)"));
+        }
+    }
+
+    private sealed class StubHttpFactory : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new();
     }
 }

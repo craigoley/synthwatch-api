@@ -14,6 +14,11 @@ public record ChannelDto(
     public static ChannelDto From(Channel c) => new(c.Id, c.Name, c.Type, c.Config, c.Enabled);
 }
 
+/// <summary>POST /api/channels/{id}/test result — ok + a human-readable reason (delivered / why not).</summary>
+public record ChannelTestResult(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("detail")] string Detail);
+
 /// <summary>Body for POST /api/channels and PUT /api/channels/{id} (full replace of mutable fields).</summary>
 public class ChannelWriteRequest
 {
