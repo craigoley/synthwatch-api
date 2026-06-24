@@ -234,8 +234,10 @@ public class ReportsFunctions
         if (WindowDays(window) is not int days)
             return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
 
-        // fleet → the 'fleet' sentinel key; monitor → the check id.
-        var key = scope == "fleet" ? "fleet" : req.Query["key"].ToString();
+        // Contract (runner is source of truth): the FLEET narrative is keyed by an EMPTY scope_key — there
+        // is exactly one fleet narrative per window, so the ?key param is meaningless for fleet and forced
+        // to ''. monitor narratives are keyed by the check id (?key, required).
+        var key = scope == "fleet" ? "" : req.Query["key"].ToString();
         if (scope == "monitor" && string.IsNullOrWhiteSpace(key))
             return ApiResults.BadRequest("key (the check id) is required when scope=monitor.");
 
