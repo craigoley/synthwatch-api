@@ -14,10 +14,22 @@ public record ChannelDto(
     public static ChannelDto From(Channel c) => new(c.Id, c.Name, c.Type, c.Config, c.Enabled);
 }
 
-/// <summary>POST /api/channels/{id}/test result — ok + a human-readable reason (delivered / why not).</summary>
-public record ChannelTestResult(
-    [property: JsonPropertyName("ok")] bool Ok,
-    [property: JsonPropertyName("detail")] string Detail);
+/// <summary>
+/// POST /api/channels/{id}/test response (202 Accepted). The API only enqueues a test_send_request; the
+/// RUNNER does the real send. The dashboard polls GET .../test/status?requestId={requestId} for the outcome.
+/// </summary>
+public record ChannelTestAcceptedDto(
+    [property: JsonPropertyName("requestId")] long RequestId);
+
+/// <summary>
+/// GET /api/channels/{id}/test/status response — the runner-owned lifecycle of one test-send request.
+/// status is 'pending'|'sending'|'delivered'|'failed'; detail/completedAt are null until the runner sets them.
+/// </summary>
+public record ChannelTestStatusDto(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("detail")] string? Detail,
+    [property: JsonPropertyName("requestedAt")] DateTimeOffset RequestedAt,
+    [property: JsonPropertyName("completedAt")] DateTimeOffset? CompletedAt);
 
 /// <summary>Body for POST /api/channels and PUT /api/channels/{id} (full replace of mutable fields).</summary>
 public class ChannelWriteRequest

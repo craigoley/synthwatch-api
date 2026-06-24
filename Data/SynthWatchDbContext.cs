@@ -34,6 +34,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<AlertRoute> AlertRoutes => Set<AlertRoute>();
     public DbSet<CheckTag> CheckTags => Set<CheckTag>();
     public DbSet<TagRoute> TagRoutes => Set<TagRoute>();
+    public DbSet<TestSendRequest> TestSendRequests => Set<TestSendRequest>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -85,6 +86,20 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.TagKey).HasColumnName("tag_key");
             e.Property(x => x.TagValue).HasColumnName("tag_value");
             e.Property(x => x.ChannelId).HasColumnName("channel_id");
+        });
+
+        modelBuilder.Entity<TestSendRequest>(e =>
+        {
+            // Runner-owned (migration 0026): the API INSERTs 'pending' rows + READs status only.
+            // id/requested_at are DB-generated; the runner mutates status/detail/completed_at.
+            e.ToTable("test_send_requests");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            e.Property(x => x.ChannelId).HasColumnName("channel_id");
+            e.Property(x => x.Status).HasColumnName("status");
+            e.Property(x => x.Detail).HasColumnName("detail");
+            e.Property(x => x.RequestedAt).HasColumnName("requested_at").ValueGeneratedOnAdd();
+            e.Property(x => x.CompletedAt).HasColumnName("completed_at");
         });
 
         modelBuilder.Entity<AlertRoute>(e =>

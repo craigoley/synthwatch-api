@@ -20,5 +20,8 @@ public static class ApiResults
     public static IActionResult Created(string location, object value) =>
         new ObjectResult(value) { StatusCode = StatusCodes.Status201Created };
 
+    public static IActionResult Accepted(object value) =>
+        new ObjectResult(value) { StatusCode = StatusCodes.Status202Accepted };
+
     public static IActionResult NoContent() => new NoContentResult();
 }
