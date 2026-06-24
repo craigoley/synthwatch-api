@@ -35,6 +35,11 @@ public class SynthWatchDbContext : DbContext
     public DbSet<CheckTag> CheckTags => Set<CheckTag>();
     public DbSet<TagRoute> TagRoutes => Set<TagRoute>();
     public DbSet<TestSendRequest> TestSendRequests => Set<TestSendRequest>();
+    public DbSet<AvailabilityReportRow> AvailabilityReport => Set<AvailabilityReportRow>();
+    public DbSet<AvailabilitySeriesRow> AvailabilityReportSeries => Set<AvailabilitySeriesRow>();
+    public DbSet<LatencyReportRow> LatencyReport => Set<LatencyReportRow>();
+    public DbSet<VitalsReportRow> VitalsReport => Set<VitalsReportRow>();
+    public DbSet<LatencySeriesRow> LatencyReportSeries => Set<LatencySeriesRow>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -285,6 +290,65 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.UpRuns).HasColumnName("up_runs");
             e.Property(x => x.DownRuns).HasColumnName("down_runs");
             e.Property(x => x.AvailabilityPct).HasColumnName("availability_pct");
+        });
+
+        modelBuilder.Entity<AvailabilityReportRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.GroupValue).HasColumnName("group_value");
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.CheckName).HasColumnName("check_name");
+            e.Property(x => x.UpCount).HasColumnName("up_count");
+            e.Property(x => x.DownCount).HasColumnName("down_count");
+            e.Property(x => x.TotalCount).HasColumnName("total_count");
+            e.Property(x => x.DowntimeMinutes).HasColumnName("downtime_minutes");
+            e.Property(x => x.IncidentsOpened).HasColumnName("incidents_opened");
+        });
+
+        modelBuilder.Entity<AvailabilitySeriesRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.GroupValue).HasColumnName("group_value");
+            e.Property(x => x.Day).HasColumnName("day");
+            e.Property(x => x.UpCount).HasColumnName("up_count");
+            e.Property(x => x.DownCount).HasColumnName("down_count");
+        });
+
+        modelBuilder.Entity<LatencyReportRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.GroupValue).HasColumnName("group_value");
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.LatencyCount).HasColumnName("latency_count");
+            e.Property(x => x.AvgMs).HasColumnName("avg_ms");
+            e.Property(x => x.P50Ms).HasColumnName("p50_ms");
+            e.Property(x => x.P95Ms).HasColumnName("p95_ms");
+            e.Property(x => x.P99Ms).HasColumnName("p99_ms");
+        });
+
+        modelBuilder.Entity<VitalsReportRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.GroupValue).HasColumnName("group_value");
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.VitalsCount).HasColumnName("vitals_count");
+            e.Property(x => x.LcpP75Ms).HasColumnName("lcp_p75_ms");
+            e.Property(x => x.FcpP75Ms).HasColumnName("fcp_p75_ms");
+            e.Property(x => x.TtfbP75Ms).HasColumnName("ttfb_p75_ms");
+            e.Property(x => x.ClsP75).HasColumnName("cls_p75");
+        });
+
+        modelBuilder.Entity<LatencySeriesRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.GroupValue).HasColumnName("group_value");
+            e.Property(x => x.Day).HasColumnName("day");
+            e.Property(x => x.AvgMs).HasColumnName("avg_ms");
         });
 
         modelBuilder.Entity<FlowManifest>(e =>
