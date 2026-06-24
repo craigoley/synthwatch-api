@@ -704,3 +704,21 @@ CREATE TABLE public.check_tags (
     CONSTRAINT check_tags_value_check CHECK (value <> ''::text AND value = lower(value) AND value !~ '[[:space:]]'::text)
 );
 CREATE INDEX check_tags_key_value_idx ON public.check_tags (key, value);
+
+
+--
+-- Tag-routing (runner migration 0025 / #85): tag-rule routing dimension (severity ∪ per-check ∪ tag-rules
+-- UNION dispatch). Added to the snapshot to mirror the live schema (UNIQUE (tag_key,tag_value,channel_id);
+-- normalized CHECKs matching check_tags; channel_id FK CASCADE; index).
+--
+CREATE TABLE public.tag_routes (
+    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tag_key    text NOT NULL,
+    tag_value  text NOT NULL,
+    channel_id bigint NOT NULL REFERENCES public.channels(id) ON DELETE CASCADE,
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT tag_routes_tag_key_check CHECK (tag_key = lower(tag_key) AND tag_key !~ '[[:space:]]'::text),
+    CONSTRAINT tag_routes_tag_value_check CHECK (tag_value <> ''::text AND tag_value = lower(tag_value) AND tag_value !~ '[[:space:]]'::text),
+    CONSTRAINT tag_routes_uq UNIQUE (tag_key, tag_value, channel_id)
+);
+CREATE INDEX tag_routes_key_value_idx ON public.tag_routes (tag_key, tag_value);

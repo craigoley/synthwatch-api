@@ -895,4 +895,75 @@ public class IntegrationTests
             await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'tag-test';"); // cascades tags
         }
     }
+
+    [SkippableFact]
+    public async Task TagRouting_get_set_normalize_partial_update_and_guard()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var rt = new RoutingFunctions(db);
+        async Task<int> TagRouteCount() { await using var c = _pg.NewDbContext(); return await c.TagRoutes.CountAsync(); }
+        async Task<int> AlertRouteCount() { await using var c = _pg.NewDbContext(); return await c.AlertRoutes.CountAsync(); }
+        try
+        {
+            // GET returns all three dimensions (seeded severity; tagRules empty initially).
+            var got = Assert.IsType<RoutingDto>(Assert.IsType<OkObjectResult>(await rt.GetRouting(Request(), default)).Value!);
+            Assert.NotNull(got.Severity);
+            var severityRowsBefore = await AlertRouteCount();
+
+            // PUT tagRules ONLY (severity/perCheck omitted) -> sets tag-rules + LEAVES severity untouched.
+            // Normalization: "Env"/"Prod"->env/prod, "service"/"Prod Web"->service/prod_web; dup deduped.
+            var put = Assert.IsType<RoutingDto>(Assert.IsType<OkObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                TagRules = new() {
+                    new TagRuleDto("Env", "Prod", 1), new TagRuleDto("service", "Prod Web", 2),
+                    new TagRuleDto("env", "prod", 1) } }), default)).Value!);
+            Assert.Equal(new[] { ("env", "prod", 1L), ("service", "prod_web", 2L) },
+                put.TagRules!.Select(t => (t.TagKey, t.TagValue, t.ChannelId)).ToArray());
+            Assert.Equal(2, await TagRouteCount());
+            Assert.Equal(severityRowsBefore, await AlertRouteCount()); // severity UNTOUCHED by a tagRules-only PUT
+            Assert.NotNull(put.Severity);
+
+            // Replace the tag-rule set (add criticality, drop service).
+            var put2 = Assert.IsType<RoutingDto>(Assert.IsType<OkObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                TagRules = new() { new TagRuleDto("env", "prod", 1), new TagRuleDto("criticality", "tier-1", 2) } }), default)).Value!);
+            Assert.Equal(new[] { ("criticality", "tier-1", 2L), ("env", "prod", 1L) },
+                put2.TagRules!.Select(t => (t.TagKey, t.TagValue, t.ChannelId)).ToArray());
+
+            // channelId validation: unknown channel -> 400, tag_routes UNTOUCHED.
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                TagRules = new() { new TagRuleDto("env", "prod", 999999) } }), default));
+            Assert.Equal(2, await TagRouteCount());
+            // empty tagValue -> 400.
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                TagRules = new() { new TagRuleDto("env", "  ", 1) } }), default));
+
+            // ★ #66 guard, extended: a wrong-key payload ({defaults,overrides}) -> 400, tag_routes UNTOUCHED (not wiped).
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(JsonRequest(new { defaults = new { }, overrides = new { } }), default));
+            Assert.Equal(2, await TagRouteCount());
+
+            // ★ MISSING tagRules key (only severity sent) -> tag-rules LEFT untouched (partial update).
+            Assert.IsType<OkObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                Severity = new() { ["critical"] = new ChannelIdsDto(new long[] { 1 }) } }), default));
+            Assert.Equal(2, await TagRouteCount());
+
+            // ★ EXPLICIT { tagRules: [] } -> clears tag-rules.
+            var cleared = Assert.IsType<RoutingDto>(Assert.IsType<OkObjectResult>(await rt.SetRouting(JsonRequest(new RoutingDto {
+                TagRules = new() }), default)).Value!);
+            Assert.Null(cleared.TagRules);
+            Assert.Equal(0, await TagRouteCount());
+
+            // Delete-guard now covers tag-routed channels: route channel 2 via a tag-rule, then delete -> 409.
+            await rt.SetRouting(JsonRequest(new RoutingDto { TagRules = new() { new TagRuleDto("env", "prod", 2) } }), default);
+            Assert.IsType<ConflictObjectResult>(await new ChannelsFunctions(db).DeleteChannel(Request(), 2, default));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                DELETE FROM tag_routes;
+                DELETE FROM alert_routes;
+                INSERT INTO alert_routes (severity, channel_id)
+                  SELECT s, c.id FROM (VALUES ('critical'), ('warning')) v(s) CROSS JOIN channels c WHERE c.name IN ('email','webhook');
+                """);
+        }
+    }
 }
