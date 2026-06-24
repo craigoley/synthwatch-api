@@ -3,7 +3,6 @@ using Azure.Identity;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using SynthWatch.Api.Data.Entities;
@@ -1008,84 +1007,78 @@ public class IntegrationTests
         }
     }
 
-    [Fact]
-    public void Channel_test_message_is_clearly_marked_test_and_names_the_channel()
-    {
-        var (subject, body) = ChannelTestMessage.Build("on-call");
-        Assert.Contains("[TEST]", subject);
-        Assert.Contains("on-call", subject);
-        Assert.Contains("TEST", body, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public async Task Channel_test_email_without_transport_env_fails_gracefully()
-    {
-        // ACS env absent (as it currently is on the API) -> a clear "not configured" reason, not a crash.
-        var transport = new AcsChannelTestTransport(new ConfigurationBuilder().Build(), new StubHttpFactory());
-        var res = await transport.SendEmailAsync(new[] { "a@x.com" }, "[TEST] x", "body", default);
-        Assert.False(res.Ok);
-        Assert.Contains("not configured", res.Detail, StringComparison.OrdinalIgnoreCase);
-    }
-
     [SkippableFact]
-    public async Task Channel_test_sends_via_transport_marks_test_and_creates_no_incident()
+    public async Task Channel_test_enqueues_pending_request_starts_runner_and_serves_status()
     {
+        // Option A: POST enqueues a 'pending' test_send_requests row + kicks the (mocked) runner job and
+        // returns 202 { requestId }; the RUNNER (not the API) does the real send. GET status reads the
+        // runner-owned row. The API never sends and creates no incident.
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        // jsonb_build_object/array (no literal { } — ExecuteSqlRaw treats braces as format placeholders).
         await db.Database.ExecuteSqlRawAsync(
-            "INSERT INTO channels (name,type,config) VALUES ('test-ch','email', jsonb_build_object('to', jsonb_build_array('a@x.com','b@x.com'))), ('test-ch-empty','email', jsonb_build_object());");
+            "INSERT INTO channels (name,type,config) VALUES ('test-ch','email', jsonb_build_object('to', jsonb_build_array('a@x.com')));");
         var id = await db.Channels.Where(c => c.Name == "test-ch").Select(c => c.Id).FirstAsync();
         var incidentsBefore = await db.Incidents.CountAsync();
-        var fake = new FakeTransport();
-        var fn = new ChannelTestFunctions(db, fake);
+        var runner = new FakeRunnerJobTrigger();
+        var fn = new ChannelTestFunctions(db, runner);
         try
         {
-            var res = Assert.IsType<ChannelTestResult>(Assert.IsType<OkObjectResult>(await fn.TestChannel(Request(), id, default)).Value!);
-            Assert.True(res.Ok);
-            // The transport got the channel's recipients + a clearly-marked [TEST] subject.
-            Assert.Equal(new[] { "a@x.com", "b@x.com" }, fake.EmailRecipients);
-            Assert.Contains("[TEST]", fake.EmailSubject);
-            Assert.Contains("test-ch", fake.EmailSubject);
+            // POST -> 202 { requestId }, a 'pending' row inserted, the runner job started exactly once.
+            var accepted = Assert.IsType<ObjectResult>(await fn.TestChannel(Request(), id, default));
+            Assert.Equal(202, accepted.StatusCode);
+            var requestId = Assert.IsType<ChannelTestAcceptedDto>(accepted.Value!).RequestId;
+            Assert.True(requestId > 0);
+            Assert.Equal(1, runner.StartCount);
+
+            await using (var db2 = _pg.NewDbContext()) // fresh read of committed state
+            {
+                var row = await db2.TestSendRequests.AsNoTracking().SingleAsync(r => r.Id == requestId);
+                Assert.Equal(id, row.ChannelId);
+                Assert.Equal("pending", row.Status);
+                Assert.Null(row.CompletedAt);
+            }
             // No incident created (pure channel test).
             Assert.Equal(incidentsBefore, await db.Incidents.CountAsync());
 
-            // Unknown channel -> 404.
-            Assert.IsType<NotFoundObjectResult>(await fn.TestChannel(Request(), 999999, default));
+            // GET status -> 200 with the runner-owned lifecycle fields (still 'pending' here).
+            var statusOk = Assert.IsType<OkObjectResult>(
+                await fn.TestChannelStatus(Request($"?requestId={requestId}"), id, default));
+            var status = Assert.IsType<ChannelTestStatusDto>(statusOk.Value!);
+            Assert.Equal("pending", status.Status);
+            Assert.Null(status.Detail);
+            Assert.Null(status.CompletedAt);
 
-            // A channel with no recipients (config '{}') -> graceful ok:false (no crash, no transport call).
-            var emptyId = await db.Channels.Where(c => c.Name == "test-ch-empty").Select(c => c.Id).FirstAsync();
-            var emptyRes = Assert.IsType<ChannelTestResult>(Assert.IsType<OkObjectResult>(
-                await fn.TestChannel(Request(), emptyId, default)).Value!);
-            Assert.False(emptyRes.Ok);
-            Assert.Contains("recipient", emptyRes.Detail, StringComparison.OrdinalIgnoreCase);
+            // Simulate the runner completing the lifecycle -> GET reflects delivered + detail + completedAt.
+            await db.Database.ExecuteSqlRawAsync(
+                "UPDATE test_send_requests SET status='delivered', detail='sent', completed_at=now() WHERE id = {0}", requestId);
+            var doneOk = Assert.IsType<OkObjectResult>(
+                await fn.TestChannelStatus(Request($"?requestId={requestId}"), id, default));
+            var done = Assert.IsType<ChannelTestStatusDto>(doneOk.Value!);
+            Assert.Equal("delivered", done.Status);
+            Assert.Equal("sent", done.Detail);
+            Assert.NotNull(done.CompletedAt);
+
+            // POST to an unknown channel -> 404 (and no row enqueued, runner not kicked again).
+            Assert.IsType<NotFoundObjectResult>(await fn.TestChannel(Request(), 999999, default));
+            Assert.Equal(1, runner.StartCount);
+
+            // GET status for an unknown requestId -> 404; for a requestId belonging to ANOTHER channel -> 404.
+            Assert.IsType<NotFoundObjectResult>(await fn.TestChannelStatus(Request("?requestId=999999"), id, default));
+            Assert.IsType<NotFoundObjectResult>(await fn.TestChannelStatus(Request($"?requestId={requestId}"), id + 1, default));
         }
         finally
         {
-            await db.Database.ExecuteSqlRawAsync("DELETE FROM channels WHERE name IN ('test-ch','test-ch-empty');");
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM channels WHERE name = 'test-ch';"); // cascades test_send_requests
         }
     }
 
-    private sealed class FakeTransport : IChannelTestTransport
+    private sealed class FakeRunnerJobTrigger : IRunnerJobTrigger
     {
-        public IReadOnlyList<string>? EmailRecipients;
-        public string? EmailSubject;
-        public string? WebhookUrl;
-        public Task<ChannelTestResult> SendEmailAsync(IReadOnlyList<string> recipients, string subject, string body, CancellationToken ct)
+        public int StartCount;
+        public Task<bool> StartAsync(CancellationToken ct)
         {
-            EmailRecipients = recipients;
-            EmailSubject = subject;
-            return Task.FromResult(new ChannelTestResult(true, "sent (fake)"));
+            StartCount++;
+            return Task.FromResult(true);
         }
-        public Task<ChannelTestResult> SendWebhookAsync(string url, string? authHeader, string jsonPayload, CancellationToken ct)
-        {
-            WebhookUrl = url;
-            return Task.FromResult(new ChannelTestResult(true, "sent (fake)"));
-        }
-    }
-
-    private sealed class StubHttpFactory : IHttpClientFactory
-    {
-        public HttpClient CreateClient(string name) => new();
     }
 }

@@ -691,6 +691,25 @@ INSERT INTO public.alert_routes (severity, channel_id)
 
 
 --
+-- Channel test-send queue (runner migration 0026): the API INSERTs a 'pending' row per
+-- POST /api/channels/{id}/test + READs status; the RUNNER drains it through the real dispatch path and
+-- advances status pending -> sending -> delivered|failed. Mirrors the live schema (channel_id FK CASCADE;
+-- status CHECK; requested_at DEFAULT now()). Kept in sync by hand with the runner's 0026 migration — the
+-- rest of this file is a pg_dump snapshot of the runner DB; this block matches that table's definition.
+--
+CREATE TABLE public.test_send_requests (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    channel_id   bigint NOT NULL REFERENCES public.channels(id) ON DELETE CASCADE,
+    status       text NOT NULL DEFAULT 'pending',
+    detail       text,
+    requested_at timestamp with time zone NOT NULL DEFAULT now(),
+    completed_at timestamp with time zone,
+    CONSTRAINT test_send_requests_status_check CHECK (status = ANY (ARRAY['pending'::text, 'sending'::text, 'delivered'::text, 'failed'::text]))
+);
+CREATE INDEX test_send_requests_channel_idx ON public.test_send_requests (channel_id);
+
+
+--
 -- Tags (runner migration 0024 / #84): normalized key:value tags on checks. Added to the test snapshot
 -- to mirror the live schema (PK (check_id,key) = one value per key; lowercase/whitespace-free CHECKs;
 -- value non-empty; key may be ''; FK CASCADE).

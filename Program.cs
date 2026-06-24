@@ -29,12 +29,13 @@ builder.Services.AddSingleton(PostgresDataSourceFactory.Create);
 // (the trace-download proxy). Same DefaultAzureCredential family the DB token uses.
 builder.Services.AddSingleton<Azure.Core.TokenCredential>(_ => new Azure.Identity.DefaultAzureCredential());
 
-// Channel test-send transport (POST /api/channels/{id}/test): ACS email + webhook POST, reading the
-// same ACS env the runner uses. Email is inert until ACS_EMAIL_CONNECTION_STRING / ALERT_EMAIL_FROM are
-// set on the API Function App (a Craig step — see the PR); the webhook path needs no env.
+// Channel test-send (POST /api/channels/{id}/test, Option A): the API enqueues a test_send_requests row
+// and starts the RUNNER Container App Job on-demand via ARM, so the runner's REAL dispatch path sends the
+// [TEST] alert (no C# ACS replica). RunnerJob__* config overrides the resource coordinates; the ARM token
+// uses the SAME DefaultAzureCredential the DB/blob tokens use (registered above).
 builder.Services.AddHttpClient();
-builder.Services.AddSingleton<SynthWatch.Api.Infrastructure.IChannelTestTransport,
-    SynthWatch.Api.Infrastructure.AcsChannelTestTransport>();
+builder.Services.Configure<RunnerJobOptions>(builder.Configuration.GetSection("RunnerJob"));
+builder.Services.AddSingleton<IRunnerJobTrigger, ArmRunnerJobTrigger>();
 
 // Read-mostly EF Core context over the runner-owned schema (no migrations).
 builder.Services.AddDbContext<SynthWatchDbContext>((sp, options) =>
