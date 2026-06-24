@@ -358,7 +358,7 @@ public class SynthWatchDbContext : DbContext
             e.ToView(null);
             e.Property(x => x.ScopeType).HasColumnName("scope_type");
             e.Property(x => x.ScopeKey).HasColumnName("scope_key");
-            e.Property(x => x.Window).HasColumnName("report_window");
+            e.Property(x => x.Window).HasColumnName("window");
             e.Property(x => x.GeneratedAt).HasColumnName("generated_at");
             e.Property(x => x.Headline).HasColumnName("headline");
             e.Property(x => x.Body).HasColumnName("body");

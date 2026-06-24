@@ -241,10 +241,10 @@ public class ReportsFunctions
 
         // highlights + fact_pack as raw jsonb text → re-emitted verbatim (cited numbers pass through).
         var row = (await _db.ReportNarratives.FromSql(
-            $@"SELECT scope_type, scope_key, report_window, generated_at, headline, body,
+            $@"SELECT scope_type, scope_key, ""window"", generated_at, headline, body,
                       highlights::text AS highlights, fact_pack::text AS fact_pack, model
                FROM report_narratives
-               WHERE scope_type = {scope} AND scope_key = {key} AND report_window = {window}
+               WHERE scope_type = {scope} AND scope_key = {key} AND ""window"" = {window}
                ORDER BY generated_at DESC
                LIMIT 1").AsNoTracking().ToListAsync(ct)).FirstOrDefault();
 

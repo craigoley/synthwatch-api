@@ -406,9 +406,9 @@ public class IntegrationTests
         RequireDocker();
         await using var db = _pg.NewDbContext();
         var fn = new ReportsFunctions(db);
-        // jsonb via builders (no literal braces for ExecuteSqlRaw). report_window (window is reserved).
+        // jsonb via builders (no literal braces for ExecuteSqlRaw). "window" is quoted — reserved word.
         await db.Database.ExecuteSqlRawAsync("""
-            INSERT INTO report_narratives (scope_type, scope_key, report_window, generated_at, headline, body, highlights, fact_pack, model)
+            INSERT INTO report_narratives (scope_type, scope_key, "window", generated_at, headline, body, highlights, fact_pack, model)
             VALUES ('fleet','fleet','7d', now() - interval '2 days', 'All green',
                     'Availability 99.1%, 1 real-outage incident; p95 +15% w/w.',
                     jsonb_build_array('99.1% availability','p95 +15% w/w'),
@@ -429,7 +429,7 @@ public class IntegrationTests
 
             // stale: a narrative older than its window period.
             await db.Database.ExecuteSqlRawAsync(
-                "UPDATE report_narratives SET generated_at = now() - interval '10 days' WHERE scope_type='fleet' AND report_window='7d';");
+                "UPDATE report_narratives SET generated_at = now() - interval '10 days' WHERE scope_type='fleet' AND \"window\"='7d';");
             await using var db2 = _pg.NewDbContext();
             var staleDto = Assert.IsType<NarrativeDto>(Assert.IsType<OkObjectResult>(
                 await new ReportsFunctions(db2).GetNarrative(Request("?scope=fleet&window=7d"), default)).Value!);
@@ -444,7 +444,7 @@ public class IntegrationTests
         }
         finally
         {
-            await db.Database.ExecuteSqlRawAsync("DELETE FROM report_narratives WHERE scope_type='fleet' AND report_window='7d';");
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM report_narratives WHERE scope_type='fleet' AND \"window\"='7d';");
         }
     }
 
