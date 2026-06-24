@@ -40,6 +40,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<LatencyReportRow> LatencyReport => Set<LatencyReportRow>();
     public DbSet<VitalsReportRow> VitalsReport => Set<VitalsReportRow>();
     public DbSet<LatencySeriesRow> LatencyReportSeries => Set<LatencySeriesRow>();
+    public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -349,6 +350,21 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.GroupValue).HasColumnName("group_value");
             e.Property(x => x.Day).HasColumnName("day");
             e.Property(x => x.AvgMs).HasColumnName("avg_ms");
+        });
+
+        modelBuilder.Entity<ReportNarrativeRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.ScopeType).HasColumnName("scope_type");
+            e.Property(x => x.ScopeKey).HasColumnName("scope_key");
+            e.Property(x => x.Window).HasColumnName("report_window");
+            e.Property(x => x.GeneratedAt).HasColumnName("generated_at");
+            e.Property(x => x.Headline).HasColumnName("headline");
+            e.Property(x => x.Body).HasColumnName("body");
+            e.Property(x => x.Highlights).HasColumnName("highlights");
+            e.Property(x => x.FactPack).HasColumnName("fact_pack");
+            e.Property(x => x.Model).HasColumnName("model");
         });
 
         modelBuilder.Entity<FlowManifest>(e =>
