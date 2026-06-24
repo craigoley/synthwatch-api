@@ -33,6 +33,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<Channel> Channels => Set<Channel>();
     public DbSet<AlertRoute> AlertRoutes => Set<AlertRoute>();
     public DbSet<CheckTag> CheckTags => Set<CheckTag>();
+    public DbSet<TagRoute> TagRoutes => Set<TagRoute>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -74,6 +75,16 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.CheckId).HasColumnName("check_id");
             e.Property(x => x.Key).HasColumnName("key");
             e.Property(x => x.Value).HasColumnName("value");
+        });
+
+        modelBuilder.Entity<TagRoute>(e =>
+        {
+            e.ToTable("tag_routes");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.TagKey).HasColumnName("tag_key");
+            e.Property(x => x.TagValue).HasColumnName("tag_value");
+            e.Property(x => x.ChannelId).HasColumnName("channel_id");
         });
 
         modelBuilder.Entity<AlertRoute>(e =>

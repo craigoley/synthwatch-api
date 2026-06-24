@@ -110,12 +110,13 @@ public class ChannelsFunctions
         var channel = await _db.Channels.FirstOrDefaultAsync(c => c.Id == id, ct);
         if (channel is null) return ApiResults.NotFound($"Channel {id} not found.");
 
-        var refs = await _db.AlertRoutes.CountAsync(r => r.ChannelId == id, ct);
+        var refs = await _db.AlertRoutes.CountAsync(r => r.ChannelId == id, ct)
+                 + await _db.TagRoutes.CountAsync(r => r.ChannelId == id, ct);
         if (refs > 0)
             return new ConflictObjectResult(new
             {
                 error = "conflict",
-                message = $"channel {id} is referenced by {refs} routing rule(s); remove it from routing before deleting.",
+                message = $"channel {id} is referenced by {refs} routing rule(s) (severity/per-check/tag); remove it from routing before deleting.",
             });
 
         _db.Channels.Remove(channel);
