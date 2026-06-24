@@ -371,6 +371,36 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Check_dto_includes_tags_for_display()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('tag-display','http','https://d.example') RETURNING id INTO cid;
+              INSERT INTO check_tags (check_id,key,value) VALUES (cid,'env','prod'),(cid,'team','web');
+            END $$;
+            """);
+        var id = await db.Checks.Where(c => c.Name == "tag-display").Select(c => c.Id).FirstAsync();
+        try
+        {
+            var fn = new ChecksFunctions(db);
+            // GET /api/checks/{id} now carries the check's tags (was always [] before — the display gap).
+            var detail = Assert.IsType<CheckDetailDto>(Assert.IsType<OkObjectResult>(await fn.GetCheck(Request(), id, default)).Value!);
+            Assert.Equal(new[] { ("env", "prod"), ("team", "web") }, detail.Tags.Select(t => (t.Key, t.Value)).ToArray());
+            // GET /api/checks (list) carries them too.
+            var list = Assert.IsAssignableFrom<IEnumerable<CheckSummaryDto>>(
+                Assert.IsType<OkObjectResult>(await fn.ListChecks(Request(), default)).Value!).ToList();
+            var summary = Assert.Single(list, c => c.Id == id);
+            Assert.Equal(new[] { ("env", "prod"), ("team", "web") }, summary.Tags.Select(t => (t.Key, t.Value)).ToArray());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'tag-display';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Reports_availability_is_additive_and_performance_p95_is_recomputed_from_raw()
     {
         RequireDocker();

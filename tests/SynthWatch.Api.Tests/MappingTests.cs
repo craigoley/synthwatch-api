@@ -59,8 +59,10 @@ public class MappingTests
             new List<SparkPoint> { new(default, 30, "pass") });
         var locations = new List<LocationStatusDto> { new("default", "warn") };
 
-        var dto = CheckSummaryDto.From(check, latest, metrics, locations);
+        var tags = new List<TagDto> { new("team", "web") };
+        var dto = CheckSummaryDto.From(check, latest, metrics, locations, tags);
 
+        Assert.Equal("team", Assert.Single(dto.Tags).Key);
         Assert.Equal(50.0, dto.P50Ms);
         Assert.Equal(90.0, dto.P95Ms);
         Assert.Equal(100, dto.Runs24h);
@@ -79,7 +81,7 @@ public class MappingTests
         var locations = new List<LocationStatusDto> { new("eastus2", "pass"), new("westus", "fail") };
 
         var dto = CheckSummaryDto.From(check, new Run { Id = 1, CheckId = 1, Status = "fail" },
-            CheckMetricsDto.Empty, locations);
+            CheckMetricsDto.Empty, locations, Array.Empty<TagDto>());
 
         Assert.Equal(2, dto.Locations.Count);
         Assert.Equal("eastus2", dto.Locations[0].Location);

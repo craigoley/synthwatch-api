@@ -98,12 +98,22 @@ public class ChecksFunctions
             m.P50Ms, m.P95Ms, m.Runs24h, m.OpenIncidentCount, m.MaxOpenSeverity,
             JsonSerializer.Deserialize<List<SparkPoint>>(m.Spark) ?? new List<SparkPoint>()));
 
+        // key:value tags for all listed checks in one round-trip → grouped per check.
+        var tagsByCheck = (await _db.CheckTags.AsNoTracking()
+                .Where(t => ids.Contains(t.CheckId))
+                .OrderBy(t => t.Key).ThenBy(t => t.Value)
+                .ToListAsync(ct))
+            .GroupBy(t => t.CheckId)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<TagDto>)g.Select(t => new TagDto(t.Key, t.Value)).ToList());
+
         var emptyRollup = (IReadOnlyList<LocationStatusDto>)Array.Empty<LocationStatusDto>();
+        var emptyTags = (IReadOnlyList<TagDto>)Array.Empty<TagDto>();
         var result = checks.Select(c => CheckSummaryDto.From(
             c,
             latestByCheck.GetValueOrDefault(c.Id),
             metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty),
-            rollupByCheck.GetValueOrDefault(c.Id, emptyRollup)));
+            rollupByCheck.GetValueOrDefault(c.Id, emptyRollup),
+            tagsByCheck.GetValueOrDefault(c.Id, emptyTags)));
 
         // Short cache so the dashboard's polling doesn't hit the DB every tick; current status
         // moves run-to-run, so keep it brief (10s). Vary on Origin since platform CORS echoes a
@@ -130,7 +140,7 @@ public class ChecksFunctions
             .Take(20)
             .ToListAsync(ct);
 
-        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await BuildSloAsync(id, check.SloTarget, ct)));
+        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct), await BuildSloAsync(id, check.SloTarget, ct)));
     }
 
     // SLO error-budget + burn. Mirrors the SLA function-read pattern (keyless entity + raw SQL),
@@ -212,7 +222,8 @@ public class ChecksFunctions
                ON CONFLICT (check_id, location) DO NOTHING", ct);
         await tx.CommitAsync(ct);
 
-        return ApiResults.Created($"/api/checks/{check.Id}", CheckDetailDto.From(check, Array.Empty<Run>()));
+        // A freshly created check has no tags yet (tags are set via PUT /api/checks/{id}/tags).
+        return ApiResults.Created($"/api/checks/{check.Id}", CheckDetailDto.From(check, Array.Empty<Run>(), Array.Empty<TagDto>()));
     }
 
     /// <summary>PATCH /api/checks/{id} — partial edit / pause (enabled).</summary>
@@ -251,8 +262,16 @@ public class ChecksFunctions
             .Take(20)
             .ToListAsync(ct);
 
-        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await BuildSloAsync(id, check.SloTarget, ct)));
+        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct), await BuildSloAsync(id, check.SloTarget, ct)));
     }
+
+    // A check's key:value tags as DTOs (sorted), for the check detail/update responses.
+    private async Task<IReadOnlyList<TagDto>> CheckTagsAsync(long checkId, CancellationToken ct) =>
+        await _db.CheckTags.AsNoTracking()
+            .Where(t => t.CheckId == checkId)
+            .OrderBy(t => t.Key).ThenBy(t => t.Value)
+            .Select(t => new TagDto(t.Key, t.Value))
+            .ToListAsync(ct);
 
     /// <summary>DELETE /api/checks/{id} — soft delete (enabled=false) by default; ?hard=true removes the row.</summary>
     [Function("DeleteCheck")]
