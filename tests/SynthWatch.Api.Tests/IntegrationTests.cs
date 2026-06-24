@@ -70,6 +70,46 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Notifications_readiness_reports_db_config_and_unknown_transport()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new NotificationsFunctions(db);
+        var ch = new ChannelsFunctions(db);
+        try
+        {
+            // Routing is seeded (alert_routes); the test process has no ACS env, so transport is
+            // genuinely UNKNOWN (null) — the API never asserts a transport state it can't see.
+            var baseDto = Assert.IsType<NotificationsReadinessDto>(
+                Assert.IsType<OkObjectResult>(await fn.Readiness(Request(), default)).Value!);
+            Assert.True(baseDto.RoutingConfigured);
+            Assert.Null(baseDto.TransportConfigured);
+
+            // Add a DELIVERABLE channel (email with a recipient) → channelsConfigured flips true
+            // (the seeded channels carry empty config, so this proves the deliverability check).
+            await ch.CreateChannel(JsonRequest(new {
+                name = "readiness-deliverable", type = "email", config = new { to = new[] { "x@y.com" } } }), default);
+            var withCh = Assert.IsType<NotificationsReadinessDto>(
+                Assert.IsType<OkObjectResult>(await fn.Readiness(Request(), default)).Value!);
+            Assert.True(withCh.ChannelsConfigured);
+
+            // With the ACS env present (e.g. set on the API too), transport reports configured.
+            Environment.SetEnvironmentVariable("ACS_EMAIL_CONNECTION_STRING", "endpoint=https://x;accesskey=y");
+            Environment.SetEnvironmentVariable("ALERT_EMAIL_FROM", "alerts@example.com");
+            var withEnv = Assert.IsType<NotificationsReadinessDto>(
+                Assert.IsType<OkObjectResult>(await fn.Readiness(Request(), default)).Value!);
+            Assert.True(withEnv.TransportConfigured);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ACS_EMAIL_CONNECTION_STRING", null);
+            Environment.SetEnvironmentVariable("ALERT_EMAIL_FROM", null);
+            await using var cleanup = _pg.NewDbContext();
+            await cleanup.Database.ExecuteSqlRawAsync("DELETE FROM channels WHERE name = 'readiness-deliverable'");
+        }
+    }
+
+    [SkippableFact]
     public async Task Checks_list_carries_parity_fields_from_the_lateral_sql()
     {
         RequireDocker();
