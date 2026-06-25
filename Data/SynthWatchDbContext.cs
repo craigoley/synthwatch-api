@@ -42,6 +42,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<LatencySeriesRow> LatencyReportSeries => Set<LatencySeriesRow>();
     public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
     public DbSet<ReconcileDriftRow> ReconcileDrift => Set<ReconcileDriftRow>();
+    public DbSet<SpecCatalogRow> SpecCatalog => Set<SpecCatalogRow>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -377,6 +378,33 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.DriftType).HasColumnName("drift_type");
             e.Property(x => x.Detail).HasColumnName("detail");
             e.Property(x => x.DetectedAt).HasColumnName("detected_at");
+        });
+
+        // Keyless: the spec-catalog read (spec_catalog LEFT JOIN checks + health) via raw SQL only.
+        // Column names match the GetSpecCatalog query's aliases.
+        modelBuilder.Entity<SpecCatalogRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.SourceKey).HasColumnName("source_key");
+            e.Property(x => x.Name).HasColumnName("name");
+            e.Property(x => x.SpecPath).HasColumnName("spec_path");
+            e.Property(x => x.Kind).HasColumnName("kind");
+            e.Property(x => x.Target).HasColumnName("target");
+            e.Property(x => x.SuggestedIntervalSeconds).HasColumnName("suggested_interval_seconds");
+            e.Property(x => x.Tags).HasColumnName("tags");
+            e.Property(x => x.Description).HasColumnName("description");
+            e.Property(x => x.EnabledByDefault).HasColumnName("enabled_by_default");
+            e.Property(x => x.Runnable).HasColumnName("runnable");
+            e.Property(x => x.NotRunnableReason).HasColumnName("not_runnable_reason");
+            e.Property(x => x.ProbedAt).HasColumnName("probed_at");
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.CheckName).HasColumnName("check_name");
+            e.Property(x => x.Enabled).HasColumnName("enabled");
+            e.Property(x => x.CurrentStatus).HasColumnName("current_status");
+            e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
+            e.Property(x => x.P95Ms).HasColumnName("p95_ms");
+            e.Property(x => x.OpenIncidentCount).HasColumnName("open_incident_count");
         });
 
         modelBuilder.Entity<FlowManifest>(e =>

@@ -43,6 +43,7 @@ All routes are prefixed with `/api`. JSON in/out.
 | `GET` | `/api/flows` | Distinct `flow_name` values |
 | `GET` | `/api/sla?window=24h\|7d\|30d` | Per-check availability from the SLA views |
 | `GET` | `/api/reconcile/drift` | Latest monitors-as-code drift snapshot (read-only; reconcile runs in report mode) |
+| `GET` | `/api/specs` | Spec catalog: every manifest spec LEFT JOIN checks (coverage + runnable + health), read-only |
 
 Request bodies are validated against the live DB CHECK constraints (kind, severity,
 form factor, positive intervals/timeouts, `browser` requires `flow_name`, …) and rejected
