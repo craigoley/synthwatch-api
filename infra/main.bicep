@@ -43,6 +43,15 @@ param maximumInstanceCount int = 40
 @allowed([512, 2048, 4096])
 param instanceMemoryMB int = 2048
 
+@description('Phase 12 auth — comma-separated admin emails. ★ The API enforces ADMIN from THIS setting (not the dashboard Vercel env), so admins are recognized + cannot be locked out. Empty = no admins until set.')
+param adminEmails string = ''
+
+@description('Phase 12 auth — the ACS-verified sender address for OTP / access-request emails (AUTH_EMAIL_FROM). Empty disables auth email send.')
+param authEmailFrom string = ''
+
+@description('Phase 12 auth — ACS resource endpoint for MI-based email send (e.g. https://xxx.communication.azure.com). ★ The API MI needs the "Communication Services Contributor" role on this resource (a manual role assignment — see the PR). Empty = MI send off (set ACS_EMAIL_CONNECTION_STRING as a fallback).')
+param acsEmailEndpoint string = ''
+
 @description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
 param artifactsStorageAccountName string = 'synthwatche24e33105c'
 
@@ -166,6 +175,20 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'Postgres__Username'
           value: pgMiUsername
+        }
+        // Phase 12 auth (slice 1). ADMIN_EMAILS is the SECURITY source of truth for admin (the API
+        // enforces, not the dashboard). AUTH_EMAIL_FROM + ACS_EMAIL_ENDPOINT drive MI-based OTP email.
+        {
+          name: 'ADMIN_EMAILS'
+          value: adminEmails
+        }
+        {
+          name: 'AUTH_EMAIL_FROM'
+          value: authEmailFrom
+        }
+        {
+          name: 'ACS_EMAIL_ENDPOINT'
+          value: acsEmailEndpoint
         }
       ]
       // PLATFORM CORS. The Functions host answers the OPTIONS preflight itself (before the worker

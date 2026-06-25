@@ -18,6 +18,9 @@ public static class ApiResults
     public static IActionResult Conflict(string message) =>
         new ConflictObjectResult(new { error = "conflict", message });
 
+    public static IActionResult Unauthorized(string message) =>
+        new UnauthorizedObjectResult(new { error = "unauthorized", message });
+
     public static IActionResult Ok(object value) => new OkObjectResult(value);
 
     public static IActionResult Created(string location, object value) =>

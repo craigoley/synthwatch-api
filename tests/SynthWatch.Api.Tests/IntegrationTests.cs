@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Azure.Identity;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -1625,6 +1626,193 @@ public class IntegrationTests
         {
             StartCount++;
             return Task.FromResult(true);
+        }
+    }
+
+    // ─── Phase 12 slice 1 — auth identity (OTP + sessions + access request) ────────────────────────
+
+    private sealed class FakeEmailSender : IEmailSender
+    {
+        public List<(string To, string Subject, string Body)> Sent { get; } = new();
+        public Task SendAsync(string recipient, string subject, string body, CancellationToken ct)
+        {
+            Sent.Add((recipient, subject, body));
+            return Task.CompletedTask;
+        }
+    }
+
+    private static HttpRequest AuthedRequest(string token)
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Headers.Authorization = $"Bearer {token}";
+        return ctx.Request;
+    }
+
+    private static string ExtractCode(string body) => Regex.Match(body, @"\b(\d{6})\b").Groups[1].Value;
+
+    [SkippableFact]
+    public async Task Auth_otp_flow_issues_verifies_mints_session_me_and_logout()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "boss@synth.test");
+        await using var db = _pg.NewDbContext();
+        var email = new FakeEmailSender();
+        var fn = new AuthFunctions(db, email, NullLogger<AuthFunctions>.Instance);
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO editors (email, added_by) VALUES ('editor@synth.test', 'boss@synth.test')");
+
+            // request-code for a KNOWN editor → 202 + the code emailed (case-insensitively normalized).
+            var rc = await fn.RequestCode(JsonRequest(new { email = "Editor@Synth.test" }), default);
+            Assert.Equal(202, Assert.IsType<ObjectResult>(rc).StatusCode);
+            var sent = Assert.Single(email.Sent);
+            Assert.Equal("editor@synth.test", sent.To);
+            var code = ExtractCode(sent.Body);
+            Assert.Matches("^[0-9]{6}$", code);
+
+            // The stored code is HASHED, never plaintext.
+            await using (var dbr = _pg.NewDbContext())
+            {
+                var row = await dbr.OtpCodes.AsNoTracking().Where(o => o.Email == "editor@synth.test")
+                    .OrderByDescending(o => o.CreatedAt).FirstAsync();
+                Assert.NotEqual(code, row.CodeHash);
+                Assert.Equal(AuthTokens.Sha256Hex(code), row.CodeHash);
+            }
+
+            // A WRONG code → 400 and bumps attempt_count (brute-force cap).
+            var wrong = code == "000000" ? "111111" : "000000";
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.Verify(JsonRequest(new { email = "editor@synth.test", code = wrong }), default)).StatusCode);
+            await using (var dbr = _pg.NewDbContext())
+                Assert.Equal(1, await dbr.OtpCodes.AsNoTracking().Where(o => o.Email == "editor@synth.test")
+                    .OrderByDescending(o => o.CreatedAt).Select(o => o.AttemptCount).FirstAsync());
+
+            // The CORRECT code → 200 + a session token; role resolved live = editor.
+            var ok = Assert.IsType<OkObjectResult>(
+                await fn.Verify(JsonRequest(new { email = "editor@synth.test", code }), default));
+            var verified = Assert.IsType<VerifyResponseDto>(ok.Value!);
+            Assert.Equal("editor", verified.Role);
+            Assert.StartsWith("swt_", verified.Token);
+            // The session is stored HASHED.
+            await using (var dbr = _pg.NewDbContext())
+                Assert.True(await dbr.Sessions.AsNoTracking()
+                    .AnyAsync(s => s.TokenHash == AuthTokens.Sha256Hex(verified.Token) && s.Email == "editor@synth.test"));
+
+            // The same code can't be reused (one-time/consumed).
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.Verify(JsonRequest(new { email = "editor@synth.test", code }), default)).StatusCode);
+
+            // me resolves the token → { email, role }; no token → 401.
+            var me = Assert.IsType<MeDto>(Assert.IsType<OkObjectResult>(await fn.Me(AuthedRequest(verified.Token), default)).Value!);
+            Assert.Equal("editor@synth.test", me.Email);
+            Assert.Equal("editor", me.Role);
+            Assert.IsType<UnauthorizedObjectResult>(await fn.Me(Request(), default));
+
+            // logout revokes the session → me now 401.
+            await fn.Logout(AuthedRequest(verified.Token), default);
+            Assert.IsType<UnauthorizedObjectResult>(await fn.Me(AuthedRequest(verified.Token), default));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+            await using var cleanup = _pg.NewDbContext();
+            await cleanup.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email='editor@synth.test'; DELETE FROM otp_codes WHERE email='editor@synth.test'; DELETE FROM editors WHERE email='editor@synth.test';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task Auth_request_code_is_enumeration_safe_and_verify_guards_expiry_and_role()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "boss@synth.test");
+        await using var db = _pg.NewDbContext();
+        var email = new FakeEmailSender();
+        var fn = new AuthFunctions(db, email, NullLogger<AuthFunctions>.Instance);
+        try
+        {
+            // UNKNOWN email → still 202 (enumeration-safe), but NO email is sent.
+            var rc = await fn.RequestCode(JsonRequest(new { email = "stranger@nope.test" }), default);
+            Assert.Equal(202, Assert.IsType<ObjectResult>(rc).StatusCode);
+            Assert.Empty(email.Sent);
+
+            // ADMIN email (in ADMIN_EMAILS) → emailed + verify resolves role=admin.
+            Assert.Equal(202, Assert.IsType<ObjectResult>(await fn.RequestCode(JsonRequest(new { email = "boss@synth.test" }), default)).StatusCode);
+            var adminCode = ExtractCode(Assert.Single(email.Sent).Body);
+            var adminOk = Assert.IsType<OkObjectResult>(await fn.Verify(JsonRequest(new { email = "boss@synth.test", code = adminCode }), default));
+            Assert.Equal("admin", Assert.IsType<VerifyResponseDto>(adminOk.Value!).Role);
+
+            // EXPIRED code → 400 (seed a row whose expires_at is in the past).
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO otp_codes (email, code_hash, expires_at) VALUES ('exp@synth.test', {AuthTokens.Sha256Hex("424242")}, now() - interval '1 minute')");
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.Verify(JsonRequest(new { email = "exp@synth.test", code = "424242" }), default)).StatusCode);
+
+            // OVER attempt cap → 400 even with the right code (seed attempt_count=5).
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO otp_codes (email, code_hash, expires_at, attempt_count) VALUES ('lock@synth.test', {AuthTokens.Sha256Hex("424242")}, now() + interval '5 minutes', 5)");
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.Verify(JsonRequest(new { email = "lock@synth.test", code = "424242" }), default)).StatusCode);
+
+            // A VALID code for an email that is neither admin nor editor → rejected (no session minted).
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO otp_codes (email, code_hash, expires_at) VALUES ('nobody@synth.test', {AuthTokens.Sha256Hex("424242")}, now() + interval '5 minutes')");
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.Verify(JsonRequest(new { email = "nobody@synth.test", code = "424242" }), default)).StatusCode);
+            await using (var dbr = _pg.NewDbContext())
+                Assert.False(await dbr.Sessions.AsNoTracking().AnyAsync(s => s.Email == "nobody@synth.test"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+            await using var cleanup = _pg.NewDbContext();
+            await cleanup.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email LIKE '%@synth.test'; DELETE FROM otp_codes WHERE email LIKE '%@synth.test';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task Auth_request_access_is_uniform_records_and_rate_limited()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "boss@synth.test");
+        await using var db = _pg.NewDbContext();
+        var email = new FakeEmailSender();
+        var fn = new AuthFunctions(db, email, NullLogger<AuthFunctions>.Instance);
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO editors (email, added_by) VALUES ('known@req.test', 'boss@synth.test')");
+
+            // The SAME uniform 200 message whether the requester is unknown OR already an editor — no status leak.
+            var unknown = Assert.IsType<OkObjectResult>(await fn.RequestAccess(JsonRequest(new { email = "unknown@req.test" }), default));
+            var knownEditor = Assert.IsType<OkObjectResult>(await fn.RequestAccess(JsonRequest(new { email = "known@req.test" }), default));
+            Assert.Equal(
+                Assert.IsType<MessageDto>(unknown.Value!).Message,
+                Assert.IsType<MessageDto>(knownEditor.Value!).Message);
+
+            // Both are RECORDED (admin visibility) and both PAGE the admin (boss@synth.test).
+            await using (var dbr = _pg.NewDbContext())
+            {
+                Assert.True(await dbr.AccessRequests.AsNoTracking().AnyAsync(a => a.Email == "unknown@req.test"));
+                Assert.True(await dbr.AccessRequests.AsNoTracking().AnyAsync(a => a.Email == "known@req.test"));
+            }
+            Assert.Equal(2, email.Sent.Count);
+            Assert.All(email.Sent, s => Assert.Equal("boss@synth.test", s.To));
+
+            // Rate-limit per email: after the cap (3/24h), further requests are uniform 200 but DON'T record/page.
+            for (var i = 0; i < 5; i++)
+                await fn.RequestAccess(JsonRequest(new { email = "spammer@req.test" }), default);
+            await using (var dbr = _pg.NewDbContext())
+                Assert.Equal(3, await dbr.AccessRequests.AsNoTracking().CountAsync(a => a.Email == "spammer@req.test"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+            await using var cleanup = _pg.NewDbContext();
+            await cleanup.Database.ExecuteSqlRawAsync(
+                "DELETE FROM access_requests WHERE email LIKE '%@req.test'; DELETE FROM editors WHERE email LIKE '%@req.test';");
         }
     }
 }

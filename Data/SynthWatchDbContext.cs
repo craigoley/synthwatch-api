@@ -44,6 +44,13 @@ public class SynthWatchDbContext : DbContext
     public DbSet<ReconcileDriftRow> ReconcileDrift => Set<ReconcileDriftRow>();
     public DbSet<SpecCatalogRow> SpecCatalog => Set<SpecCatalogRow>();
 
+    // Auth identity (Phase 12 slice 1, migration 0037). API-owned: the only writes the API makes
+    // outside `checks` live here (mint/verify sessions, OTP codes, access requests, editor allowlist).
+    public DbSet<OtpCode> OtpCodes => Set<OtpCode>();
+    public DbSet<Session> Sessions => Set<Session>();
+    public DbSet<Editor> Editors => Set<Editor>();
+    public DbSet<AccessRequest> AccessRequests => Set<AccessRequest>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Location>(e =>
@@ -119,6 +126,54 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.CheckId).HasColumnName("check_id");
             e.Property(x => x.ChannelId).HasColumnName("channel_id");
             e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
+        });
+
+        // Auth identity tables (migration 0037). id/created_at/requested_at/added_at are DB-generated.
+        modelBuilder.Entity<OtpCode>(e =>
+        {
+            e.ToTable("otp_codes");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            e.Property(x => x.Email).HasColumnName("email");
+            e.Property(x => x.CodeHash).HasColumnName("code_hash");
+            e.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            e.Property(x => x.ConsumedAt).HasColumnName("consumed_at");
+            e.Property(x => x.AttemptCount).HasColumnName("attempt_count");
+            e.Property(x => x.RequestIp).HasColumnName("request_ip");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
+        });
+
+        modelBuilder.Entity<Session>(e =>
+        {
+            e.ToTable("sessions");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            e.Property(x => x.TokenHash).HasColumnName("token_hash");
+            e.Property(x => x.Email).HasColumnName("email");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
+            e.Property(x => x.LastUsedAt).HasColumnName("last_used_at");
+            e.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            e.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+            e.Property(x => x.IssuedIp).HasColumnName("issued_ip");
+        });
+
+        modelBuilder.Entity<Editor>(e =>
+        {
+            e.ToTable("editors");
+            e.HasKey(x => x.Email);
+            e.Property(x => x.Email).HasColumnName("email");
+            e.Property(x => x.AddedBy).HasColumnName("added_by");
+            e.Property(x => x.AddedAt).HasColumnName("added_at").ValueGeneratedOnAdd();
+        });
+
+        modelBuilder.Entity<AccessRequest>(e =>
+        {
+            e.ToTable("access_requests");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            e.Property(x => x.Email).HasColumnName("email");
+            e.Property(x => x.RequestedAt).HasColumnName("requested_at").ValueGeneratedOnAdd();
+            e.Property(x => x.RequestIp).HasColumnName("request_ip");
         });
 
         modelBuilder.Entity<Check>(e =>

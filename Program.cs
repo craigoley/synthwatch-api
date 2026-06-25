@@ -29,6 +29,11 @@ builder.Services.AddSingleton(PostgresDataSourceFactory.Create);
 // (the trace-download proxy). Same DefaultAzureCredential family the DB token uses.
 builder.Services.AddSingleton<Azure.Core.TokenCredential>(_ => new Azure.Identity.DefaultAzureCredential());
 
+// Auth (Phase 12 slice 1): OTP / access-request emails send via ACS using the SAME managed-identity
+// credential (preferred; connection-string fallback) — see AcsEmailSender. This slice is purely additive:
+// it mints/verifies sessions, but NOTHING enforces them yet (the authz gate is slice 2).
+builder.Services.AddSingleton<IEmailSender, AcsEmailSender>();
+
 // Channel test-send (POST /api/channels/{id}/test, Option A): the API enqueues a test_send_requests row
 // and starts the RUNNER Container App Job on-demand via ARM, so the runner's REAL dispatch path sends the
 // [TEST] alert (no C# ACS replica). RunnerJob__* config overrides the resource coordinates; the ARM token
