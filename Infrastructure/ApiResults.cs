@@ -15,6 +15,9 @@ public static class ApiResults
     public static IActionResult BadRequest(string message) =>
         new BadRequestObjectResult(new { error = "bad_request", message });
 
+    public static IActionResult Conflict(string message) =>
+        new ConflictObjectResult(new { error = "conflict", message });
+
     public static IActionResult Ok(object value) => new OkObjectResult(value);
 
     public static IActionResult Created(string location, object value) =>

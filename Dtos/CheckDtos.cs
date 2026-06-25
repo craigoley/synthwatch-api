@@ -67,7 +67,11 @@ public record CheckSummaryDto(
     // grid's regional indicator is uniform. Empty only when the check has never run.
     IReadOnlyList<LocationStatusDto> Locations,
     // key:value tags (Phase 9a) joined from check_tags, so the grid/detail can show + filter by them.
-    IReadOnlyList<TagDto> Tags)
+    IReadOnlyList<TagDto> Tags,
+    // Monitors-as-code (Phase 13): the manifest id + spec path this check was activated from (null for
+    // hand-made checks). specPath being non-null is what puts the runner on the Git-fetch (Option C) path.
+    string? SourceKey,
+    string? SpecPath)
 {
     public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m,
         IReadOnlyList<LocationStatusDto> locations, IReadOnlyList<TagDto> tags) => new(
@@ -96,7 +100,9 @@ public record CheckSummaryDto(
         NetConfig: c.NetConfig,
         Steps: c.Steps,
         Locations: locations,
-        Tags: tags);
+        Tags: tags,
+        SourceKey: c.SourceKey,
+        SpecPath: c.SpecPath);
 }
 
 /// <summary>A check's latest-run status from one location (per-location rollup for the grid).</summary>
@@ -151,7 +157,11 @@ public record CheckDetailDto(
     string CurrentHealth,
     IReadOnlyList<RunDto> RecentRuns,
     // key:value tags (Phase 9a) joined from check_tags.
-    IReadOnlyList<TagDto> Tags)
+    IReadOnlyList<TagDto> Tags,
+    // Monitors-as-code (Phase 13): the manifest id + spec path this check was activated from (null for
+    // hand-made checks). Surfaced so the create response echoes the binding the runner will execute.
+    string? SourceKey,
+    string? SpecPath)
 {
     public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, IReadOnlyList<TagDto> tags, SloDto? slo = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
@@ -169,7 +179,9 @@ public record CheckDetailDto(
         CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
         RecentRuns: recentRuns.Select(RunDto.From).ToList(),
-        Tags: tags);
+        Tags: tags,
+        SourceKey: c.SourceKey,
+        SpecPath: c.SpecPath);
 }
 
 /// <summary>
@@ -214,6 +226,11 @@ public class CreateCheckRequest
     public Dictionary<string, string>? Auth { get; set; }
     public NetConfig? NetConfig { get; set; }
     public List<ChainStep>? Steps { get; set; }
+    // Monitors-as-code activation (Phase 13): the manifest id + spec path to bind this check to. Both
+    // optional — a hand-made check omits them. When set, spec_path makes the runner fetch+run the Git
+    // spec (Option C), and source_key links the catalog row (a duplicate source_key → 409).
+    public string? SourceKey { get; set; }
+    public string? SpecPath { get; set; }
 }
 
 /// <summary>Body for PATCH /api/checks/{id}. Every field optional; only present fields change.</summary>

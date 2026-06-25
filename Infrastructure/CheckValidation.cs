@@ -51,9 +51,22 @@ public static class CheckValidation
                 ? "Must be a host or host:port."
                 : "Must be an absolute http(s) URL.";
 
-        // browser kind requires a flow_name (DB constraint: browser_needs_flow).
+        // browser kind requires a flow_name (DB constraint: browser_needs_flow). On spec activation the
+        // dashboard sets flow_name = flowNameFor(spec_path) (synthetic) so this is satisfied even though
+        // spec_path — not flow_name — drives the runner's Option C fetch path.
         if (req.Kind == "browser" && string.IsNullOrWhiteSpace(req.FlowName))
             errors["flowName"] = "Required when kind is 'browser'.";
+
+        // spec_path shape mirrors the DB constraint checks_spec_path_shape (migration 0033): a manifest
+        // Playwright spec under monitors/, ending .spec.ts, with NO '..' traversal. The host/repo/branch
+        // are hardcoded runner-side; only this path varies — validate it here so a bad path is a clean
+        // 400, not a constraint-violation 500 on insert (and not a redirectable fetch).
+        if (!string.IsNullOrWhiteSpace(req.SpecPath))
+        {
+            var sp = req.SpecPath!.Trim();
+            if (!SpecPathRe.IsMatch(sp) || sp.Contains("..", StringComparison.Ordinal))
+                errors["specPath"] = "Must be a 'monitors/….spec.ts' path with no '..' traversal.";
+        }
 
         var method = string.IsNullOrWhiteSpace(req.Method) ? "GET" : req.Method!.ToUpperInvariant();
         if (!Methods.Contains(method))
@@ -111,8 +124,16 @@ public static class CheckValidation
         check.Auth = req.Auth;
         check.NetConfig = req.NetConfig;
         check.Steps = req.Steps;
+        // Monitors-as-code activation: bind the manifest id + spec path (validated above). Trimmed to
+        // null when blank so a hand-made check stays on the baked-flow path.
+        check.SourceKey = string.IsNullOrWhiteSpace(req.SourceKey) ? null : req.SourceKey!.Trim();
+        check.SpecPath = string.IsNullOrWhiteSpace(req.SpecPath) ? null : req.SpecPath!.Trim();
         return true;
     }
+
+    // Mirrors checks_spec_path_shape's regex (the '..' traversal guard is applied alongside it).
+    private static readonly System.Text.RegularExpressions.Regex SpecPathRe =
+        new(@"^monitors/.+\.spec\.ts$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>Applies an in-place patch to an existing entity; returns validation errors, if any.</summary>
     public static Dictionary<string, string> ApplyPatch(UpdateCheckRequest req, Check check)

@@ -1146,6 +1146,68 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Activation_creates_browser_check_with_spec_binding_and_409s_on_duplicate()
+    {
+        // Phase 13 activation (steps 4-6, API half): POST /api/checks carrying spec_path + source_key +
+        // a SYNTHETIC flow_name (flowNameFor(spec_path)) creates the live monitor; a duplicate activation
+        // (same source_key) returns a CLEAN 409, not a constraint 500.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new ChecksFunctions(db);
+        var body = new CreateCheckRequest
+        {
+            Name = "Wegmans — search product",
+            Kind = "browser",
+            TargetUrl = "https://www.wegmans.com",
+            FlowName = "search-product", // synthetic; satisfies browser_needs_flow
+            SourceKey = "wegmans-search-product",
+            SpecPath = "monitors/wegmans/search-product.spec.ts",
+            IntervalSeconds = 600,
+        };
+        try
+        {
+            var res = Assert.IsType<ObjectResult>(await fn.CreateCheck(JsonRequest(body), default));
+            Assert.Equal(201, res.StatusCode);
+            var dto = Assert.IsType<CheckDetailDto>(res.Value!);
+            // The create response echoes the binding the runner will execute.
+            Assert.Equal("monitors/wegmans/search-product.spec.ts", dto.SpecPath);
+            Assert.Equal("wegmans-search-product", dto.SourceKey);
+
+            // The PERSISTED row carries spec_path (→ executeBrowser takes the Git-fetch path, Option C)
+            // AND the synthetic flow_name (→ browser_needs_flow satisfied, the INSERT succeeded).
+            await using var db2 = _pg.NewDbContext();
+            var conn = (NpgsqlConnection)db2.Database.GetDbConnection();
+            await conn.OpenAsync();
+            try
+            {
+                Assert.Equal("monitors/wegmans/search-product.spec.ts",
+                    (string?)await Scalar(conn, $"SELECT spec_path FROM checks WHERE id = {dto.Id}"));
+                Assert.Equal("search-product",
+                    (string?)await Scalar(conn, $"SELECT flow_name FROM checks WHERE id = {dto.Id}"));
+            }
+            finally { await conn.CloseAsync(); }
+
+            // ── DUPLICATE activation (same source_key) → 409 (the partial unique index), NOT a 500.
+            var dupRes = await fn.CreateCheck(JsonRequest(body), default);
+            Assert.Equal(409, Assert.IsType<ConflictObjectResult>(dupRes).StatusCode);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE source_key = 'wegmans-search-product';");
+        }
+
+        // ── spec_path SHAPE validation rejects traversal with a 400 — the path never reaches the DB.
+        await using var db3 = _pg.NewDbContext();
+        var fn3 = new ChecksFunctions(db3);
+        var bad = new CreateCheckRequest
+        {
+            Name = "bad", Kind = "browser", TargetUrl = "https://x.example", FlowName = "x",
+            SourceKey = "bad-traversal-key", SpecPath = "monitors/../etc/passwd.spec.ts",
+        };
+        Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(await fn3.CreateCheck(JsonRequest(bad), default)).StatusCode);
+    }
+
+    [SkippableFact]
     public async Task Location_endpoints_list_get_and_set_with_validation()
     {
         // 4-MLACT: the selector's API half. Seed extra registry locations (2 enabled, 1 disabled) + a
