@@ -46,11 +46,11 @@ param instanceMemoryMB int = 2048
 @description('Phase 12 auth — comma-separated admin emails. ★ The API enforces ADMIN from THIS setting (not the dashboard Vercel env), so admins are recognized + cannot be locked out. Empty = no admins until set.')
 param adminEmails string = ''
 
-@description('Phase 12 auth — the ACS-verified sender address for OTP / access-request emails (AUTH_EMAIL_FROM). Empty disables auth email send.')
-param authEmailFrom string = ''
+@description('Phase 12 auth — the ACS-VERIFIED sender for OTP / access-request emails (AUTH_EMAIL_FROM). NON-secret — a property of the ACS-owned managed domain, so it is committed here (mirrors the runner\'s ALERT_EMAIL_FROM). ★ MUST be the verified fromSenderDomain on synthwatch-acs: donotreply@<guid>.azurecomm.net — NOT a data-location variant like .us3.azurecomm.net (an unverified sender → ACS rejects the send). Empty default previously let a redeploy blank this; pinned to the verified value so deploys carry a working sender.')
+param authEmailFrom string = 'donotreply@0ad660ff-ac71-4b63-a5f6-ce885666c796.azurecomm.net'
 
-@description('Phase 12 auth — ACS resource endpoint for MI-based email send (e.g. https://xxx.communication.azure.com). ★ The API MI needs the "Communication Services Contributor" role on this resource (a manual role assignment — see the PR). Empty = MI send off (set ACS_EMAIL_CONNECTION_STRING as a fallback).')
-param acsEmailEndpoint string = ''
+@description('Phase 12 auth — ACS resource endpoint for MI-based email send. NON-secret (the resource\'s public endpoint). The API MI sends via DefaultAzureCredential against this; it holds the "Communication and Email Service Owner" role on synthwatch-acs (already assigned). Empty = MI send off (set ACS_EMAIL_CONNECTION_STRING as a fallback instead).')
+param acsEmailEndpoint string = 'https://synthwatch-acs.unitedstates.communication.azure.com/'
 
 @description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
 param artifactsStorageAccountName string = 'synthwatche24e33105c'
