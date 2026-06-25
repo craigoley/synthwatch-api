@@ -1629,6 +1629,108 @@ public class IntegrationTests
         }
     }
 
+    // ─── Phase 12 slice 2 — the gate (principal resolution, audit write, fail-closed) ───────────────
+
+    [SkippableFact]
+    public async Task AuthPrincipal_resolves_roles_and_rejects_invalid_sessions()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "boss@gate.test");
+        await using var db = _pg.NewDbContext();
+        var svc = new AuthPrincipalService(db);
+        const string edTok = "swt_ed_tok", adTok = "swt_admin_tok", expTok = "swt_expired_tok", revTok = "swt_revoked_tok";
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO editors (email, added_by) VALUES ('ed@gate.test', 'boss@gate.test')");
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(edTok)}, 'ed@gate.test', now() + interval '1 hour')");
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(adTok)}, 'boss@gate.test', now() + interval '1 hour')");
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(expTok)}, 'ed@gate.test', now() - interval '1 minute')");
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO sessions (token_hash, email, expires_at, revoked_at) VALUES ({AuthTokens.Sha256Hex(revTok)}, 'ed@gate.test', now() + interval '1 hour', now())");
+
+            // editor token → editor (can write, not admin); admin token → admin.
+            var ed = await svc.FromBearerAsync($"Bearer {edTok}", default);
+            Assert.NotNull(ed);
+            Assert.Equal("ed@gate.test", ed!.Email);
+            Assert.Equal(Roles.Editor, ed.Role);
+            Assert.True(ed.CanWrite);
+            Assert.False(ed.IsAdmin);
+            Assert.Equal(Roles.Admin, (await svc.FromBearerAsync($"Bearer {adTok}", default))!.Role);
+
+            // no/invalid/expired/revoked token → null (→ the gate denies 401).
+            Assert.Null(await svc.FromBearerAsync(null, default));
+            Assert.Null(await svc.FromBearerAsync("Bearer swt_nonexistent", default));
+            Assert.Null(await svc.FromBearerAsync($"Bearer {expTok}", default));
+            Assert.Null(await svc.FromBearerAsync($"Bearer {revTok}", default));
+
+            // ★ Live role: a valid session whose email is no longer an editor resolves to anonymous (→ 403),
+            // so removing an editor revokes their write access on the very next request.
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM editors WHERE email = 'ed@gate.test'");
+            var demoted = await svc.FromBearerAsync($"Bearer {edTok}", default);
+            Assert.NotNull(demoted);
+            Assert.Equal(Roles.Anonymous, demoted!.Role);
+            Assert.False(demoted.CanWrite);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+            await using var c = _pg.NewDbContext();
+            await c.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email LIKE '%@gate.test'; DELETE FROM editors WHERE email LIKE '%@gate.test';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task Audit_row_is_written_with_a_redacted_diff()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        const string secret = "SUPERSECRETwebhooktoken";
+        var diff = new AuditDiff("channel", "9", Before: null,
+            After: new ChannelDto(9, "ops-wh", "webhook",
+                new ChannelConfig { Url = $"https://h.test/B/{secret}", AuthHeader = $"Bearer {secret}", To = new() { "a@b.test" } },
+                true),
+            Note: null);
+        var row = AuditWriter.BuildRow(new Principal("admin@audit.test", Roles.Admin), "9.9.9.9",
+            "POST", "/api/channels", statusCode: 201, success: true, diff);
+        db.AuditLogs.Add(row);
+        await db.SaveChangesAsync();
+        try
+        {
+            await using var read = _pg.NewDbContext();
+            var saved = await read.AuditLogs.AsNoTracking()
+                .Where(a => a.ActorEmail == "admin@audit.test").OrderByDescending(a => a.Id).FirstAsync();
+            Assert.Equal("create", saved.Action);
+            Assert.Equal("channel", saved.TargetType);
+            Assert.Equal("9", saved.TargetId);
+            Assert.True(saved.Success);
+            Assert.NotNull(saved.AfterJson);
+            // ★ The persisted jsonb carries NO plaintext secret — only fingerprints.
+            Assert.DoesNotContain(secret, saved.AfterJson!, StringComparison.Ordinal);
+            Assert.Contains("redacted:sha256:", saved.AfterJson!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await using var c = _pg.NewDbContext();
+            await c.Database.ExecuteSqlRawAsync("DELETE FROM audit_log WHERE actor_email = 'admin@audit.test'");
+        }
+    }
+
+    [SkippableFact]
+    public async Task AuthPrincipal_lookup_error_throws_so_the_gate_fails_closed()
+    {
+        RequireDocker();
+        // A session lookup that ERRORS must throw — the middleware does NOT catch it, so it bubbles to the
+        // outer exception-shield → 500 = DENIED (an auth error is never an open door).
+        await using var broken = _pg.NewBrokenDbContext();
+        var svc = new AuthPrincipalService(broken);
+        await Assert.ThrowsAnyAsync<Exception>(() => svc.FromBearerAsync("Bearer swt_anything", default));
+    }
+
     // ─── Phase 12 slice 1 — auth identity (OTP + sessions + access request) ────────────────────────
 
     private sealed class FakeEmailSender : IEmailSender

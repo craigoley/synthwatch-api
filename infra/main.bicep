@@ -52,6 +52,9 @@ param authEmailFrom string = 'donotreply@0ad660ff-ac71-4b63-a5f6-ce885666c796.az
 @description('Phase 12 auth — ACS resource endpoint for MI-based email send. NON-secret (the resource\'s public endpoint). The API MI sends via DefaultAzureCredential against this; it holds the "Communication and Email Service Owner" role on synthwatch-acs (already assigned). Empty = MI send off (set ACS_EMAIL_CONNECTION_STRING as a fallback instead).')
 param acsEmailEndpoint string = 'https://synthwatch-acs.unitedstates.communication.azure.com/'
 
+@description('Phase 12 auth — slice 2 GATE master switch. DEFAULT OFF: the AuthorizationMiddleware is inert and writes pass as today. ★ Flip to true ONLY together with slice 3 (the dashboard sending session tokens) — turning it on before the dashboard sends tokens would 401 every write.')
+param authEnforcementEnabled bool = false
+
 @description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
 param artifactsStorageAccountName string = 'synthwatche24e33105c'
 
@@ -189,6 +192,11 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'ACS_EMAIL_ENDPOINT'
           value: acsEmailEndpoint
+        }
+        // Phase 12 auth slice 2 — the gate. DEFAULT OFF (inert); flipped on with slice 3.
+        {
+          name: 'AUTH_ENFORCEMENT_ENABLED'
+          value: string(authEnforcementEnabled)
         }
       ]
       // PLATFORM CORS. The Functions host answers the OPTIONS preflight itself (before the worker

@@ -50,6 +50,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<Session> Sessions => Set<Session>();
     public DbSet<Editor> Editors => Set<Editor>();
     public DbSet<AccessRequest> AccessRequests => Set<AccessRequest>();
+    public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -174,6 +175,27 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Email).HasColumnName("email");
             e.Property(x => x.RequestedAt).HasColumnName("requested_at").ValueGeneratedOnAdd();
             e.Property(x => x.RequestIp).HasColumnName("request_ip");
+        });
+
+        modelBuilder.Entity<AuditLog>(e =>
+        {
+            // Append-only (migration 0038): the API INSERTs + SELECTs; UPDATE/DELETE are revoked at the DB.
+            e.ToTable("audit_log");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            e.Property(x => x.Ts).HasColumnName("ts").ValueGeneratedOnAdd();
+            e.Property(x => x.ActorEmail).HasColumnName("actor_email");
+            e.Property(x => x.ActorIp).HasColumnName("actor_ip");
+            e.Property(x => x.Action).HasColumnName("action");
+            e.Property(x => x.TargetType).HasColumnName("target_type");
+            e.Property(x => x.TargetId).HasColumnName("target_id");
+            e.Property(x => x.HttpMethod).HasColumnName("http_method");
+            e.Property(x => x.HttpPath).HasColumnName("http_path");
+            e.Property(x => x.StatusCode).HasColumnName("status_code");
+            e.Property(x => x.Success).HasColumnName("success");
+            e.Property(x => x.BeforeJson).HasColumnName("before_json").HasColumnType("jsonb");
+            e.Property(x => x.AfterJson).HasColumnName("after_json").HasColumnType("jsonb");
+            e.Property(x => x.Note).HasColumnName("note");
         });
 
         modelBuilder.Entity<Check>(e =>
