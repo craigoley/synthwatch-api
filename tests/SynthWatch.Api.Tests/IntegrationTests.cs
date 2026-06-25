@@ -455,6 +455,63 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Reconcile_drift_serves_all_types_verbatim_and_empty_when_in_sync()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new ReconcileFunctions(db);
+
+        // Empty table → in sync: items empty, detectedAt null (the dashboard shows "in sync with Git").
+        var empty = Assert.IsType<ReconcileDriftDto>(Assert.IsType<OkObjectResult>(
+            await fn.GetReconcileDrift(Request(), default)).Value!);
+        Assert.Empty(empty.Items);
+        Assert.Null(empty.DetectedAt);
+
+        // Seed one of each drift type. A 'changed' row carries the per-field before/after diff verbatim;
+        // an 'orphan' is the known browser-exec gap (Git defines a monitor the runner can't run yet).
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO reconcile_drift (source_key, drift_type, detail, detected_at) VALUES
+              ('checkout-flow','orphan',
+               jsonb_build_object('flow_name','checkout','reason','no compiled runner flow module for this monitor'),
+               now() - interval '5 minutes'),
+              ('new-api','new',
+               jsonb_build_object('name','New API','kind','http','target_url','https://new.example','flow_name','new-api'),
+               now() - interval '5 minutes'),
+              ('home','changed',
+               jsonb_build_object('fields', jsonb_build_object('name', jsonb_build_object('git','Home','live','Homepage'))),
+               now() - interval '5 minutes'),
+              ('legacy','missing',
+               jsonb_build_object('name','Legacy','action','would soft-disable (enabled=false); never hard-delete'),
+               now() - interval '5 minutes');
+            """);
+        try
+        {
+            var dto = Assert.IsType<ReconcileDriftDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetReconcileDrift(Request(), default)).Value!);
+            Assert.Equal(4, dto.Items.Count);
+            Assert.NotNull(dto.DetectedAt);
+
+            // Ordered drift_type then source_key → changed, missing, new, orphan.
+            Assert.Equal(new[] { "changed", "missing", "new", "orphan" }, dto.Items.Select(i => i.DriftType).ToArray());
+
+            // detail jsonb passes through verbatim: the 'changed' per-field before/after diff is intact.
+            var changed = dto.Items.Single(i => i.DriftType == "changed");
+            var nameDiff = changed.Detail.GetProperty("fields").GetProperty("name");
+            Assert.Equal("Home", nameDiff.GetProperty("git").GetString());
+            Assert.Equal("Homepage", nameDiff.GetProperty("live").GetString());
+
+            // the orphan carries its bound flow_name (the runner can't run it yet).
+            var orphan = dto.Items.Single(i => i.DriftType == "orphan");
+            Assert.Equal("checkout-flow", orphan.SourceKey);
+            Assert.Equal("checkout", orphan.Detail.GetProperty("flow_name").GetString());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM reconcile_drift;");
+        }
+    }
+
+    [SkippableFact]
     public async Task Reports_availability_is_additive_and_performance_p95_is_recomputed_from_raw()
     {
         RequireDocker();

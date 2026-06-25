@@ -799,3 +799,20 @@ CREATE TABLE public.report_narratives (
     CONSTRAINT report_narratives_scope_type_check CHECK (scope_type = ANY (ARRAY['fleet'::text, 'monitor'::text])),
     CONSTRAINT report_narratives_pkey PRIMARY KEY (scope_type, scope_key, "window")
 );
+
+
+--
+-- Monitors-as-code drift (runner migration 0031, Phase 6b): reconcile_drift. The reconcile job diffs the
+-- synthwatch-monitors manifest against live checks READ-ONLY and UPSERTs the current drift set (one row per
+-- (source_key, drift_type)); the API serves the latest snapshot read-only. detail jsonb shape varies by
+-- drift_type (a 'changed' row carries the per-field before/after diff). Mirrors \d reconcile_drift.
+--
+CREATE TABLE public.reconcile_drift (
+    source_key  text NOT NULL,
+    drift_type  text NOT NULL
+                CONSTRAINT reconcile_drift_drift_type_check
+                CHECK (drift_type = ANY (ARRAY['new'::text, 'changed'::text, 'missing'::text, 'orphan'::text])),
+    detail      jsonb NOT NULL DEFAULT '{}'::jsonb,
+    detected_at timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT reconcile_drift_pkey PRIMARY KEY (source_key, drift_type)
+);

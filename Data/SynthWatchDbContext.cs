@@ -41,6 +41,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<VitalsReportRow> VitalsReport => Set<VitalsReportRow>();
     public DbSet<LatencySeriesRow> LatencyReportSeries => Set<LatencySeriesRow>();
     public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
+    public DbSet<ReconcileDriftRow> ReconcileDrift => Set<ReconcileDriftRow>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -365,6 +366,17 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Highlights).HasColumnName("highlights");
             e.Property(x => x.FactPack).HasColumnName("fact_pack");
             e.Property(x => x.Model).HasColumnName("model");
+        });
+
+        // Keyless: read the runner-owned reconcile_drift table via raw SQL only (read-only drift surface).
+        modelBuilder.Entity<ReconcileDriftRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.SourceKey).HasColumnName("source_key");
+            e.Property(x => x.DriftType).HasColumnName("drift_type");
+            e.Property(x => x.Detail).HasColumnName("detail");
+            e.Property(x => x.DetectedAt).HasColumnName("detected_at");
         });
 
         modelBuilder.Entity<FlowManifest>(e =>
