@@ -897,3 +897,27 @@ CREATE TABLE access_requests (
     request_ip   text
 );
 CREATE INDEX access_requests_email_requested_idx ON access_requests (email, requested_at);
+
+
+--
+-- audit_log (mirrors runner 0038_audit_log.sql, Phase 12 slice 2). Appended to the snapshot so the
+-- Docker integration tests seed it. No GRANT/REVOKE here — the test container has no MI role.
+--
+
+CREATE TABLE audit_log (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts           timestamp with time zone NOT NULL DEFAULT now(),
+    actor_email  text,
+    actor_ip     text,
+    action       text,
+    target_type  text,
+    target_id    text,
+    http_method  text,
+    http_path    text,
+    status_code  integer,
+    success      boolean,
+    before_json  jsonb,
+    after_json   jsonb,
+    note         text
+);
+CREATE INDEX audit_log_ts_idx ON audit_log (ts DESC);

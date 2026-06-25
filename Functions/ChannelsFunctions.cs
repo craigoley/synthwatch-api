@@ -18,8 +18,16 @@ namespace SynthWatch.Api.Functions;
 public class ChannelsFunctions
 {
     private readonly SynthWatchDbContext _db;
+    // Opt-in audit diff (Phase 12 slice 2). Optional so non-DI callers (tests) still construct with just the
+    // db; under DI the scope is always injected. Channels are the secret-bearing entity, so their before/after
+    // is the case the audit redaction must scrub (config.url / authHeader / recipient emails).
+    private readonly IAuditScope? _audit;
 
-    public ChannelsFunctions(SynthWatchDbContext db) => _db = db;
+    public ChannelsFunctions(SynthWatchDbContext db, IAuditScope? audit = null)
+    {
+        _db = db;
+        _audit = audit;
+    }
 
     /// <summary>GET /api/channels — all channels.</summary>
     [Function("GetChannels")]
@@ -61,6 +69,7 @@ public class ChannelsFunctions
         {
             return ApiResults.BadRequest($"a channel named '{channel.Name}' already exists.");
         }
+        _audit?.Record("channel", channel.Id.ToString(System.Globalization.CultureInfo.InvariantCulture), before: null, after: ChannelDto.From(channel));
         return ApiResults.Created($"/api/channels/{channel.Id}", ChannelDto.From(channel));
     }
 
@@ -80,6 +89,7 @@ public class ChannelsFunctions
         var error = AlertingValidation.ValidateChannel(body!.Name, body.Type, body.Config);
         if (error is not null) return ApiResults.BadRequest(error);
 
+        var before = ChannelDto.From(channel); // snapshot BEFORE mutating (config ref is replaced below)
         channel.Name = body.Name!.Trim();
         channel.Type = body.Type!;
         channel.Config = body.Config ?? new ChannelConfig();
@@ -92,6 +102,7 @@ public class ChannelsFunctions
         {
             return ApiResults.BadRequest($"a channel named '{channel.Name}' already exists.");
         }
+        _audit?.Record("channel", id.ToString(System.Globalization.CultureInfo.InvariantCulture), before, ChannelDto.From(channel));
         return ApiResults.Ok(ChannelDto.From(channel));
     }
 
@@ -119,8 +130,10 @@ public class ChannelsFunctions
                 message = $"channel {id} is referenced by {refs} routing rule(s) (severity/per-check/tag); remove it from routing before deleting.",
             });
 
+        var before = ChannelDto.From(channel);
         _db.Channels.Remove(channel);
         await _db.SaveChangesAsync(ct);
+        _audit?.Record("channel", id.ToString(System.Globalization.CultureInfo.InvariantCulture), before, after: null);
         return new NoContentResult();
     }
 

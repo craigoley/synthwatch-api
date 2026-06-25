@@ -49,9 +49,16 @@ builder.Services.AddDbContext<SynthWatchDbContext>((sp, options) =>
     options.UseNpgsql(dataSource);
 });
 
-// Worker middleware (outermost first): request logging (times whole pipeline + final status),
-// then exception shielding (innermost). CORS is platform-level (see above).
+// Phase 12 slice 2 — the authz gate + audit. The principal resolver (bearer → session → live role) is the
+// ONE source of truth shared by the middleware; the audit scope is the per-request handler-diff channel.
+builder.Services.AddScoped<IAuthPrincipal, AuthPrincipalService>();
+builder.Services.AddScoped<IAuditScope, AuditScope>();
+
+// Worker middleware (outermost first): request logging (times whole pipeline + final status), then
+// exception shielding, then the authorization gate — INSIDE shielding so a session-lookup error becomes a
+// shielded 500 = DENIED (fail-closed). The gate is inert unless AUTH_ENFORCEMENT_ENABLED (default OFF).
 builder.UseMiddleware<RequestLoggingMiddleware>();
 builder.UseMiddleware<ExceptionHandlingMiddleware>();
+builder.UseMiddleware<AuthorizationMiddleware>();
 
 builder.Build().Run();
