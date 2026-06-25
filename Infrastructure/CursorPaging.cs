@@ -81,21 +81,30 @@ public static class CursorPaging
     public const int DefaultPageSize = 50;
     public const int MaxPageSize = 200;
 
-    /// <summary>The default look-back when no <c>from</c> is supplied — recent, so the query is bounded.</summary>
+    /// <summary>The default look-back when no <c>from</c> is supplied — recent, so the query is bounded.
+    /// Per-endpoint via the <see cref="Parse(HttpRequest, DateTimeOffset, TimeSpan)"/> overload: runs use 7d
+    /// (dense — ~hundreds/day), incidents use 30d (sparse — a useful recent window without going all-time).</summary>
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromDays(7);
 
     /// <summary>
-    /// Parse the date-range + cursor + page size with safe bounds. <paramref name="now"/> is injected
-    /// (not <c>DateTimeOffset.UtcNow</c>) so the default window is deterministic in tests.
+    /// Parse the date-range + cursor + page size with safe bounds, using the default 7d look-back.
+    /// <paramref name="now"/> is injected (not <c>DateTimeOffset.UtcNow</c>) so the window is deterministic in tests.
     /// </summary>
-    public static CursorRange Parse(HttpRequest req, DateTimeOffset now)
+    public static CursorRange Parse(HttpRequest req, DateTimeOffset now) => Parse(req, now, DefaultWindow);
+
+    /// <summary>
+    /// As <see cref="Parse(HttpRequest, DateTimeOffset)"/> but with a caller-chosen default look-back when no
+    /// <c>from</c> is supplied — so a sparser list (incidents) can default to a wider recent window than runs
+    /// while sharing the exact same cursor + page-size contract.
+    /// </summary>
+    public static CursorRange Parse(HttpRequest req, DateTimeOffset now, TimeSpan defaultWindow)
     {
         var to = now;
         var toRaw = req.Query["to"].ToString();
         if (!string.IsNullOrEmpty(toRaw) && !TryParseTimestamp(toRaw, out to))
             return Invalid("to must be an ISO-8601 timestamp.");
 
-        var from = to - DefaultWindow;
+        var from = to - defaultWindow;
         var fromRaw = req.Query["from"].ToString();
         if (!string.IsNullOrEmpty(fromRaw) && !TryParseTimestamp(fromRaw, out from))
             return Invalid("from must be an ISO-8601 timestamp.");

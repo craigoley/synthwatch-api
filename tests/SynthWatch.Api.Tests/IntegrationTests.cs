@@ -685,6 +685,95 @@ public class IntegrationTests
         }
     }
 
+    [SkippableFact]
+    public async Task Incidents_are_cursor_paginated_with_open_exempt_from_the_window()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+
+        // One check whose incidents straddle the default 30d window: 3 OLD resolved (>30d), 6 RECENT
+        // resolved (<30d, two sharing an opened_at to exercise the (opened_at, id) tie-break), and ONE
+        // OPEN incident opened 45d ago. The partial unique index one_open_incident_per_check allows only
+        // one open per check — so the single old-open incident is exactly the open-exemption case.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('inc-pg','http','https://i.example') RETURNING id INTO cid;
+              INSERT INTO incidents (check_id,status,severity,opened_at,resolved_at,consecutive_failures) VALUES
+                (cid,'resolved','critical', now()-interval '40 days', now()-interval '40 days'+interval '1 hour', 3),
+                (cid,'resolved','warning',  now()-interval '50 days', now()-interval '50 days'+interval '1 hour', 3),
+                (cid,'resolved','critical', now()-interval '60 days', now()-interval '60 days'+interval '1 hour', 3),
+                (cid,'resolved','critical', now()-interval '1 day',  now()-interval '1 day'+interval  '1 hour', 3),
+                (cid,'resolved','warning',  now()-interval '2 days', now()-interval '2 days'+interval '1 hour', 3),
+                (cid,'resolved','critical', now()-interval '2 days', now()-interval '2 days'+interval '1 hour', 4),
+                (cid,'resolved','warning',  now()-interval '3 days', now()-interval '3 days'+interval '1 hour', 3),
+                (cid,'resolved','critical', now()-interval '4 days', now()-interval '4 days'+interval '1 hour', 3),
+                (cid,'resolved','warning',  now()-interval '5 days', now()-interval '5 days'+interval '1 hour', 3),
+                (cid,'open','critical', now()-interval '45 days', NULL, 7);
+            END $$;
+            """);
+        var cid = await db.Checks.Where(c => c.Name == "inc-pg").Select(c => c.Id).FirstAsync();
+        try
+        {
+            var fn = new IncidentsFunctions(db);
+            static CursorPage<IncidentDto> Page(IActionResult r) =>
+                Assert.IsType<CursorPage<IncidentDto>>(Assert.IsType<OkObjectResult>(r).Value!);
+            // Scope every request to this check (?checkId=) so counts are independent of the seed/other data.
+            string Q(string extra) => $"?checkId={cid}{extra}";
+
+            var expectedResolved = await db.Incidents.AsNoTracking()
+                .Where(i => i.CheckId == cid && i.Status == "resolved" && i.OpenedAt >= DateTimeOffset.UtcNow.AddDays(-30))
+                .OrderByDescending(i => i.OpenedAt).ThenByDescending(i => i.Id)
+                .Select(i => i.Id).ToListAsync();
+            Assert.Equal(6, expectedResolved.Count); // 6 recent resolved kept, 3 old excluded
+
+            // ── BOUNDED DEFAULT (no status): only the last-30d incidents. The 3 old resolved AND the
+            //    45d-old OPEN incident are all excluded — a param-less call never loads all-time.
+            var def = Page(await fn.ListIncidents(Request(Q("")), default));
+            Assert.Equal(6, def.Items.Count);
+            Assert.DoesNotContain(def.Items, i => i.Status == "open"); // the only open one is 45d old → windowed out
+
+            // ── status=open is EXEMPT from the window: the 45d-old open incident still surfaces (a
+            //    long-running open incident must never be hidden by the recent default window).
+            var open = Page(await fn.ListIncidents(Request(Q("&status=open")), default));
+            var openItem = Assert.Single(open.Items);
+            Assert.Equal("open", openItem.Status);
+            Assert.True(openItem.OpenedAt < DateTimeOffset.UtcNow.AddDays(-30));
+
+            // ── CURSOR WALK over resolved (pageSize 2): each row once, DESC (opened_at, id), null at end.
+            var walked = new List<long>();
+            string? cursor = null;
+            var guard = 0;
+            do
+            {
+                var q = Q("&status=resolved&pageSize=2") + (cursor is null ? "" : $"&cursor={Uri.EscapeDataString(cursor)}");
+                var pg = Page(await fn.ListIncidents(Request(q), default));
+                Assert.True(pg.Items.Count <= 2);
+                walked.AddRange(pg.Items.Select(i => i.Id));
+                cursor = pg.NextCursor;
+            } while (cursor is not null && ++guard < 20);
+            Assert.Null(cursor);
+            Assert.Equal(expectedResolved, walked);
+
+            // ── DATE-RANGE reaches the OLD resolved incidents and filters to ONLY them.
+            var from = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-65).ToString("o"));
+            var to = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-31).ToString("o"));
+            var old = Page(await fn.ListIncidents(Request(Q($"&status=resolved&from={from}&to={to}&pageSize=200")), default));
+            Assert.Equal(3, old.Items.Count);
+            Assert.All(old.Items, i => Assert.True(i.OpenedAt < DateTimeOffset.UtcNow.AddDays(-31)));
+            Assert.Null(old.NextCursor);
+
+            // ── MALFORMED input is 400 — bad cursor and bad status alike.
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.ListIncidents(Request(Q("&cursor=not~a~cursor")), default)).StatusCode);
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.ListIncidents(Request(Q("&status=banana")), default)).StatusCode);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'inc-pg';"); // cascades incidents
+        }
+    }
+
     private static async Task Exec(NpgsqlConnection c, string sql)
     {
         await using var cmd = c.CreateCommand();
@@ -706,7 +795,7 @@ public class IntegrationTests
         await using var db = _pg.NewDbContext();
         var fn = new IncidentsFunctions(db);
         var ok = Assert.IsType<OkObjectResult>(await fn.ListIncidents(Request(), default));
-        var incidents = Assert.IsAssignableFrom<IEnumerable<IncidentDto>>(ok.Value!).ToList();
+        var incidents = Assert.IsType<CursorPage<IncidentDto>>(ok.Value!).Items;
         var inc = Assert.Single(incidents);
         Assert.Equal("seed-http", inc.CheckName);
         Assert.Equal("http", inc.CheckKind);
@@ -729,7 +818,7 @@ public class IntegrationTests
         {
             var fn = new IncidentsFunctions(db);
             var ok = Assert.IsType<OkObjectResult>(await fn.ListIncidents(Request(), default));
-            var incidents = Assert.IsAssignableFrom<IEnumerable<IncidentDto>>(ok.Value!).ToList();
+            var incidents = Assert.IsType<CursorPage<IncidentDto>>(ok.Value!).Items;
 
             var orphan = Assert.Single(incidents, i => i.CheckId == 999999);
             Assert.Null(orphan.CheckName);  // LEFT JOIN -> null name, but the incident SURVIVES

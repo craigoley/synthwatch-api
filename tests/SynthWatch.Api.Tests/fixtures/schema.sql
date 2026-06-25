@@ -487,6 +487,17 @@ CREATE UNIQUE INDEX one_open_incident_per_check ON public.incidents USING btree 
 
 
 --
+-- Name: incidents_opened_idx; Type: INDEX; Schema: public; Owner: -
+-- Backs the GET /api/incidents keyset cursor (opened_at DESC, id DESC) over a date-range window —
+-- the incidents equivalent of runs_check_started_idx. ★ RUNNER-OWNED SCHEMA: production needs the
+-- matching migration in synthwatch-monitors (CREATE INDEX CONCURRENTLY); this fixture row exercises
+-- the indexed path in tests until that migration lands.
+--
+
+CREATE INDEX incidents_opened_idx ON public.incidents USING btree (opened_at DESC, id DESC);
+
+
+--
 -- Name: run_steps_run_idx; Type: INDEX; Schema: public; Owner: -
 --
 

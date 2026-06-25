@@ -64,6 +64,18 @@ public class CursorPagingTests
         Assert.Equal(CursorPaging.MaxPageSize, range.PageSize); // clamped from 9999
     }
 
+    [Fact]
+    public void Parse_overload_honors_a_custom_default_window()
+    {
+        var now = new DateTimeOffset(2026, 6, 25, 0, 0, 0, TimeSpan.Zero);
+        // Incidents use a 30d default (sparser than runs' 7d) — still bounded, never all-time.
+        var range = CursorPaging.Parse(Request(), now, TimeSpan.FromDays(30));
+
+        Assert.True(range.IsValid);
+        Assert.Equal(now, range.To);
+        Assert.Equal(now - TimeSpan.FromDays(30), range.From);
+    }
+
     [Theory]
     [InlineData("?from=not-a-date")]
     [InlineData("?to=not-a-date")]
