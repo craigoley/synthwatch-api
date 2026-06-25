@@ -147,6 +147,9 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.PerfBudgetTransferBytes).HasColumnName("perf_budget_transfer_bytes");
             e.Property(x => x.CertExpiryWarnDays).HasColumnName("cert_expiry_warn_days");
             e.Property(x => x.SloTarget).HasColumnName("slo_target");
+            // Monitors-as-code activation (Phase 13): the manifest id + spec path this check runs.
+            e.Property(x => x.SourceKey).HasColumnName("source_key");
+            e.Property(x => x.SpecPath).HasColumnName("spec_path");
 
             // No-code assertion model + request config (jsonb / text). Typed CLR models are
             // (de)serialized to jsonb via System.Text.Json value converters (camelCase keys,

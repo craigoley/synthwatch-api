@@ -73,6 +73,16 @@ public class Check
     // so target = 1.0 would div-by-zero (and 500 GetCheck) and target outside (0,1) is nonsensical.
     public float? SloTarget { get; set; }
 
+    // Monitors-as-code (Phase 13 activation). source_key (migration 0030) = the synthwatch-monitors
+    // manifest id this check was activated from; a partial unique index (checks_source_key_uniq) allows
+    // at most one live check per manifest id. spec_path (0033) = the manifest's Playwright spec path
+    // (e.g. monitors/wegmans/search-product.spec.ts); when set, the runner's executeBrowser FETCHES +
+    // runs that spec from Git instead of a baked flow (Option C). Both nullable — legacy/hand-made checks
+    // leave them null and run the baked-flow path unchanged. The DB enforces spec_path's shape
+    // (checks_spec_path_shape) — the API mirrors it on create for a clean 400 instead of a constraint 500.
+    public string? SourceKey { get; set; }
+    public string? SpecPath { get; set; }
+
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();

@@ -44,6 +44,64 @@ public class CheckValidationTests
         Assert.True(CheckValidation.TryBuildNew(req, out _, out _));
     }
 
+    // ---- Phase 13 activation: spec_path / source_key mapping + shape validation ----
+
+    private static CreateCheckRequest ActivationReq() => new()
+    {
+        Name = "Wegmans — search product",
+        Kind = "browser",
+        TargetUrl = "https://www.wegmans.com",
+        FlowName = "search-product", // synthetic flowNameFor(spec_path) — satisfies browser_needs_flow
+        SourceKey = "wegmans-search-product",
+        SpecPath = "monitors/wegmans/search-product.spec.ts",
+    };
+
+    [Fact]
+    public void Browser_check_with_flow_name_and_spec_path_builds_and_maps_both()
+    {
+        // The gotcha: browser_needs_flow requires flow_name even though spec_path drives runtime. With
+        // BOTH set, the check builds and carries the spec binding the runner will fetch+run (Option C).
+        var ok = CheckValidation.TryBuildNew(ActivationReq(), out var check, out var errors);
+        Assert.True(ok);
+        Assert.Empty(errors);
+        Assert.Equal("browser", check.Kind);
+        Assert.Equal("search-product", check.FlowName);
+        Assert.Equal("wegmans-search-product", check.SourceKey);
+        Assert.Equal("monitors/wegmans/search-product.spec.ts", check.SpecPath);
+    }
+
+    [Theory]
+    [InlineData("monitors/../etc/passwd.spec.ts")] // traversal
+    [InlineData("monitors/wegmans/search-product.ts")] // not a .spec.ts
+    [InlineData("checks/wegmans/search.spec.ts")] // not under monitors/
+    [InlineData("monitors/.spec.ts")] // empty middle segment (^monitors/.+\.spec\.ts$)
+    public void Bad_spec_path_shape_is_rejected(string specPath)
+    {
+        var req = ActivationReq();
+        req.SpecPath = specPath;
+        var ok = CheckValidation.TryBuildNew(req, out _, out var errors);
+        Assert.False(ok);
+        Assert.Contains("specPath", errors.Keys);
+    }
+
+    [Fact]
+    public void Browser_activation_without_flow_name_is_rejected() // browser_needs_flow still applies
+    {
+        var req = ActivationReq();
+        req.FlowName = null;
+        var ok = CheckValidation.TryBuildNew(req, out _, out var errors);
+        Assert.False(ok);
+        Assert.Contains("flowName", errors.Keys);
+    }
+
+    [Fact]
+    public void Hand_made_check_leaves_spec_binding_null() // no spec_path/source_key → baked-flow path
+    {
+        Assert.True(CheckValidation.TryBuildNew(HttpReq(), out var check, out _));
+        Assert.Null(check.SpecPath);
+        Assert.Null(check.SourceKey);
+    }
+
     // ---- assertions ----
 
     [Theory]

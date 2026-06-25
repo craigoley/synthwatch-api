@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
@@ -215,7 +216,17 @@ public class ChecksFunctions
         // lazy-insert-on-first-run, just made explicit at create. (Enforcement + lazy-insert removal are
         // a later step; this is create-path seeding only.)
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
-        await _db.SaveChangesAsync(ct);   // generates check.Id
+        try
+        {
+            await _db.SaveChangesAsync(ct);   // generates check.Id
+        }
+        catch (DbUpdateException ex) when (IsSourceKeyConflict(ex))
+        {
+            // The partial unique index checks_source_key_uniq rejected a SECOND live check for this
+            // manifest id — a duplicate activation. Surface it as a clean 409, never the bare 500 a
+            // constraint violation would otherwise become. The tx rolls back on dispose (no commit).
+            return ApiResults.Conflict($"A monitor for spec '{check.SourceKey}' already exists.");
+        }
         await _db.Database.ExecuteSqlInterpolatedAsync(
             $@"INSERT INTO check_locations (check_id, location)
                SELECT {check.Id}, name FROM locations WHERE enabled
@@ -225,6 +236,11 @@ public class ChecksFunctions
         // A freshly created check has no tags yet (tags are set via PUT /api/checks/{id}/tags).
         return ApiResults.Created($"/api/checks/{check.Id}", CheckDetailDto.From(check, Array.Empty<Run>(), Array.Empty<TagDto>()));
     }
+
+    // A unique-violation (23505) on checks_source_key_uniq = a duplicate source_key activation → 409.
+    private static bool IsSourceKeyConflict(DbUpdateException ex) =>
+        ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } pg &&
+        pg.ConstraintName?.Contains("source_key", StringComparison.Ordinal) == true;
 
     /// <summary>PATCH /api/checks/{id} — partial edit / pause (enabled).</summary>
     [Function("UpdateCheck")]
