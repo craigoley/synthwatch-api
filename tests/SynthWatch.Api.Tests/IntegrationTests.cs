@@ -547,6 +547,87 @@ public class IntegrationTests
         }
     }
 
+    [SkippableFact]
+    public async Task Check_runs_are_cursor_paginated_over_a_bounded_window()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+
+        // A dedicated check whose runs straddle the default 7d window: 3 OLD (>7d) + 6 RECENT (<7d).
+        // Two recent runs SHARE a started_at (the -2h pair) so the (started_at, id) tie-break is
+        // exercised — the keyset must keep timestamp-collision rows distinct across a page boundary.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('runs-pg','http','https://p.example') RETURNING id INTO cid;
+              INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms) VALUES
+                (cid,'pass', now() - interval '10 days', now() - interval '10 days', 40),
+                (cid,'fail', now() - interval '11 days', now() - interval '11 days', 40),
+                (cid,'pass', now() - interval '12 days', now() - interval '12 days', 40),
+                (cid,'pass', now() - interval '1 hour',  now() - interval '1 hour',  40),
+                (cid,'warn', now() - interval '2 hours', now() - interval '2 hours', 40),
+                (cid,'pass', now() - interval '2 hours', now() - interval '2 hours', 41),
+                (cid,'fail', now() - interval '3 hours', now() - interval '3 hours', 40),
+                (cid,'pass', now() - interval '4 hours', now() - interval '4 hours', 40),
+                (cid,'pass', now() - interval '5 hours', now() - interval '5 hours', 40);
+            END $$;
+            """);
+        var cid = await db.Checks.Where(c => c.Name == "runs-pg").Select(c => c.Id).FirstAsync();
+        try
+        {
+            var fn = new ChecksFunctions(db);
+            static CursorPage<RunDto> Page(IActionResult r) =>
+                Assert.IsType<CursorPage<RunDto>>(Assert.IsType<OkObjectResult>(r).Value!);
+
+            // Runner-truth ordering inside the default 7d window: DESC started_at, then DESC id.
+            var expectedRecent = await db.Runs.AsNoTracking()
+                .Where(r => r.CheckId == cid && r.StartedAt >= DateTimeOffset.UtcNow.AddDays(-7))
+                .OrderByDescending(r => r.StartedAt).ThenByDescending(r => r.Id)
+                .Select(r => r.Id).ToListAsync();
+            Assert.Equal(6, expectedRecent.Count); // 6 recent kept, 3 old excluded
+
+            // ── BOUNDED DEFAULT: a param-less call returns ONLY the recent 6 — never an all-time
+            //    scan of the 3 old runs. This is the whole point of the date-range default.
+            var def = Page(await fn.ListCheckRuns(Request(), cid, default));
+            Assert.Equal(expectedRecent, def.Items.Select(i => i.Id).ToList());
+
+            // ── CURSOR WALK: page size 2 walks the window, each row exactly once, no skips/dupes,
+            //    next-cursor null when exhausted.
+            var walked = new List<long>();
+            string? cursor = null;
+            var guard = 0;
+            do
+            {
+                var q = "?pageSize=2" + (cursor is null ? "" : $"&cursor={Uri.EscapeDataString(cursor)}");
+                var pg = Page(await fn.ListCheckRuns(Request(q), cid, default));
+                Assert.True(pg.Items.Count <= 2);
+                walked.AddRange(pg.Items.Select(i => i.Id));
+                cursor = pg.NextCursor;
+            } while (cursor is not null && ++guard < 20);
+            Assert.Null(cursor);                  // exhausted -> null next-cursor
+            Assert.Equal(expectedRecent, walked); // identical set, identical DESC order, no dupes
+
+            // ── DATE-RANGE FILTER: an explicit from/to reaches the OLD runs and filters to ONLY them.
+            var from = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-13).ToString("o"));
+            var to = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-8).ToString("o"));
+            var old = Page(await fn.ListCheckRuns(Request($"?from={from}&to={to}&pageSize=200"), cid, default));
+            Assert.Equal(3, old.Items.Count);
+            Assert.All(old.Items, i => Assert.True(i.StartedAt < DateTimeOffset.UtcNow.AddDays(-8)));
+            Assert.Null(old.NextCursor);
+
+            // ── MALFORMED INPUT is 400 — not a 500, and not a silent fall-through to an all-time scan.
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.ListCheckRuns(Request("?cursor=not~a~cursor"), cid, default)).StatusCode);
+            var fromAfterTo = $"?from={Uri.EscapeDataString(DateTimeOffset.UtcNow.ToString("o"))}" +
+                              $"&to={Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-1).ToString("o"))}";
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.ListCheckRuns(Request(fromAfterTo), cid, default)).StatusCode);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'runs-pg';");
+        }
+    }
+
     private static async Task Exec(NpgsqlConnection c, string sql)
     {
         await using var cmd = c.CreateCommand();

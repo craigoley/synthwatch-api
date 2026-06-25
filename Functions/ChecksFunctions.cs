@@ -299,7 +299,15 @@ public class ChecksFunctions
         return ApiResults.NoContent();
     }
 
-    /// <summary>GET /api/checks/{id}/runs — paginated run history.</summary>
+    /// <summary>
+    /// GET /api/checks/{id}/runs — cursor-paginated run history over a bounded date-range window.
+    /// Keyset cursor on (started_at DESC, id DESC): stable for an append-only table where OFFSET
+    /// re-scans the prefix and double-counts as new runs insert at the head. Params:
+    /// <c>?from=&amp;to=</c> (ISO-8601; DEFAULT the last 7d so the query NEVER loads all-time),
+    /// <c>?cursor=</c> (the opaque next-cursor from the prior page), <c>?pageSize=</c> (default 50,
+    /// max 200). Returns the page + a nextCursor (null when the window is exhausted). The
+    /// (check_id, started_at DESC) index makes the windowed + keyset query an index range scan.
+    /// </summary>
     [Function("ListCheckRuns")]
     public async Task<IActionResult> ListCheckRuns(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "checks/{id:long}/runs")] HttpRequest req,
@@ -309,19 +317,36 @@ public class ChecksFunctions
         if (!await _db.Checks.AnyAsync(c => c.Id == id, ct))
             return ApiResults.NotFound($"Check {id} not found.");
 
-        var (page, pageSize) = Paging.Parse(req);
+        var range = CursorPaging.Parse(req, DateTimeOffset.UtcNow);
+        if (!range.IsValid)
+            return ApiResults.BadRequest(range.Error!);
 
-        var query = _db.Runs.AsNoTracking().Where(r => r.CheckId == id);
-        var total = await query.LongCountAsync(ct);
-        var runs = (await query
-            .OrderByDescending(r => r.StartedAt)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync(ct))
-            .Select(RunDto.From)
-            .ToList();
+        // Bounded to the date-range window (default last 7d) — never an all-time scan, and no
+        // COUNT over the whole partition (the unbounded cost the cursor design removes).
+        var query = _db.Runs.AsNoTracking()
+            .Where(r => r.CheckId == id && r.StartedAt >= range.From && r.StartedAt < range.To);
 
-        return ApiResults.Ok(new PagedResult<RunDto>(runs, page, pageSize, total));
+        // Keyset: continue strictly after the cursor's (started_at, id) under the DESC ordering.
+        // The id tie-break keeps runs that share a started_at from being skipped or repeated.
+        if (range.Cursor is { } cur)
+            query = query.Where(r => r.StartedAt < cur.Ts || (r.StartedAt == cur.Ts && r.Id < cur.Id));
+
+        // Over-fetch one row to know whether a further page exists, without a COUNT.
+        var rows = await query
+            .OrderByDescending(r => r.StartedAt).ThenByDescending(r => r.Id)
+            .Take(range.PageSize + 1)
+            .ToListAsync(ct);
+
+        var hasMore = rows.Count > range.PageSize;
+        if (hasMore)
+            rows.RemoveAt(rows.Count - 1);
+
+        var runs = rows.Select(RunDto.From).ToList();
+        var nextCursor = hasMore && rows.Count > 0
+            ? new CursorPosition(rows[^1].StartedAt, rows[^1].Id).Encode()
+            : null;
+
+        return ApiResults.Ok(new CursorPage<RunDto>(runs, nextCursor, range.PageSize));
     }
 
     /// <summary>GET /api/checks/{id}/metrics — run_metrics time series for this check.</summary>

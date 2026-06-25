@@ -209,3 +209,11 @@ public record FlowDto(
 
 /// <summary>Generic paged envelope for list endpoints.</summary>
 public record PagedResult<T>(IReadOnlyList<T> Items, int Page, int PageSize, long Total);
+
+/// <summary>
+/// Cursor-paginated envelope for append-only list endpoints (runs now, incidents next).
+/// <c>NextCursor</c> is the opaque token to pass back as <c>?cursor=</c> for the following page;
+/// null when the date-range window is exhausted. There is intentionally NO total — counting an
+/// unbounded append-only table is exactly the all-rows scan cursor pagination exists to avoid.
+/// </summary>
+public record CursorPage<T>(IReadOnlyList<T> Items, string? NextCursor, int PageSize);
