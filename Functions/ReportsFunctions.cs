@@ -42,7 +42,7 @@ public class ReportsFunctions
         if (WindowDays(window) is not int days) return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
         var offset = days - 1;
         var groupBy = req.Query["groupBy"].ToString();
-        var grouped = !string.IsNullOrWhiteSpace(groupBy);
+        var grouped = IsGrouped(groupBy);
 
         // Per-(group, check) availability summed from the daily rollup counts (additive — NOT averaged %).
         var rows = grouped
@@ -101,7 +101,7 @@ public class ReportsFunctions
         if (WindowDays(window) is not int days) return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
         var offset = days - 1;
         var groupBy = req.Query["groupBy"].ToString();
-        var grouped = !string.IsNullOrWhiteSpace(groupBy);
+        var grouped = IsGrouped(groupBy);
 
         // Latency over the window, RECOMPUTED FROM RAW (#88's MW-excluded / running-excluded / UP-runs
         // filter). GROUPING SETS yields both per-check rows AND the group-level aggregate (check_id NULL)
@@ -205,6 +205,12 @@ public class ReportsFunctions
 
         return ApiResults.Ok(new PerformanceReportDto(string.IsNullOrEmpty(window) ? "30d" : window, grouped ? groupBy : null, groups));
     }
+
+    // ★ The dashboard sends groupBy="none" (not "") for the UNGROUPED report. Treat that sentinel (and
+    // empty) as ungrouped — otherwise we JOIN check_tags ON key='none', which matches no rows, so the report
+    // returns {"groups":[]} even though the rollup has data. That was the "reports empty despite data" bug.
+    private static bool IsGrouped(string groupBy) =>
+        !string.IsNullOrWhiteSpace(groupBy) && !groupBy.Equals("none", StringComparison.OrdinalIgnoreCase);
 
     private static decimal? Pct(long up, long down) =>
         up + down > 0 ? Math.Round(100m * up / (up + down), 4) : null;

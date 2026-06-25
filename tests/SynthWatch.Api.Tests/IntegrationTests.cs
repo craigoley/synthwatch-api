@@ -676,6 +676,22 @@ public class IntegrationTests
                 await fn.GetPerformanceReport(Request("?window=30d"), default)).Value!);
             Assert.Null(Assert.Single(ung.Groups).Group);
 
+            // ★ REGRESSION (the "reports empty despite data" bug): the dashboard sends groupBy="none" for the
+            // ungrouped report. "none" is NOT a tag key — it must behave like ungrouped (one fleet group with
+            // the rollup data), NOT join check_tags ON key='none' (which matches nothing → empty groups).
+            var availNone = Assert.IsType<AvailabilityReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetAvailabilityReport(Request("?window=30d&groupBy=none"), default)).Value!);
+            var availFleet = Assert.Single(availNone.Groups);
+            Assert.Null(availFleet.Group);                 // ungrouped → group=null, not the literal "none"
+            Assert.Null(availNone.GroupBy);
+            Assert.Equal(104, availFleet.UpCount);         // 94 (rep-api) + 10 (rep-web) — the rollup data is served
+            Assert.Equal(2, availFleet.Checks.Count);      // both monitors present
+
+            var perfNone = Assert.IsType<PerformanceReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetPerformanceReport(Request("?window=30d&groupBy=none"), default)).Value!);
+            Assert.Null(Assert.Single(perfNone.Groups).Group);
+            Assert.NotNull(perfNone.Groups[0].Latency.P95Ms);
+
             // Bad window → 400.
             Assert.IsType<BadRequestObjectResult>(await fn.GetAvailabilityReport(Request("?window=1y"), default));
         }
