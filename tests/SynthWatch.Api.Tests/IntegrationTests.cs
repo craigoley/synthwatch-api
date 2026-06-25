@@ -512,6 +512,86 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Spec_catalog_joins_checks_for_coverage_and_enriches_active_with_health()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new SpecsFunctions(db);
+
+        // Empty catalog → reconcile hasn't populated it yet: items empty, probedAt null.
+        var empty = Assert.IsType<SpecCatalogDto>(Assert.IsType<OkObjectResult>(
+            await fn.GetSpecCatalog(Request(), default)).Value!);
+        Assert.Empty(empty.Items);
+        Assert.Null(empty.ProbedAt);
+
+        // Seed an ACTIVE spec: a check bound by source_key (+ a pass run for health) and its catalog row.
+        // Plus an UNMONITORED+runnable spec and an UNMONITORED+orphan spec (no check).
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, flow_name, source_key, spec_path, enabled)
+              VALUES ('Active Mon','browser','https://a.example','active-flow','active-spec',
+                      'monitors/a/active.spec.ts', true)
+              RETURNING id INTO cid;
+              INSERT INTO runs (check_id, status, started_at, duration_ms)
+              VALUES (cid, 'pass', now() - interval '2 minutes', 1234);
+            END $$;
+
+            INSERT INTO spec_catalog
+              (source_key, name, spec_path, kind, target, suggested_interval_seconds, tags,
+               description, enabled_by_default, runnable, not_runnable_reason, probed_at) VALUES
+              ('active-spec','Active Mon','monitors/a/active.spec.ts','browser','https://a.example',1800,
+               '["a","journey"]'::jsonb,'an active monitor',false,true,NULL, now() - interval '5 minutes'),
+              ('unmon-spec','Unmonitored Mon','monitors/u/unmon.spec.ts','browser','https://u.example',600,
+               '[]'::jsonb,NULL,false,true,NULL, now() - interval '5 minutes'),
+              ('orphan-spec','Orphan Mon','monitors/o/orphan.spec.ts','browser',NULL,NULL,
+               '[]'::jsonb,NULL,false,false,'not fetchable: 404', now() - interval '5 minutes');
+            """);
+        try
+        {
+            var dto = Assert.IsType<SpecCatalogDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetSpecCatalog(Request(), default)).Value!);
+            Assert.Equal(3, dto.Items.Count);
+            Assert.NotNull(dto.ProbedAt);
+            // Ordered by source_key → active, orphan, unmon.
+            Assert.Equal(new[] { "active-spec", "orphan-spec", "unmon-spec" }, dto.Items.Select(i => i.SourceKey).ToArray());
+
+            // ACTIVE: monitored=true, links to the check, health enriched from the pass run.
+            var active = dto.Items.Single(i => i.SourceKey == "active-spec");
+            Assert.True(active.Monitored);
+            Assert.NotNull(active.CheckId);
+            Assert.Equal("Active Mon", active.CheckName);
+            Assert.True(active.Enabled);
+            Assert.True(active.Runnable);
+            Assert.NotNull(active.Health);
+            Assert.Equal("pass", active.Health!.CurrentStatus);
+            Assert.Equal(1234d, active.Health.P95Ms);   // single 24h run → p95 = that run
+            Assert.Equal(0, active.Health.OpenIncidentCount);
+            Assert.Equal(new[] { "a", "journey" }, active.Tags.ToArray()); // tags jsonb round-trips
+
+            // UNMONITORED: no check, no health; still carries the manifest's suggested defaults.
+            var unmon = dto.Items.Single(i => i.SourceKey == "unmon-spec");
+            Assert.False(unmon.Monitored);
+            Assert.Null(unmon.CheckId);
+            Assert.Null(unmon.Health);
+            Assert.True(unmon.Runnable);
+            Assert.Equal(600, unmon.SuggestedIntervalSeconds);
+
+            // ORPHAN: unmonitored + not runnable, with the probe reason passed through.
+            var orphan = dto.Items.Single(i => i.SourceKey == "orphan-spec");
+            Assert.False(orphan.Monitored);
+            Assert.False(orphan.Runnable);
+            Assert.Equal("not fetchable: 404", orphan.NotRunnableReason);
+            Assert.Null(orphan.Health);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM spec_catalog; DELETE FROM checks WHERE source_key = 'active-spec';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Reports_availability_is_additive_and_performance_p95_is_recomputed_from_raw()
     {
         RequireDocker();

@@ -117,14 +117,20 @@ CREATE TABLE public.checks (
     auth jsonb,
     net_config jsonb,
     steps jsonb,
+    source_key text,
+    spec_path text,
     CONSTRAINT browser_needs_flow CHECK (((kind <> 'browser'::text) OR (flow_name IS NOT NULL))),
     CONSTRAINT checks_failure_threshold_check CHECK ((failure_threshold > 0)),
     CONSTRAINT checks_interval_seconds_check CHECK ((interval_seconds > 0)),
     CONSTRAINT checks_kind_check CHECK ((kind = ANY (ARRAY['http'::text, 'browser'::text, 'ssl'::text, 'dns'::text, 'tcp'::text, 'ping'::text, 'multistep'::text]))),
     CONSTRAINT checks_severity_check CHECK ((severity = ANY (ARRAY['critical'::text, 'warning'::text]))),
+    CONSTRAINT checks_spec_path_shape CHECK ((spec_path IS NULL OR ((spec_path ~ '^monitors/.+\.spec\.ts$') AND ("position"(spec_path, '..'::text) = 0)))),
     CONSTRAINT checks_timeout_ms_check CHECK ((timeout_ms > 0)),
     CONSTRAINT checks_warn_renotify_seconds_check CHECK ((warn_renotify_seconds > 0))
 );
+
+-- One live check per manifest id (mirrors checks_source_key_uniq; NULL-tolerant).
+CREATE UNIQUE INDEX checks_source_key_uniq ON public.checks (source_key) WHERE source_key IS NOT NULL;
 
 
 --
@@ -826,4 +832,25 @@ CREATE TABLE public.reconcile_drift (
     detail      jsonb NOT NULL DEFAULT '{}'::jsonb,
     detected_at timestamp with time zone NOT NULL DEFAULT now(),
     CONSTRAINT reconcile_drift_pkey PRIMARY KEY (source_key, drift_type)
+);
+
+--
+-- Manifest-snapshot inventory (runner migration 0036, Phase 13): spec_catalog. The reconcile job
+-- snapshots every manifest spec here (full reload each run) + its runnability probe result, so the API
+-- can serve the read-only catalog (GET /api/specs = spec_catalog LEFT JOIN checks). Mirrors \d spec_catalog.
+--
+CREATE TABLE public.spec_catalog (
+    source_key                 text NOT NULL,
+    name                       text NOT NULL,
+    spec_path                  text NOT NULL,
+    kind                       text NOT NULL,
+    target                     text,
+    suggested_interval_seconds integer,
+    tags                       jsonb NOT NULL DEFAULT '[]'::jsonb,
+    description                text,
+    enabled_by_default         boolean NOT NULL DEFAULT false,
+    runnable                   boolean NOT NULL,
+    not_runnable_reason        text,
+    probed_at                  timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT spec_catalog_pkey PRIMARY KEY (source_key)
 );
