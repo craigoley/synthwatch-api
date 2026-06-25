@@ -854,3 +854,46 @@ CREATE TABLE public.spec_catalog (
     probed_at                  timestamp with time zone NOT NULL DEFAULT now(),
     CONSTRAINT spec_catalog_pkey PRIMARY KEY (source_key)
 );
+
+
+--
+-- auth identity tables (mirrors runner 0037_auth.sql, Phase 12 slice 1). Appended to the snapshot so
+-- the Docker-backed integration tests seed them. No GRANTs here — the test container has no MI role.
+--
+
+CREATE TABLE otp_codes (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    email         text NOT NULL,
+    code_hash     text NOT NULL,
+    expires_at    timestamp with time zone NOT NULL,
+    consumed_at   timestamp with time zone,
+    attempt_count integer NOT NULL DEFAULT 0,
+    request_ip    text,
+    created_at    timestamp with time zone NOT NULL DEFAULT now()
+);
+CREATE INDEX otp_codes_email_created_idx ON otp_codes (email, created_at);
+
+CREATE TABLE sessions (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    token_hash   text NOT NULL UNIQUE,
+    email        text NOT NULL,
+    created_at   timestamp with time zone NOT NULL DEFAULT now(),
+    last_used_at timestamp with time zone,
+    expires_at   timestamp with time zone NOT NULL,
+    revoked_at   timestamp with time zone,
+    issued_ip    text
+);
+
+CREATE TABLE editors (
+    email    text PRIMARY KEY,
+    added_by text NOT NULL,
+    added_at timestamp with time zone NOT NULL DEFAULT now()
+);
+
+CREATE TABLE access_requests (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    email        text NOT NULL,
+    requested_at timestamp with time zone NOT NULL DEFAULT now(),
+    request_ip   text
+);
+CREATE INDEX access_requests_email_requested_idx ON access_requests (email, requested_at);
