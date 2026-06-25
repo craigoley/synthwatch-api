@@ -1917,4 +1917,88 @@ public class IntegrationTests
                 "DELETE FROM access_requests WHERE email LIKE '%@req.test'; DELETE FROM editors WHERE email LIKE '%@req.test';");
         }
     }
+
+    // ─── Phase 12 slice 3 — editor (user) management, admin-only ────────────────────────────────────
+
+    private static HttpRequest AuthReq(string? token = null)
+    {
+        var ctx = new DefaultHttpContext();
+        if (token is not null) ctx.Request.Headers.Authorization = $"Bearer {token}";
+        return ctx.Request;
+    }
+
+    private static HttpRequest AuthJsonReq(string? token, object body)
+    {
+        var ctx = new DefaultHttpContext();
+        if (token is not null) ctx.Request.Headers.Authorization = $"Bearer {token}";
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(body);
+        ctx.Request.Body = new MemoryStream(bytes);
+        ctx.Request.ContentType = "application/json";
+        ctx.Request.ContentLength = bytes.Length;
+        return ctx.Request;
+    }
+
+    private static int StatusOf(IActionResult r) => r switch
+    {
+        ObjectResult o => o.StatusCode ?? 200,
+        StatusCodeResult s => s.StatusCode,
+        _ => 200,
+    };
+
+    [SkippableFact]
+    public async Task Editors_management_is_admin_only_and_audited()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "boss@ed.test");
+        await using var db = _pg.NewDbContext();
+        var auth = new AuthPrincipalService(db);
+        var audit = new AuditScope();
+        var fn = new EditorsFunctions(db, auth, audit);
+        const string adminTok = "swt_admin_ed", editorTok = "swt_editor_ed";
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO editors (email, added_by) VALUES ('ed@ed.test', 'boss@ed.test')");
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(adminTok)}, 'boss@ed.test', now() + interval '1 hour')");
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(editorTok)}, 'ed@ed.test', now() + interval '1 hour')");
+            await db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO access_requests (email) VALUES ('want@ed.test'), ('ed@ed.test')");
+
+            // No token → 401; editor token → 403 (incl. the GET list, which the verb-gate doesn't cover).
+            Assert.IsType<UnauthorizedObjectResult>(await fn.ListEditors(AuthReq(), default));
+            Assert.Equal(403, StatusOf(await fn.ListEditors(AuthReq(editorTok), default)));
+            Assert.Equal(403, StatusOf(await fn.AddEditor(AuthJsonReq(editorTok, new { email = "x@ed.test" }), default)));
+            Assert.Equal(403, StatusOf(await fn.RemoveEditor(AuthReq(editorTok), "ed@ed.test", default)));
+
+            // Admin lists → sees the seeded editor.
+            var listed = (List<EditorDto>)Assert.IsType<OkObjectResult>(await fn.ListEditors(AuthReq(adminTok), default)).Value!;
+            Assert.Contains(listed, e => e.Email == "ed@ed.test");
+
+            // Admin adds (email normalized) → 201 + audit diff recorded; duplicate → 409.
+            Assert.Equal(201, StatusOf(await fn.AddEditor(AuthJsonReq(adminTok, new { email = "New@ED.test" }), default)));
+            Assert.True(await db.Editors.AnyAsync(e => e.Email == "new@ed.test"));
+            Assert.Equal("editor", audit.Diff?.TargetType);
+            Assert.Equal("new@ed.test", audit.Diff?.TargetId);
+            Assert.IsType<ConflictObjectResult>(await fn.AddEditor(AuthJsonReq(adminTok, new { email = "new@ed.test" }), default));
+
+            // Access-requests: the stranger shows; an existing editor is filtered out.
+            var reqs = (List<AccessRequestDto>)Assert.IsType<OkObjectResult>(await fn.ListAccessRequests(AuthReq(adminTok), default)).Value!;
+            Assert.Contains(reqs, r => r.Email == "want@ed.test");
+            Assert.DoesNotContain(reqs, r => r.Email == "ed@ed.test");
+
+            // Admin removes → 204, gone; removing a non-editor → 404.
+            Assert.IsType<NoContentResult>(await fn.RemoveEditor(AuthReq(adminTok), "new@ed.test", default));
+            Assert.False(await db.Editors.AnyAsync(e => e.Email == "new@ed.test"));
+            Assert.IsType<NotFoundObjectResult>(await fn.RemoveEditor(AuthReq(adminTok), "ghost@ed.test", default));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+            await using var cleanup = _pg.NewDbContext();
+            await cleanup.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email LIKE '%@ed.test'; DELETE FROM editors WHERE email LIKE '%@ed.test'; DELETE FROM access_requests WHERE email LIKE '%@ed.test';");
+        }
+    }
 }
