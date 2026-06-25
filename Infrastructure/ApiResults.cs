@@ -21,6 +21,12 @@ public static class ApiResults
     public static IActionResult Unauthorized(string message) =>
         new UnauthorizedObjectResult(new { error = "unauthorized", message });
 
+    /// <summary>403 — a valid session lacking the required role. Same body shape the
+    /// AuthorizationMiddleware emits, so the dashboard's 401-vs-403 interceptor branches identically
+    /// whether the deny came from the gate or a handler's own admin check.</summary>
+    public static IActionResult Forbidden(string message) =>
+        new ObjectResult(new { error = "forbidden", message }) { StatusCode = StatusCodes.Status403Forbidden };
+
     public static IActionResult Ok(object value) => new OkObjectResult(value);
 
     public static IActionResult Created(string location, object value) =>

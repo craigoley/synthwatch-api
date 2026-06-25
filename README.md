@@ -44,6 +44,10 @@ All routes are prefixed with `/api`. JSON in/out.
 | `GET` | `/api/sla?window=24h\|7d\|30d` | Per-check availability from the SLA views |
 | `GET` | `/api/reconcile/drift` | Latest monitors-as-code drift snapshot (read-only; reconcile runs in report mode) |
 | `GET` | `/api/specs` | Spec catalog: every manifest spec LEFT JOIN checks (coverage + runnable + health), read-only |
+| `GET` | `/api/editors` | List the editor allowlist — **admin-only** (Phase 12 slice 3) |
+| `POST` | `/api/editors` | Add an editor `{ email }` — **admin-only**, audited (409 if already an editor) |
+| `DELETE` | `/api/editors/{email}` | Remove an editor — **admin-only**, audited (revokes write access on their next request) |
+| `GET` | `/api/access-requests` | Pending edit-access requests (excludes existing editors/admins) — **admin-only** |
 
 Request bodies are validated against the live DB CHECK constraints (kind, severity,
 form factor, positive intervals/timeouts, `browser` requires `flow_name`, …) and rejected
