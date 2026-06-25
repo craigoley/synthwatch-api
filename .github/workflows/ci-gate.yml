@@ -1,0 +1,103 @@
+name: CI gate
+
+# ──────────────────────────────────────────────────────────────────────────────────────────
+# ci-gate — ONE always-reporting required status check that aggregates the PR's other checks.
+# Fleet pattern, proven first in craigoley/synthwatch (#110).
+#
+# WHY: a required status check that gets SKIPPED can permanently deadlock a merge. In synthwatch
+# a Dependabot PR sat BLOCKED forever because a required REUSABLE-workflow check was `if:`-skipped
+# on Dependabot PRs — a skipped reusable caller creates NO check run with that nested context
+# name, so branch protection waits for "Expected" forever. (A skipped DIRECT job reports a
+# `skipped` check run, which GitHub counts as satisfied.) CLASS bug: ANY required check that can
+# be skipped (job `if:`, path filter, reusable caller) can deadlock a merge.
+#
+# THIS REPO's required checks (`Test …`, `Claude review`) currently always register, so ci-gate
+# here is PREVENTIVE + fleet-consistency: it immunises the repo if a skippable/reusable/path-
+# filtered required check is ever added. Branch protection should require ONLY `ci-gate`; the
+# existing jobs keep running + reporting. That admin flip is Craig's — see the PR.
+#
+# HOW: ci-gate ALWAYS runs (no `if:`/path filter) so its context ALWAYS reports, and it FAILS
+# ONLY when a sibling check actually FAILED. It reads the PR head commit's check runs across all
+# workflows (the textbook `needs:` aggregator only works within ONE workflow), waits for the
+# always-present required check(s) to be terminal (registration-race safety), then fails iff any
+# check (excluding ci-gate + the auto-merge job) concluded a real failure. Skipped/absent
+# siblings never block. ★ Note: this makes ALL of the repo's checks effectively gating (a
+# semgrep/codeql/etc. failure fails ci-gate) — stricter than the prior 2-context requirement,
+# which is intended (more enforcement via one stable gate).
+# ──────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  checks: read
+  contents: read
+
+concurrency:
+  group: ci-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ci-gate:
+    name: ci-gate
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      # Check-run names that ALWAYS appear on a PR — the gate waits for these to be terminal
+      # before deciding (so a slow-to-register check can't let it pass prematurely). "Claude
+      # review" reports a SKIPPED run on Dependabot PRs (still present); "Test …" always runs.
+      REQUIRED: >-
+        ["Test (xUnit + Testcontainers Postgres)","Claude review"]
+      # Not quality gates — never wait on or fail for these (ci-gate is self; the auto-merge job
+      # FAILS on a draft PR, which is benign).
+      IGNORE: >-
+        ["ci-gate","Auto-merge (trusted authors)"]
+    steps:
+      - name: Aggregate sibling check results (fail only on a REAL failure; skipped/absent are OK)
+        run: |
+          set -euo pipefail
+
+          runs_json() {
+            # All check runs on the PR head SHA, across every workflow + app, merged across pages.
+            # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
+            gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp \
+              | jq -c '[ .[].check_runs[] | {name, status, conclusion} ]'
+          }
+
+          # 1) WAIT until every REQUIRED check is present + completed (terminal). Fail-closed on timeout.
+          deadline=$(( $(date +%s) + 900 ))   # 15-minute hard cap
+          while :; do
+            runs="$(runs_json)"
+            not_ready="$(jq -r --argjson req "${REQUIRED}" '
+              ([ .[] | select(.status=="completed") | .name ]) as $done
+              | ($req - $done) | .[]' <<< "${runs}")"
+            [ -z "${not_ready}" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::ci-gate: timed out waiting for required check(s) to complete:"
+              printf '%s\n' "${not_ready}" | sed 's/^/  - /'
+              exit 1
+            fi
+            echo "waiting for required check(s) to complete:"
+            printf '%s\n' "${not_ready}" | sed 's/^/  - /'
+            sleep 15
+          done
+
+          # 2) FAIL if ANY check (excluding IGNORE) concluded as a real failure.
+          echo "--- gated check runs ---"
+          printf '%s' "${runs}" | jq -r '.[] | "  \(.conclusion // .status)\t\(.name)"' | sort
+
+          fails="$(jq -r --argjson ig "${IGNORE}" '
+            .[] | .name as $n | .conclusion as $c
+                | select(($ig | index($n)) == null)
+                | select(["failure","timed_out","cancelled","action_required","startup_failure"] | index($c))
+                | $n' <<< "${runs}")"
+
+          if [ -n "${fails}" ]; then
+            echo "::error::ci-gate: required check(s) FAILED — holding merge:"
+            printf '%s\n' "${fails}" | sed 's/^/  - /'
+            exit 1
+          fi
+          echo "ci-gate: all required checks terminal, no failures — merge may proceed."
