@@ -88,13 +88,32 @@ public class AiInsightsFunctions
         }
 
         var run = new AiInsights.RunContext(row.CheckName, targetHost, row.Status, traceSource);
-        var content = await _aoai.ChatJsonAsync(AiInsights.SystemPrompt, AiInsights.BuildUser(run, signals), ct);
-        if (content is null)
-            return ApiResults.Ok(AiInsightsDto.Unavailable("The AI model was unavailable — please try again."));
+        var result = await _aoai.ChatJsonAsync(AiInsights.SystemPrompt, AiInsights.BuildUser(run, signals), ct);
 
-        var insights = AiInsights.Parse(content);
-        return ApiResults.Ok(insights ?? AiInsightsDto.Unavailable("The AI response could not be parsed."));
+        if (result.Outcome != AoaiOutcome.Ok)
+            return ApiResults.Ok(MapFailure(result)); // distinct, HONEST message (transient vs deterministic)
+
+        var insights = AiInsights.Parse(result.Content!);
+        return ApiResults.Ok(insights ?? AiInsightsDto.Unavailable(
+            "The AI returned an unexpected response format for this run. Re-running is unlikely to help.", retryable: false));
     }
+
+    /// <summary>Map a non-Ok AOAI outcome to an HONEST, distinct user message — so a deterministic failure
+    /// (truncation / content-filter / parse) doesn't masquerade as a transient one the user re-runs in vain.</summary>
+    public static AiInsightsDto MapFailure(AoaiResult r) => r.Outcome switch
+    {
+        AoaiOutcome.Truncated => AiInsightsDto.Unavailable(
+            "This run's trace was too complex for the model to analyze in one pass. Re-running won't help.", retryable: false),
+        AoaiOutcome.Filtered => AiInsightsDto.Unavailable(
+            "The AI could not analyze this run's content (it was blocked by a content filter).", retryable: false),
+        AoaiOutcome.EmptyContent => AiInsightsDto.Unavailable(
+            "The AI returned no analysis for this run.", retryable: false),
+        AoaiOutcome.Timeout => AiInsightsDto.Unavailable(
+            "The AI service didn't respond in time — please try again in a moment.", retryable: true),
+        AoaiOutcome.HttpError when r.Transient => AiInsightsDto.Unavailable(
+            "The AI service is busy right now — please try again in a moment.", retryable: true),
+        _ => AiInsightsDto.Unavailable("AI insights are unavailable for this run right now.", retryable: false),
+    };
 
     /// <summary>Which trace to analyze: the per-run trace (a failure run) if present, else the check's
     /// last-known-good SUCCESS baseline (a success run leaves trace_url null). Returns the chosen url + a

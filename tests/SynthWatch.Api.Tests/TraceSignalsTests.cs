@@ -74,6 +74,18 @@ public class TraceSignalsTests
         Assert.Single(c.Messages);
     }
 
+    // ★ DURABLE input bound: a pathological trace (hundreds of DISTINCT site errors) must not produce an
+    // unbounded summary that blows the downstream AOAI token budget.
+    [Fact]
+    public void Console_messages_are_hard_capped_for_a_pathological_trace()
+    {
+        var lines = Enumerable.Range(0, 500).Select(i =>
+            "{\"type\":\"console\",\"messageType\":\"error\",\"text\":\"distinct site error number " + i +
+            "\",\"location\":{\"url\":\"https://www.wegmans.com/p" + i + "\"}}");
+        var c = TraceExtractor.ExtractConsole(S(string.Join('\n', lines)), Target);
+        Assert.True(c.Messages.Count <= 40, $"expected ≤40 kept, got {c.Messages.Count}");
+    }
+
     [Fact]
     public void Network_summary_counts_top_n_and_third_party_grouping()
     {

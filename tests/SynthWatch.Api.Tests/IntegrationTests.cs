@@ -1764,7 +1764,8 @@ public class IntegrationTests
     private sealed class ConfiguredFakeAoai : IAoaiClient
     {
         public bool IsConfigured => true;
-        public Task<string?> ChatJsonAsync(string system, string user, CancellationToken ct) => Task.FromResult<string?>(null);
+        public Task<AoaiResult> ChatJsonAsync(string system, string user, CancellationToken ct) =>
+            Task.FromResult(new AoaiResult(AoaiOutcome.Ok, "{}", "stop", 200, null));
     }
 
     // ── ai-insights: a SUCCESS run (trace_url null) whose monitor has NO success baseline yet → clean 404 ──
