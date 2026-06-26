@@ -35,6 +35,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<CheckTag> CheckTags => Set<CheckTag>();
     public DbSet<TagRoute> TagRoutes => Set<TagRoute>();
     public DbSet<TestSendRequest> TestSendRequests => Set<TestSendRequest>();
+    public DbSet<RunRequest> RunRequests => Set<RunRequest>();
     public DbSet<AvailabilityReportRow> AvailabilityReport => Set<AvailabilityReportRow>();
     public DbSet<AvailabilitySeriesRow> AvailabilityReportSeries => Set<AvailabilitySeriesRow>();
     public DbSet<LatencyReportRow> LatencyReport => Set<LatencyReportRow>();
@@ -114,6 +115,19 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.ChannelId).HasColumnName("channel_id");
             e.Property(x => x.Status).HasColumnName("status");
             e.Property(x => x.Detail).HasColumnName("detail");
+            e.Property(x => x.RequestedAt).HasColumnName("requested_at").ValueGeneratedOnAdd();
+            e.Property(x => x.CompletedAt).HasColumnName("completed_at");
+        });
+
+        modelBuilder.Entity<RunRequest>(e =>
+        {
+            // Runner-owned (migration 0042): the API INSERTs 'pending' rows + READs to coalesce only.
+            // id/requested_at are DB-generated; the runner mutates status/completed_at.
+            e.ToTable("run_requests");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.Status).HasColumnName("status");
             e.Property(x => x.RequestedAt).HasColumnName("requested_at").ValueGeneratedOnAdd();
             e.Property(x => x.CompletedAt).HasColumnName("completed_at");
         });
