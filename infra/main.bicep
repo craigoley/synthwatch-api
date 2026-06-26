@@ -55,6 +55,15 @@ param acsEmailEndpoint string = 'https://synthwatch-acs.unitedstates.communicati
 @description('Phase 12 auth — slice 2 GATE master switch. DEFAULT OFF: the AuthorizationMiddleware is inert and writes pass as today. ★ Flip to true ONLY together with slice 3 (the dashboard sending session tokens) — turning it on before the dashboard sends tokens would 401 every write.')
 param authEnforcementEnabled bool = false
 
+@description('Trace AI Insights (slice 2) — Azure OpenAI endpoint, e.g. https://synthwatch-aoai.openai.azure.com/. DEFAULT EMPTY = INERT: POST /api/runs/{id}/ai-insights returns "not configured" until set. ★ Deploy prereq: also grant the Function App MI "Cognitive Services OpenAI User" on synthwatch-aoai (see the PR).')
+param azureOpenAiEndpoint string = ''
+
+@description('Trace AI Insights — the AOAI chat deployment name. gpt-5-mini (shared with the runner RCA).')
+param azureOpenAiDeployment string = 'gpt-5-mini'
+
+@description('Trace AI Insights — the AOAI REST api-version.')
+param azureOpenAiApiVersion string = '2025-04-01-preview'
+
 @description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
 param artifactsStorageAccountName string = 'synthwatche24e33105c'
 
@@ -197,6 +206,19 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'AUTH_ENFORCEMENT_ENABLED'
           value: string(authEnforcementEnabled)
+        }
+        // Trace AI Insights (slice 2). DEFAULT endpoint EMPTY = INERT until the MI role + endpoint are set.
+        {
+          name: 'AZURE_OPENAI_ENDPOINT'
+          value: azureOpenAiEndpoint
+        }
+        {
+          name: 'AZURE_OPENAI_DEPLOYMENT'
+          value: azureOpenAiDeployment
+        }
+        {
+          name: 'AZURE_OPENAI_API_VERSION'
+          value: azureOpenAiApiVersion
         }
       ]
       // PLATFORM CORS. The Functions host answers the OPTIONS preflight itself (before the worker
