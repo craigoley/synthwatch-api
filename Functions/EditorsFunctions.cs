@@ -37,7 +37,7 @@ public class EditorsFunctions
     /// <summary>Resolve the bearer caller and require admin. Returns the admin Principal, or sets
     /// <paramref name="deny"/> to a 401 (no/invalid session) / 403 (valid session, not admin) — matching
     /// the middleware's shapes exactly.</summary>
-    private async Task<Principal?> RequireAdminAsync(HttpRequest req, CancellationToken ct, Action<IActionResult> deny)
+    private async Task<Principal?> RequireAdminAsync(HttpRequest req, Action<IActionResult> deny, CancellationToken ct)
     {
         var principal = await _auth.FromBearerAsync(req.Headers.Authorization, ct);
         if (principal is null)
@@ -60,7 +60,7 @@ public class EditorsFunctions
         CancellationToken ct)
     {
         IActionResult? deny = null;
-        if (await RequireAdminAsync(req, ct, d => deny = d) is null) return deny!;
+        if (await RequireAdminAsync(req, d => deny = d, ct) is null) return deny!;
 
         var editors = await _db.Editors.AsNoTracking()
             .OrderBy(e => e.Email)
@@ -77,7 +77,7 @@ public class EditorsFunctions
         CancellationToken ct)
     {
         IActionResult? deny = null;
-        var admin = await RequireAdminAsync(req, ct, d => deny = d);
+        var admin = await RequireAdminAsync(req, d => deny = d, ct);
         if (admin is null) return deny!;
 
         AddEditorRequest? body;
@@ -109,7 +109,7 @@ public class EditorsFunctions
         CancellationToken ct)
     {
         IActionResult? deny = null;
-        var admin = await RequireAdminAsync(req, ct, d => deny = d);
+        var admin = await RequireAdminAsync(req, d => deny = d, ct);
         if (admin is null) return deny!;
 
         var normalized = AuthTokens.NormalizeEmail(email);
@@ -134,7 +134,7 @@ public class EditorsFunctions
         CancellationToken ct)
     {
         IActionResult? deny = null;
-        if (await RequireAdminAsync(req, ct, d => deny = d) is null) return deny!;
+        if (await RequireAdminAsync(req, d => deny = d, ct) is null) return deny!;
 
         var editors = await _db.Editors.AsNoTracking().Select(e => e.Email).ToListAsync(ct);
         var exclude = new HashSet<string>(editors, StringComparer.Ordinal);
