@@ -161,7 +161,10 @@ public record CheckDetailDto(
     // Monitors-as-code (Phase 13): the manifest id + spec path this check was activated from (null for
     // hand-made checks). Surfaced so the create response echoes the binding the runner will execute.
     string? SourceKey,
-    string? SpecPath)
+    string? SpecPath,
+    // Last-known-good success-trace baseline timestamp (migration 0039). null => no baseline yet;
+    // the dashboard shows "View last success trace" (-> GET /api/checks/{id}/success-trace) iff set.
+    DateTimeOffset? SuccessTraceAt)
 {
     public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, IReadOnlyList<TagDto> tags, SloDto? slo = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
@@ -181,7 +184,8 @@ public record CheckDetailDto(
         RecentRuns: recentRuns.Select(RunDto.From).ToList(),
         Tags: tags,
         SourceKey: c.SourceKey,
-        SpecPath: c.SpecPath);
+        SpecPath: c.SpecPath,
+        SuccessTraceAt: c.SuccessTraceAt);
 }
 
 /// <summary>

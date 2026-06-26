@@ -227,6 +227,8 @@ public class SynthWatchDbContext : DbContext
             // Monitors-as-code activation (Phase 13): the manifest id + spec path this check runs.
             e.Property(x => x.SourceKey).HasColumnName("source_key");
             e.Property(x => x.SpecPath).HasColumnName("spec_path");
+            e.Property(x => x.SuccessTraceUrl).HasColumnName("success_trace_url");
+            e.Property(x => x.SuccessTraceAt).HasColumnName("success_trace_at");
 
             // No-code assertion model + request config (jsonb / text). Typed CLR models are
             // (de)serialized to jsonb via System.Text.Json value converters (camelCase keys,
