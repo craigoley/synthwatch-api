@@ -83,6 +83,13 @@ public class Check
     public string? SourceKey { get; set; }
     public string? SpecPath { get; set; }
 
+    // Last-known-good success TRACE baseline (migration 0039). SuccessTraceUrl = the blob at the
+    // stable, purge-exempt success-latest/check-<id>.zip key (served by GetCheckSuccessTrace);
+    // SuccessTraceAt dates it (null => no baseline yet -> the dashboard hides the "View last success
+    // trace" affordance). Written by the runner on each success.
+    public string? SuccessTraceUrl { get; set; }
+    public DateTimeOffset? SuccessTraceAt { get; set; }
+
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();

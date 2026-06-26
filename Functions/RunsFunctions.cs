@@ -58,8 +58,27 @@ public class RunsFunctions
     {
         var url = await _db.Runs.AsNoTracking()
             .Where(r => r.Id == id).Select(r => r.TraceUrl).FirstOrDefaultAsync(ct);
-        return await StreamRunArtifact(req, id, url, "trace", "application/zip",
+        return await StreamRunArtifact(req, id, $"run {id}", url, "trace", "application/zip",
             $"attachment; filename=\"trace-run-{id}.zip\"", ct);
+    }
+
+    /// <summary>
+    /// GET /api/checks/{id}/success-trace — streams a MONITOR's last-known-good (most-recent-success)
+    /// Playwright trace.zip from Blob, via the same managed-identity proxy as run traces. This is the
+    /// per-monitor baseline at the stable, purge-exempt `success-latest/check-&lt;id&gt;.zip` key
+    /// (checks.success_trace_url), overwritten on each success — NOT a per-run trace. 404 until the
+    /// monitor has had a success with capture enabled. Lets the dashboard embed it like any trace.
+    /// </summary>
+    [Function("GetCheckSuccessTrace")]
+    public async Task<IActionResult> GetCheckSuccessTrace(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "checks/{id:long}/success-trace")] HttpRequest req,
+        long id,
+        CancellationToken ct)
+    {
+        var url = await _db.Checks.AsNoTracking()
+            .Where(c => c.Id == id).Select(c => c.SuccessTraceUrl).FirstOrDefaultAsync(ct);
+        return await StreamRunArtifact(req, id, $"monitor {id}", url, "success trace", "application/zip",
+            $"attachment; filename=\"success-trace-check-{id}.zip\"", ct);
     }
 
     /// <summary>
@@ -126,7 +145,7 @@ public class RunsFunctions
     {
         var url = await _db.Runs.AsNoTracking()
             .Where(r => r.Id == id).Select(r => r.ScreenshotUrl).FirstOrDefaultAsync(ct);
-        return await StreamRunArtifact(req, id, url, "screenshot", "image/png",
+        return await StreamRunArtifact(req, id, $"run {id}", url, "screenshot", "image/png",
             $"inline; filename=\"screenshot-run-{id}.png\"", ct);
     }
 
@@ -137,11 +156,11 @@ public class RunsFunctions
     /// logged and shielded as a generic 500.
     /// </summary>
     private async Task<IActionResult> StreamRunArtifact(
-        HttpRequest req, long id, string? blobUrl, string artifact, string contentType,
+        HttpRequest req, long id, string subject, string? blobUrl, string artifact, string contentType,
         string contentDisposition, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(blobUrl))
-            return ApiResults.NotFound($"No {artifact} for run {id}.");
+            return ApiResults.NotFound($"No {artifact} for {subject}.");
 
         // Defence-in-depth: the *_url is runner-written, but never attach the API's managed-identity
         // token to an arbitrary host. Only proxy Azure Blob endpoints.
@@ -149,7 +168,7 @@ public class RunsFunctions
             !blobUri.Host.EndsWith(".blob.core.windows.net", StringComparison.OrdinalIgnoreCase))
         {
             ArtifactLog.InvalidUrl(_logger, artifact, id);
-            return ApiResults.NotFound($"No {artifact} for run {id}.");
+            return ApiResults.NotFound($"No {artifact} for {subject}.");
         }
 
         try
@@ -164,7 +183,7 @@ public class RunsFunctions
         catch (RequestFailedException ex) when (ex.Status == 404)
         {
             // url recorded but the blob is gone (retention/cleanup).
-            return ApiResults.NotFound($"{artifact} blob for run {id} is no longer available.");
+            return ApiResults.NotFound($"{artifact} blob for {subject} is no longer available.");
         }
         catch (RequestFailedException ex)
         {
