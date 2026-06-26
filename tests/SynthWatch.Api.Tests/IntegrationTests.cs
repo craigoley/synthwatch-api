@@ -1751,10 +1751,10 @@ public class IntegrationTests
 
     private sealed class FakeEmailSender : IEmailSender
     {
-        public List<(string To, string Subject, string Body)> Sent { get; } = new();
-        public Task SendAsync(string recipient, string subject, string body, CancellationToken ct)
+        public List<(string To, string Subject, string Text, string Html)> Sent { get; } = new();
+        public Task SendAsync(string recipient, string subject, string plainText, string html, CancellationToken ct)
         {
-            Sent.Add((recipient, subject, body));
+            Sent.Add((recipient, subject, plainText, html));
             return Task.CompletedTask;
         }
     }
@@ -1786,8 +1786,11 @@ public class IntegrationTests
             Assert.Equal(202, Assert.IsType<ObjectResult>(rc).StatusCode);
             var sent = Assert.Single(email.Sent);
             Assert.Equal("editor@synth.test", sent.To);
-            var code = ExtractCode(sent.Body);
+            var code = ExtractCode(sent.Text);
             Assert.Matches("^[0-9]{6}$", code);
+            // The wired send carries the branded multipart HTML with the code (not just plaintext).
+            Assert.Contains("SYNTHWATCH", sent.Html, StringComparison.Ordinal);
+            Assert.Contains(code, sent.Html, StringComparison.Ordinal);
 
             // The stored code is HASHED, never plaintext.
             await using (var dbr = _pg.NewDbContext())
@@ -1857,7 +1860,7 @@ public class IntegrationTests
 
             // ADMIN email (in ADMIN_EMAILS) → emailed + verify resolves role=admin.
             Assert.Equal(202, Assert.IsType<ObjectResult>(await fn.RequestCode(JsonRequest(new { email = "boss@synth.test" }), default)).StatusCode);
-            var adminCode = ExtractCode(Assert.Single(email.Sent).Body);
+            var adminCode = ExtractCode(Assert.Single(email.Sent).Text);
             var adminOk = Assert.IsType<OkObjectResult>(await fn.Verify(JsonRequest(new { email = "boss@synth.test", code = adminCode }), default));
             Assert.Equal("admin", Assert.IsType<VerifyResponseDto>(adminOk.Value!).Role);
 

@@ -76,8 +76,7 @@ public class AuthFunctions
         // Send ONLY to a known editor/admin — an unknown email gets a stored (unsendable) code and no
         // email, so enumeration learns nothing (uniform 202, no email unless they own a real account).
         if (await ResolveRoleAsync(email, ct) != Roles.Anonymous)
-            await TrySendAsync(email, "Your SynthWatch sign-in code",
-                $"Your sign-in code is {code}. It expires in 10 minutes. If you didn't request it, ignore this email.", ct);
+            await TrySendAsync(email, AuthEmailTemplates.SignInCode(code), ct);
 
         return ApiResults.Accepted(new MessageDto(CodeSentMessage));
     }
@@ -198,8 +197,7 @@ public class AuthFunctions
 
         // Notify each admin (few). Uniform response regardless of send outcome.
         foreach (var admin in AdminEmails())
-            await TrySendAsync(admin, "SynthWatch — edit-access request",
-                $"{email} requested edit access to SynthWatch. If appropriate, add them as an editor in the dashboard.", ct);
+            await TrySendAsync(admin, AuthEmailTemplates.AccessRequest(email, DashboardUrl()), ct);
 
         return ApiResults.Ok(new MessageDto(AccessMessage));
     }
@@ -263,11 +261,15 @@ public class AuthFunctions
     }
 
     /// <summary>Send, but never let a transport failure 500 the auth flow or become an enumeration oracle.</summary>
-    private async Task TrySendAsync(string to, string subject, string body, CancellationToken ct)
+    private async Task TrySendAsync(string to, AuthEmailTemplates.Email msg, CancellationToken ct)
     {
-        try { await _email.SendAsync(to, subject, body, ct); }
-        catch (Exception ex) { AuthLog.EmailFailed(_logger, subject, ex); }
+        try { await _email.SendAsync(to, msg.Subject, msg.Text, msg.Html, ct); }
+        catch (Exception ex) { AuthLog.EmailFailed(_logger, msg.Subject, ex); }
     }
+
+    // The dashboard base for the access-request CTA (DASHBOARD_URL app setting, as the runner uses). Null →
+    // the button is omitted (the template degrades gracefully, like the alert email's view-incident button).
+    private static string? DashboardUrl() => Environment.GetEnvironmentVariable("DASHBOARD_URL");
 }
 
 internal static partial class AuthLog

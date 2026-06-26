@@ -5,11 +5,12 @@ using Microsoft.Extensions.Logging;
 
 namespace SynthWatch.Api.Infrastructure;
 
-/// <summary>Sends a plain-text transactional email (OTP login codes, access-request notices). Injected so
-/// tests substitute a fake — the auth flow is exercised without a live ACS send.</summary>
+/// <summary>Sends a transactional email (OTP login codes, access-request notices) as multipart/alternative
+/// — an HTML body plus a plaintext fallback so it reads in any client. Injected so tests substitute a fake
+/// (the auth flow is exercised without a live ACS send).</summary>
 public interface IEmailSender
 {
-    Task SendAsync(string recipient, string subject, string body, CancellationToken ct);
+    Task SendAsync(string recipient, string subject, string plainText, string html, CancellationToken ct);
 }
 
 /// <summary>
@@ -32,7 +33,7 @@ public sealed class AcsEmailSender : IEmailSender
         _logger = logger;
     }
 
-    public async Task SendAsync(string recipient, string subject, string body, CancellationToken ct)
+    public async Task SendAsync(string recipient, string subject, string plainText, string html, CancellationToken ct)
     {
         var from = Environment.GetEnvironmentVariable("AUTH_EMAIL_FROM");
         var endpoint = Environment.GetEnvironmentVariable("ACS_EMAIL_ENDPOINT");
@@ -46,7 +47,8 @@ public sealed class AcsEmailSender : IEmailSender
             : !string.IsNullOrWhiteSpace(connectionString) ? new EmailClient(connectionString)      // fallback
             : throw new InvalidOperationException("ACS email transport is not configured (set ACS_EMAIL_ENDPOINT or ACS_EMAIL_CONNECTION_STRING).");
 
-        var message = new EmailMessage(from, recipient, new EmailContent(subject) { PlainText = body });
+        // multipart/alternative: HTML for rich clients, PlainText fallback for the rest.
+        var message = new EmailMessage(from, recipient, new EmailContent(subject) { PlainText = plainText, Html = html });
         // WaitUntil.Started: return once ACS accepts the message — a login code shouldn't wait on delivery.
         await client.SendAsync(WaitUntil.Started, message, ct);
         EmailLog.Sent(_logger, subject);
