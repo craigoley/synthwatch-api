@@ -1805,6 +1805,86 @@ public class IntegrationTests
         public Task<ArtifactBlob> OpenStreamAsync(string? url, string artifact, long id, CancellationToken ct) => Task.FromResult(result);
     }
 
+    private static Stream BuildTraceZip(string networkNdjson, string consoleNdjson)
+    {
+        var ms = new MemoryStream();
+        using (var z = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            using (var w = new StreamWriter(z.CreateEntry("trace.network").Open())) w.Write(networkNdjson);
+            using (var w = new StreamWriter(z.CreateEntry("trace.trace").Open())) w.Write(consoleNdjson);
+        }
+        ms.Position = 0;
+        return ms;
+    }
+
+    // ── baseline-diff: persisted failing signals (#114) + on-demand baseline → diff + categorized insight ──
+    [SkippableFact]
+    public async Task BaselineDiff_resolves_persisted_failing_and_on_demand_baseline_then_diffs_and_insights()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // The failing run carries PERSISTED trace_signals (#114) with a site error the baseline won't have.
+        const string failingSignals =
+            """{"targetHost":"x.example","network":{"totalRequests":10,"wireKb":100,"thirdPartyCount":2,"failed":[],"slowest":[],"largest":[],"uncompressed":[],"topThirdParties":[]},"console":{"messages":[{"level":"error","origin":"site","text":"FAILING-ONLY region error"}],"droppedInfoLog":0,"droppedExtensionNoise":0}}""";
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url, success_trace_url, success_trace_at) " +
+            "VALUES ('bdiff', 'http', 'https://x.example', 'https://x.blob.core.windows.net/c/success.zip', now());");
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO runs (check_id, status, started_at, location, trace_url, trace_signals) " +
+            "SELECT id, 'fail', now(), 'eastus2', 'https://x.blob.core.windows.net/c/run.zip', {0}::jsonb " +
+            "FROM checks WHERE name = 'bdiff';", failingSignals);
+        try
+        {
+            var runId = await db.Runs.Where(r => r.Check!.Name == "bdiff").Select(r => r.Id).FirstAsync();
+            // The baseline is extracted on-demand: a synthetic zip whose console has a DIFFERENT error.
+            var baselineZip = BuildTraceZip("",
+                """{"type":"console","messageType":"error","text":"BASELINE-ONLY benign warning","location":{"url":"https://x.example/"}}""");
+            var fn = new LocationDiffFunctions(db, new FakeArtifactReader(ArtifactBlob.Of(baselineZip)), new ConfiguredFakeAoai());
+
+            var result = await fn.GetBaselineDiff(Request(), runId, default);
+            var dto = Assert.IsType<LocationDiffDto>(Assert.IsType<OkObjectResult>(result).Value);
+
+            Assert.True(dto.Configured);
+            Assert.Equal("eastus2", dto.Failing.Location);
+            Assert.Equal("success-baseline", dto.Baseline.Source);
+            // the diff used the PERSISTED failing signals (not the run blob) and the on-demand baseline:
+            Assert.Contains(dto.Diff.Console.OnlyInA, m => m.Text.Contains("FAILING-ONLY", StringComparison.Ordinal));
+            Assert.Contains(dto.Diff.Console.OnlyInB, m => m.Text.Contains("BASELINE-ONLY", StringComparison.Ordinal));
+            Assert.NotNull(dto.Insight); // ConfiguredFakeAoai → parsed (defaults)
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'bdiff';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task BaselineDiff_returns_404_when_the_monitor_has_no_baseline()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        const string sig =
+            """{"targetHost":"x.example","network":{"totalRequests":1,"wireKb":1,"thirdPartyCount":0,"failed":[],"slowest":[],"largest":[],"uncompressed":[],"topThirdParties":[]},"console":{"messages":[],"droppedInfoLog":0,"droppedExtensionNoise":0}}""";
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url) VALUES ('bdiff-nobase', 'http', 'https://x.example');");
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO runs (check_id, status, started_at, trace_url, trace_signals) " +
+            "SELECT id, 'fail', now(), 'https://x.blob.core.windows.net/c/run.zip', {0}::jsonb " +
+            "FROM checks WHERE name = 'bdiff-nobase';", sig);
+        try
+        {
+            var runId = await db.Runs.Where(r => r.Check!.Name == "bdiff-nobase").Select(r => r.Id).FirstAsync();
+            var fn = new LocationDiffFunctions(db,
+                new FakeArtifactReader(ArtifactBlob.Of(BuildTraceZip("", ""))), new ConfiguredFakeAoai());
+            var result = await fn.GetBaselineDiff(Request(), runId, default);
+            Assert.IsType<NotFoundObjectResult>(result); // no success baseline → clean 404
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'bdiff-nobase';");
+        }
+    }
+
     // ── a non-404 blob error (throttle/transient) → a CLEAN response, never an unhandled 500 ──
     [SkippableFact]
     public async Task TraceSignals_returns_503_not_500_on_a_transient_blob_error()

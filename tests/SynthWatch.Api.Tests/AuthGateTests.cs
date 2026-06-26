@@ -24,6 +24,7 @@ public class AuthGateTests
         ("DELETE", "/api/channels/5"),
         ("POST", "/api/channels/5/test"),
         ("POST", "/api/runs/5/ai-insights"),   // spends AOAI tokens → must be gated (cost control)
+        ("POST", "/api/runs/5/baseline-diff"), // spends AOAI tokens → must be gated (cost control)
     };
 
     public static TheoryData<string, string> WriteEndpoints()
