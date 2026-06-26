@@ -1,0 +1,40 @@
+namespace SynthWatch.Api.Dtos;
+
+/// <summary>
+/// The compact, FILTERED summary extracted from a run's Playwright trace zip — a few hundred tokens, NOT the
+/// ~18 MB trace. Independently useful (network waterfall + real site console errors), and the bounded payload
+/// slice 2 will hand to gpt-5-mini. Ports docs/proposals/prototype/extract_trace.py (proven on real run 844486).
+/// </summary>
+public sealed record TraceSignalsDto(string? TargetHost, NetworkSummaryDto Network, ConsoleSummaryDto Console)
+{
+    /// <summary>No trace / unparseable → an empty (but well-shaped) summary, never a 500.</summary>
+    public static readonly TraceSignalsDto Empty = new(null, NetworkSummaryDto.Empty, ConsoleSummaryDto.Empty);
+}
+
+/// <summary>One request from the trace's HAR-shaped network log (slimmed to the fields the signals need).</summary>
+public sealed record TraceRequestDto(
+    string Url, int Status, string ResourceType, int TimeMs, int WaitMs,
+    long Size, long Wire, string Encoding, bool ThirdParty);
+
+/// <summary>A third-party origin's footprint on the page (request count + bytes on the wire).</summary>
+public sealed record ThirdPartyDto(string Host, int Count, long Kb);
+
+public sealed record NetworkSummaryDto(
+    int TotalRequests, long WireKb, int ThirdPartyCount,
+    IReadOnlyList<TraceRequestDto> Failed,
+    IReadOnlyList<TraceRequestDto> Slowest,
+    IReadOnlyList<TraceRequestDto> Largest,
+    IReadOnlyList<TraceRequestDto> Uncompressed,
+    IReadOnlyList<ThirdPartyDto> TopThirdParties)
+{
+    public static readonly NetworkSummaryDto Empty = new(0, 0, 0, [], [], [], [], []);
+}
+
+/// <summary>A kept console message: error/warning only, extension-noise filtered, tagged site vs third-party.</summary>
+public sealed record ConsoleMessageDto(string Level, string Origin, string Text);
+
+public sealed record ConsoleSummaryDto(
+    IReadOnlyList<ConsoleMessageDto> Messages, int DroppedInfoLog, int DroppedExtensionNoise)
+{
+    public static readonly ConsoleSummaryDto Empty = new([], 0, 0);
+}
