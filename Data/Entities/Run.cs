@@ -32,6 +32,12 @@ public class Run
     // Served via the API proxy (GET /api/runs/{id}/trace), not this raw URL.
     public string? TraceUrl { get; set; }
 
+    // Compact filtered trace summary (network + filtered console), persisted by the runner AT CAPTURE TIME
+    // (#114, runs.trace_signals jsonb) — same TraceSignalsDto schema as the API's TraceExtractor. NULL for a
+    // run with no trace (a pass without a baseline refresh, non-browser). Read by the baseline-diff endpoint
+    // (prefer this; fall back to on-demand extraction from TraceUrl when null but a trace exists).
+    public string? TraceSignals { get; set; }
+
     // SSL checks: measured cert days-remaining at run time. Nullable (null for non-ssl runs).
     public int? CertDaysRemaining { get; set; }
 
