@@ -18,13 +18,16 @@ public sealed record AiInsightsDto(
     IReadOnlyList<AiInsightDto> Errors,
     IReadOnlyList<AiInsightDto> Suggestions,
     IReadOnlyList<string> Caveats,
-    string? Note)
+    string? Note,
+    bool Retryable = false)
 {
     /// <summary>The inert response when AZURE_OPENAI_* isn't configured (the deploy prereq is pending).</summary>
     public static readonly AiInsightsDto NotConfigured = new(
         false, null, [], [], [], [], [],
         "AI insights are not configured for this environment yet.");
 
-    /// <summary>AOAI configured but the model/parse was unavailable — non-fatal, try again.</summary>
-    public static AiInsightsDto Unavailable(string note) => new(true, null, [], [], [], [], [], note);
+    /// <summary>AOAI configured but no insights produced. <paramref name="retryable"/> is HONEST about whether
+    /// re-running helps: true = transient (busy/timeout), false = deterministic (truncation / filter / parse).</summary>
+    public static AiInsightsDto Unavailable(string note, bool retryable = false) =>
+        new(true, null, [], [], [], [], [], note, retryable);
 }

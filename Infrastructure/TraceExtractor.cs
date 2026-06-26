@@ -32,6 +32,9 @@ public static partial class TraceExtractor
     private const int FailedCap = 8;
     private const int ThirdPartyCap = 6;
     private const int UncompressedMinBytes = 30_000;
+    // ★ Hard cap on console messages so a pathological trace (hundreds of distinct site errors) can't blow the
+    // downstream AOAI token budget. The network lists are already top-N bounded; this was the one unbounded list.
+    private const int MaxConsoleMessages = 40;
 
     /// <summary>Open the trace zip + extract both sections. Non-fatal: a bad zip / missing entries → empty.</summary>
     public static TraceSignalsDto FromZip(Stream zip, string? targetHost)
@@ -147,7 +150,14 @@ public static partial class TraceExtractor
                     Text: text.Length > 200 ? text[..200] : text));
             }
         }
-        return new ConsoleSummaryDto(kept, droppedLevel, droppedExt);
+        // Bound the list, keeping the most relevant: the site's own errors first, then warnings/third-party.
+        // OrderBy is stable, so first-seen order is preserved within each priority tier.
+        var bounded = kept
+            .OrderByDescending(m => m.Level == "error")
+            .ThenByDescending(m => m.Origin == "site")
+            .Take(MaxConsoleMessages)
+            .ToList();
+        return new ConsoleSummaryDto(bounded, droppedLevel, droppedExt);
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────

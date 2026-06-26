@@ -64,6 +64,12 @@ param azureOpenAiDeployment string = 'gpt-5-mini'
 @description('Trace AI Insights — the AOAI REST api-version.')
 param azureOpenAiApiVersion string = '2025-04-01-preview'
 
+@description('Trace AI Insights — max_completion_tokens budget. gpt-5-mini is a REASONING model: hidden reasoning tokens consume this before the visible JSON, so a tight budget truncates (finish_reason=length). The extracted summary is also hard-bounded (TraceExtractor) so input can\'t blow it.')
+param azureOpenAiMaxTokens int = 16000
+
+@description('Trace AI Insights — reasoning_effort (minimal|low|medium|high). "low" keeps the reasoning-token spend down so the output fits the budget. Empty = omit the field.')
+param azureOpenAiReasoningEffort string = 'low'
+
 @description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
 param artifactsStorageAccountName string = 'synthwatche24e33105c'
 
@@ -219,6 +225,14 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'AZURE_OPENAI_API_VERSION'
           value: azureOpenAiApiVersion
+        }
+        {
+          name: 'AZURE_OPENAI_MAX_TOKENS'
+          value: string(azureOpenAiMaxTokens)
+        }
+        {
+          name: 'AZURE_OPENAI_REASONING_EFFORT'
+          value: azureOpenAiReasoningEffort
         }
       ]
       // PLATFORM CORS. The Functions host answers the OPTIONS preflight itself (before the worker
