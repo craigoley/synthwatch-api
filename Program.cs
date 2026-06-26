@@ -29,6 +29,10 @@ builder.Services.AddSingleton(PostgresDataSourceFactory.Create);
 // (the trace-download proxy). Same DefaultAzureCredential family the DB token uses.
 builder.Services.AddSingleton<Azure.Core.TokenCredential>(_ => new Azure.Identity.DefaultAzureCredential());
 
+// The ONE place we fetch runner-written artifact blobs (traces/screenshots): host-allowlist + MI BlobClient +
+// 404/non-404 classification. Shared by the artifact proxy (ArtifactsFunctions) and the AI-insights endpoint.
+builder.Services.AddSingleton<SynthWatch.Api.Infrastructure.IArtifactReader, SynthWatch.Api.Infrastructure.ArtifactReader>();
+
 // Auth (Phase 12 slice 1): OTP / access-request emails send via ACS using the SAME managed-identity
 // credential (preferred; connection-string fallback) — see AcsEmailSender. This slice is purely additive:
 // it mints/verifies sessions, but NOTHING enforces them yet (the authz gate is slice 2).

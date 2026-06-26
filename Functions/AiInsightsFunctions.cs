@@ -1,11 +1,7 @@
-using Azure;
-using Azure.Core;
-using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Dtos;
 using SynthWatch.Api.Infrastructure;
@@ -23,17 +19,14 @@ namespace SynthWatch.Api.Functions;
 public class AiInsightsFunctions
 {
     private readonly SynthWatchDbContext _db;
-    private readonly TokenCredential _credential;
+    private readonly IArtifactReader _artifacts;
     private readonly IAoaiClient _aoai;
-    private readonly ILogger<AiInsightsFunctions> _logger;
 
-    public AiInsightsFunctions(SynthWatchDbContext db, TokenCredential credential, IAoaiClient aoai,
-        ILogger<AiInsightsFunctions> logger)
+    public AiInsightsFunctions(SynthWatchDbContext db, IArtifactReader artifacts, IAoaiClient aoai)
     {
         _db = db;
-        _credential = credential;
+        _artifacts = artifacts;
         _aoai = aoai;
-        _logger = logger;
     }
 
     [Function("GetAiInsights")]
@@ -66,25 +59,24 @@ public class AiInsightsFunctions
             // with no artifact at all — a clean "nothing to analyze", never a 500.
             return ApiResults.NotFound($"No trace available to analyze for run {id} yet.");
 
-        if (!Uri.TryCreate(traceUrl, UriKind.Absolute, out var blobUri) ||
-            !blobUri.Host.EndsWith(".blob.core.windows.net", StringComparison.OrdinalIgnoreCase))
-            return ApiResults.NotFound($"No trace available to analyze for run {id} yet.");
-
         var targetHost = !string.IsNullOrEmpty(row.Target) && Uri.TryCreate(row.Target, UriKind.Absolute, out var tu)
             ? tu.Host : null;
 
+        var blob = await _artifacts.DownloadToMemoryAsync(traceUrl, "trace", id, ct);
         TraceSignalsDto signals;
-        try
+        switch (blob.Status)
         {
-            var blob = new BlobClient(blobUri, _credential);
-            using var ms = new MemoryStream();
-            await blob.DownloadToAsync(ms, ct);
-            ms.Position = 0;
-            signals = TraceExtractor.FromZip(ms, targetHost);
-        }
-        catch (RequestFailedException ex) when (ex.Status == 404)
-        {
-            return ApiResults.NotFound($"trace blob for run {id} is no longer available.");
+            case ArtifactStatus.Missing:
+            case ArtifactStatus.Gone:
+                return ApiResults.NotFound($"No trace available to analyze for run {id} yet.");
+            case ArtifactStatus.Unavailable:
+                // ★ A transient blob error is now a clean, HONEST retryable response (was an unhandled 500).
+                return ApiResults.Ok(AiInsightsDto.Unavailable(
+                    "Couldn't read this run's trace right now — please try again in a moment.", retryable: true));
+            default:
+                using (blob.Content!)
+                    signals = TraceExtractor.FromZip(blob.Content!, targetHost);
+                break;
         }
 
         var run = new AiInsights.RunContext(row.CheckName, targetHost, row.Status, traceSource);

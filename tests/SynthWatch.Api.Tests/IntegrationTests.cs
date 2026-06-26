@@ -1068,7 +1068,7 @@ public class IntegrationTests
     {
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        var fn = new RunsFunctions(db, new DefaultAzureCredential(), NullLogger<RunsFunctions>.Instance);
+        var fn = new ArtifactsFunctions(db, new ArtifactReader(new DefaultAzureCredential(), NullLogger<ArtifactReader>.Instance));
         var runId = await db.Runs.Where(r => r.TraceUrl == null).Select(r => r.Id).FirstAsync();
         var result = await fn.GetRunTrace(Request(), runId, default);
         Assert.IsType<NotFoundObjectResult>(result); // no trace_url -> 404 before any blob call
@@ -1782,8 +1782,9 @@ public class IntegrationTests
         try
         {
             var runId = await db.Runs.Where(r => r.Check!.Name == "ins-nobase").Select(r => r.Id).FirstAsync();
-            var fn = new AiInsightsFunctions(db, new Azure.Identity.DefaultAzureCredential(),
-                new ConfiguredFakeAoai(), NullLogger<AiInsightsFunctions>.Instance);
+            var fn = new AiInsightsFunctions(db,
+                new ArtifactReader(new Azure.Identity.DefaultAzureCredential(), NullLogger<ArtifactReader>.Instance),
+                new ConfiguredFakeAoai());
 
             var result = await fn.GetAiInsights(Request(), runId, default);
 
@@ -1794,6 +1795,62 @@ public class IntegrationTests
         finally
         {
             await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'ins-nobase';"); // cascades runs
+        }
+    }
+
+    // Stubs the shared artifact reader so we can drive the transient-blob-error path without a live blob.
+    private sealed class FakeArtifactReader(ArtifactBlob result) : IArtifactReader
+    {
+        public Task<ArtifactBlob> DownloadToMemoryAsync(string? url, string artifact, long id, CancellationToken ct) => Task.FromResult(result);
+        public Task<ArtifactBlob> OpenStreamAsync(string? url, string artifact, long id, CancellationToken ct) => Task.FromResult(result);
+    }
+
+    // ── a non-404 blob error (throttle/transient) → a CLEAN response, never an unhandled 500 ──
+    [SkippableFact]
+    public async Task TraceSignals_returns_503_not_500_on_a_transient_blob_error()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO checks (name, kind, target_url) VALUES ('sig-unavail', 'http', 'https://x.example');
+            INSERT INTO runs (check_id, status, started_at, trace_url)
+                SELECT id, 'fail', now(), 'https://x.blob.core.windows.net/c/traces/t.zip' FROM checks WHERE name = 'sig-unavail';
+            """);
+        try
+        {
+            var runId = await db.Runs.Where(r => r.Check!.Name == "sig-unavail").Select(r => r.Id).FirstAsync();
+            var fn = new ArtifactsFunctions(db, new FakeArtifactReader(ArtifactBlob.Unavailable));
+            var result = await fn.GetTraceSignals(Request(), runId, default);
+            Assert.Equal(503, Assert.IsType<ObjectResult>(result).StatusCode); // clean 503, NOT an unhandled 500
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'sig-unavail';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task AiInsights_returns_retryable_unavailable_on_a_transient_blob_error()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO checks (name, kind, target_url) VALUES ('ins-unavail', 'http', 'https://x.example');
+            INSERT INTO runs (check_id, status, started_at, trace_url)
+                SELECT id, 'fail', now(), 'https://x.blob.core.windows.net/c/traces/t.zip' FROM checks WHERE name = 'ins-unavail';
+            """);
+        try
+        {
+            var runId = await db.Runs.Where(r => r.Check!.Name == "ins-unavail").Select(r => r.Id).FirstAsync();
+            var fn = new AiInsightsFunctions(db, new FakeArtifactReader(ArtifactBlob.Unavailable), new ConfiguredFakeAoai());
+            var result = await fn.GetAiInsights(Request(), runId, default);
+            var dto = Assert.IsType<AiInsightsDto>(Assert.IsType<OkObjectResult>(result).Value);
+            Assert.True(dto.Retryable);  // transient blob error → honest retryable, never a 500
+            Assert.NotNull(dto.Note);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'ins-unavail';");
         }
     }
 

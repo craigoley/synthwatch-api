@@ -36,4 +36,8 @@ public static class ApiResults
         new ObjectResult(value) { StatusCode = StatusCodes.Status202Accepted };
 
     public static IActionResult NoContent() => new NoContentResult();
+
+    /// <summary>503 — a transient upstream (e.g. a throttled/blob error) couldn't be served; retrying may help.</summary>
+    public static IActionResult ServiceUnavailable(string message) =>
+        new ObjectResult(new { error = "unavailable", message }) { StatusCode = StatusCodes.Status503ServiceUnavailable };
 }
