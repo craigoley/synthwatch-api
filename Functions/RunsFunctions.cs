@@ -82,6 +82,57 @@ public class RunsFunctions
     }
 
     /// <summary>
+    /// GET /api/runs/{id}/trace-signals — the compact, FILTERED summary extracted from the run's Playwright
+    /// trace (network waterfall + real site console errors), NOT the ~18 MB trace itself. The API reads the
+    /// trace blob with its managed identity (same proxy posture as /trace) and parses it server-side. A GET
+    /// (read-only). Non-fatal: no trace → 404; an unparseable trace → a 200 empty summary, never a 500.
+    /// (Slice 1 of the AI-insights feature — slice 2 feeds this summary to the model. See PR #91.)
+    /// </summary>
+    [Function("GetTraceSignals")]
+    public async Task<IActionResult> GetTraceSignals(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "runs/{id:long}/trace-signals")] HttpRequest req,
+        long id,
+        CancellationToken ct)
+    {
+        var row = await _db.Runs.AsNoTracking()
+            .Where(r => r.Id == id)
+            .Select(r => new { r.TraceUrl, Target = r.Check!.TargetUrl })
+            .FirstOrDefaultAsync(ct);
+
+        if (row is null) return ApiResults.NotFound($"Run {id} not found.");
+        if (string.IsNullOrEmpty(row.TraceUrl)) return ApiResults.NotFound($"No trace for run {id}.");
+
+        // Same defence-in-depth as the proxy: only attach the MI token to an Azure Blob host.
+        if (!Uri.TryCreate(row.TraceUrl, UriKind.Absolute, out var blobUri) ||
+            !blobUri.Host.EndsWith(".blob.core.windows.net", StringComparison.OrdinalIgnoreCase))
+        {
+            ArtifactLog.InvalidUrl(_logger, "trace", id);
+            return ApiResults.NotFound($"No trace for run {id}.");
+        }
+
+        var targetHost = !string.IsNullOrEmpty(row.Target) && Uri.TryCreate(row.Target, UriKind.Absolute, out var tu)
+            ? tu.Host : null;
+
+        try
+        {
+            var blob = new BlobClient(blobUri, _credential);
+            using var ms = new MemoryStream();
+            await blob.DownloadToAsync(ms, ct);
+            ms.Position = 0;
+            return ApiResults.Ok(TraceExtractor.FromZip(ms, targetHost)); // non-fatal: bad zip → empty summary
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return ApiResults.NotFound($"trace blob for run {id} is no longer available.");
+        }
+        catch (RequestFailedException ex)
+        {
+            ArtifactLog.BlobError(_logger, "trace", id, ex.Status, ex);
+            throw; // genuine blob/infra error → shielded 500 (not a parse issue)
+        }
+    }
+
+    /// <summary>
     /// GET /api/runs/{id}/screenshot — streams the run's failure screenshot from Blob via the same
     /// proxy as traces (the artifacts account blocks public access, so the raw blob URL 409s). 404
     /// when the run has no screenshot. Served inline so the dashboard &lt;img&gt; renders it.
