@@ -42,6 +42,11 @@ builder.Services.AddHttpClient();
 builder.Services.Configure<RunnerJobOptions>(builder.Configuration.GetSection("RunnerJob"));
 builder.Services.AddSingleton<IRunnerJobTrigger, ArmRunnerJobTrigger>();
 
+// Trace AI Insights (slice 2): a typed HttpClient for the AOAI chat-completions REST call. Reuses the
+// SAME DefaultAzureCredential (registered above) for the cognitive-services token. INERT until AZURE_OPENAI_*
+// is configured (IsConfigured=false → the endpoint returns "not configured", never a 500).
+builder.Services.AddHttpClient<IAoaiClient, AoaiClient>();
+
 // Read-mostly EF Core context over the runner-owned schema (no migrations).
 builder.Services.AddDbContext<SynthWatchDbContext>((sp, options) =>
 {
