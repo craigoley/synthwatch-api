@@ -209,8 +209,9 @@ public class AoaiClientTests
     {
         var opts = new DbContextOptionsBuilder<SynthWatchDbContext>().UseNpgsql("Host=localhost;Database=none").Options;
         await using var db = new SynthWatchDbContext(opts);
-        var fn = new AiInsightsFunctions(db, new FakeCredential(), new FakeAoai { IsConfigured = false },
-            NullLogger<AiInsightsFunctions>.Instance);
+        var fn = new AiInsightsFunctions(
+            db, new ArtifactReader(new FakeCredential(), NullLogger<ArtifactReader>.Instance),
+            new FakeAoai { IsConfigured = false });
 
         var result = await fn.GetAiInsights(new DefaultHttpContext().Request, 123, default);
         var dto = Assert.IsType<AiInsightsDto>(Assert.IsType<OkObjectResult>(result).Value);
