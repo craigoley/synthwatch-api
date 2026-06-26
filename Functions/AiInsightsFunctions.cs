@@ -48,15 +48,27 @@ public class AiInsightsFunctions
 
         var row = await _db.Runs.AsNoTracking()
             .Where(r => r.Id == id)
-            .Select(r => new { r.TraceUrl, r.Status, CheckName = r.Check!.Name, Target = r.Check!.TargetUrl })
+            .Select(r => new
+            {
+                r.TraceUrl, r.Status, CheckName = r.Check!.Name, Target = r.Check!.TargetUrl,
+                SuccessTraceUrl = r.Check!.SuccessTraceUrl,
+            })
             .FirstOrDefaultAsync(ct);
 
         if (row is null) return ApiResults.NotFound($"Run {id} not found.");
-        if (string.IsNullOrEmpty(row.TraceUrl)) return ApiResults.NotFound($"No trace for run {id}.");
 
-        if (!Uri.TryCreate(row.TraceUrl, UriKind.Absolute, out var blobUri) ||
+        // Resolve the trace from the RIGHT source: a failure run has its own per-run trace; a SUCCESS run
+        // leaves trace_url null (#113) and its baseline lives in the check's success-trace slot — and success
+        // insights are richer (the complete journey, not truncated at a failure). Fall back accordingly.
+        var (traceUrl, traceSource) = ResolveTrace(row.TraceUrl, row.SuccessTraceUrl);
+        if (string.IsNullOrEmpty(traceUrl))
+            // Success run whose baseline hasn't been captured yet (6h throttle / first success), or a run
+            // with no artifact at all — a clean "nothing to analyze", never a 500.
+            return ApiResults.NotFound($"No trace available to analyze for run {id} yet.");
+
+        if (!Uri.TryCreate(traceUrl, UriKind.Absolute, out var blobUri) ||
             !blobUri.Host.EndsWith(".blob.core.windows.net", StringComparison.OrdinalIgnoreCase))
-            return ApiResults.NotFound($"No trace for run {id}.");
+            return ApiResults.NotFound($"No trace available to analyze for run {id} yet.");
 
         var targetHost = !string.IsNullOrEmpty(row.Target) && Uri.TryCreate(row.Target, UriKind.Absolute, out var tu)
             ? tu.Host : null;
@@ -75,7 +87,7 @@ public class AiInsightsFunctions
             return ApiResults.NotFound($"trace blob for run {id} is no longer available.");
         }
 
-        var run = new AiInsights.RunContext(row.CheckName, targetHost, row.Status);
+        var run = new AiInsights.RunContext(row.CheckName, targetHost, row.Status, traceSource);
         var content = await _aoai.ChatJsonAsync(AiInsights.SystemPrompt, AiInsights.BuildUser(run, signals), ct);
         if (content is null)
             return ApiResults.Ok(AiInsightsDto.Unavailable("The AI model was unavailable — please try again."));
@@ -83,4 +95,12 @@ public class AiInsightsFunctions
         var insights = AiInsights.Parse(content);
         return ApiResults.Ok(insights ?? AiInsightsDto.Unavailable("The AI response could not be parsed."));
     }
+
+    /// <summary>Which trace to analyze: the per-run trace (a failure run) if present, else the check's
+    /// last-known-good SUCCESS baseline (a success run leaves trace_url null). Returns the chosen url + a
+    /// human label of its source (for the prompt), or (null, "none") when neither exists yet.</summary>
+    public static (string? Url, string Source) ResolveTrace(string? perRunTraceUrl, string? successTraceUrl) =>
+        !string.IsNullOrEmpty(perRunTraceUrl) ? (perRunTraceUrl, "this run")
+        : !string.IsNullOrEmpty(successTraceUrl) ? (successTraceUrl, "the monitor's latest successful run (a complete, untruncated journey)")
+        : (null, "none");
 }

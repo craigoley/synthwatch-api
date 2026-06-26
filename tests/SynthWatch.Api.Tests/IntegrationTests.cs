@@ -1759,6 +1759,43 @@ public class IntegrationTests
         }
     }
 
+    // AOAI "configured" so the endpoint gets past the inert check; never actually called in this test (the
+    // no-trace 404 returns before any AOAI call).
+    private sealed class ConfiguredFakeAoai : IAoaiClient
+    {
+        public bool IsConfigured => true;
+        public Task<string?> ChatJsonAsync(string system, string user, CancellationToken ct) => Task.FromResult<string?>(null);
+    }
+
+    // ── ai-insights: a SUCCESS run (trace_url null) whose monitor has NO success baseline yet → clean 404 ──
+    [SkippableFact]
+    public async Task AiInsights_success_run_with_no_baseline_returns_a_clean_no_trace_not_500()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO checks (name, kind, target_url) VALUES ('ins-nobase', 'http', 'https://x.example');
+            INSERT INTO runs (check_id, status, started_at)
+                SELECT id, 'pass', now() FROM checks WHERE name = 'ins-nobase';
+            """);
+        try
+        {
+            var runId = await db.Runs.Where(r => r.Check!.Name == "ins-nobase").Select(r => r.Id).FirstAsync();
+            var fn = new AiInsightsFunctions(db, new Azure.Identity.DefaultAzureCredential(),
+                new ConfiguredFakeAoai(), NullLogger<AiInsightsFunctions>.Instance);
+
+            var result = await fn.GetAiInsights(Request(), runId, default);
+
+            // No per-run trace (success) and no success baseline yet → clean 404, never a 500.
+            var nf = Assert.IsType<NotFoundObjectResult>(result);
+            Assert.Equal(404, nf.StatusCode);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'ins-nobase';"); // cascades runs
+        }
+    }
+
     private static HttpRequest AuthedRequest(string token)
     {
         var ctx = new DefaultHttpContext();

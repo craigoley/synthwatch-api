@@ -35,12 +35,23 @@ public class AiInsightsTests
     [Fact]
     public void User_message_carries_the_run_context_and_the_summary_with_origin_tags()
     {
-        var u = AiInsights.BuildUser(new AiInsights.RunContext("Wegmans search", "www.wegmans.com", "fail"), SampleSignals());
+        var u = AiInsights.BuildUser(
+            new AiInsights.RunContext("Wegmans search", "www.wegmans.com", "fail", "this run"), SampleSignals());
         Assert.Contains("Wegmans search", u, StringComparison.Ordinal);
         Assert.Contains("www.wegmans.com", u, StringComparison.Ordinal);
         Assert.Contains("origin", u, StringComparison.Ordinal);                 // tells the model site vs third-party
         Assert.Contains("Invalid discovery pages storage data", u, StringComparison.Ordinal); // the real site error
         Assert.Contains("images.wegmans.com", u, StringComparison.Ordinal);     // third-party weight
+        Assert.Contains("traceSource", u, StringComparison.Ordinal);            // which trace it's analyzing
+    }
+
+    [Fact]
+    public void User_message_conveys_a_success_baseline_source()
+    {
+        var u = AiInsights.BuildUser(
+            new AiInsights.RunContext("Wegmans search", "www.wegmans.com", "pass",
+                "the monitor's latest successful run (a complete, untruncated journey)"), SampleSignals());
+        Assert.Contains("latest successful run", u, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -88,5 +99,35 @@ public class AiInsightsTests
     public void Parse_returns_null_on_garbage()
     {
         Assert.Null(AiInsights.Parse("the model said no"));
+    }
+
+    // ── trace-source resolution: failure uses per-run, success falls back to the check's baseline slot ──
+
+    [Fact]
+    public void ResolveTrace_uses_the_per_run_trace_for_a_failure()
+    {
+        var (url, source) = SynthWatch.Api.Functions.AiInsightsFunctions.ResolveTrace(
+            perRunTraceUrl: "https://x.blob.core.windows.net/c/traces/run-844515.zip",
+            successTraceUrl: "https://x.blob.core.windows.net/c/success-latest/check-74.zip");
+        Assert.Equal("https://x.blob.core.windows.net/c/traces/run-844515.zip", url);
+        Assert.Equal("this run", source);
+    }
+
+    [Fact]
+    public void ResolveTrace_falls_back_to_the_success_slot_when_no_per_run_trace()
+    {
+        var (url, source) = SynthWatch.Api.Functions.AiInsightsFunctions.ResolveTrace(
+            perRunTraceUrl: null,   // a SUCCESS run leaves trace_url null
+            successTraceUrl: "https://x.blob.core.windows.net/c/success-latest/check-74.zip");
+        Assert.Equal("https://x.blob.core.windows.net/c/success-latest/check-74.zip", url);
+        Assert.Contains("successful run", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ResolveTrace_is_empty_when_no_per_run_trace_and_no_baseline_yet()
+    {
+        // A success run whose baseline hasn't been captured yet (6h throttle / first success).
+        var (url, _) = SynthWatch.Api.Functions.AiInsightsFunctions.ResolveTrace(null, null);
+        Assert.Null(url);
     }
 }

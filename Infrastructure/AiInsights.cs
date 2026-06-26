@@ -14,8 +14,10 @@ public static class AiInsights
 {
     private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
 
-    /// <summary>Context about the run, so the model can frame insights (and not re-derive them).</summary>
-    public readonly record struct RunContext(string CheckName, string? TargetHost, string Status);
+    /// <summary>Context about the run, so the model can frame insights (and not re-derive them). TraceSource
+    /// tells the model WHICH trace it's analyzing — "this run" (a failure, possibly truncated at the break) vs
+    /// the monitor's latest success baseline (a complete journey) — so it frames the insights honestly.</summary>
+    public readonly record struct RunContext(string CheckName, string? TargetHost, string Status, string TraceSource);
 
     public const string SystemPrompt = """
         You are a senior web-performance and reliability analyst. A synthetic-monitoring tool captured a
@@ -54,10 +56,12 @@ public static class AiInsights
     public static string BuildUser(RunContext run, TraceSignalsDto signals)
     {
         var ctx = JsonSerializer.Serialize(
-            new { check = run.CheckName, targetHost = run.TargetHost, status = run.Status }, Web);
+            new { check = run.CheckName, targetHost = run.TargetHost, status = run.Status, traceSource = run.TraceSource }, Web);
         var summary = JsonSerializer.Serialize(signals, Web);
         return $"""
             Run context: {ctx}
+            (traceSource says which trace this is: "this run" = the run itself; otherwise it's the monitor's
+            latest successful run — a complete journey. Frame insights for whichever you were given.)
 
             Trace summary (network + filtered console; console messages carry origin=site|third-party):
             {summary}
