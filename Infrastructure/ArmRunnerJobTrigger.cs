@@ -43,11 +43,21 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
 
             using var request = new HttpRequestMessage(HttpMethod.Post, _options.StartUrl);
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
-            // EMPTY body — preserves the job's secretRefs (no template/env override).
-            request.Content = new StringContent(string.Empty);
+            // ★ JSON content type + an empty-object body. ARM's Microsoft.App/jobs/start REQUIRES
+            // application/json — an empty text/plain body returns 415 Unsupported Media Type, so the trigger
+            // never fired and the run silently fell back to the next */5 cron tick (DIAGNOSED in prod: the
+            // empty-body call → 415; the {} application/json call → an immediate off-schedule execution).
+            // {} = no template/env override, so the job keeps its configured secretRefs.
+            request.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
 
             using var response = await http.SendAsync(request, ct);
-            if (response.IsSuccessStatusCode) return true;
+            if (response.IsSuccessStatusCode)
+            {
+                // Log the immediate fire (Information) so an off-schedule start is OBSERVABLE in App Insights —
+                // the success path was previously silent, which is why a broken trigger looked like a working one.
+                RunnerJobLog.Started(_logger, _options.JobName, (int)response.StatusCode);
+                return true;
+            }
 
             var detail = await response.Content.ReadAsStringAsync(ct);
             RunnerJobLog.StartNonSuccess(_logger, (int)response.StatusCode, _options.JobName, detail);
@@ -65,6 +75,10 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
 /// <summary>High-performance (CA1848) log delegates for the runner job-start trigger.</summary>
 internal static partial class RunnerJobLog
 {
+    [LoggerMessage(EventId = 5002, Level = LogLevel.Information,
+        Message = "Runner job start accepted ({Status}) for {Job} — an off-schedule execution should fire now")]
+    public static partial void Started(ILogger logger, string job, int status);
+
     [LoggerMessage(EventId = 5000, Level = LogLevel.Warning,
         Message = "Runner job start returned {Status} for {Job}: {Detail}")]
     public static partial void StartNonSuccess(ILogger logger, int status, string job, string detail);
