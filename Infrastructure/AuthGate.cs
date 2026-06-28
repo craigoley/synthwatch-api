@@ -48,15 +48,16 @@ public static class AuthGate
         return p.StartsWith("/api/", StringComparison.Ordinal) ? p["/api".Length..] : p;
     }
 
-    /// <summary>Admin-only writes — user management (/api/editors, slice 3). Matched here so they're admin-gated
-    /// the moment they exist; handlers should ALSO check IsAdmin (defense in depth: a miss degrades to
-    /// "editor could manage users", never "anonymous could").</summary>
+    /// <summary>Admin-only writes — user management (/api/editors + /api/access-requests, slice 3). Matched here
+    /// so they're admin-gated the moment they exist; handlers should ALSO check IsAdmin (defense in depth: a miss
+    /// degrades to "editor could manage users", never "anonymous could").</summary>
     public static bool IsAdminOnlyRoute(string method, string? rawPath)
     {
         if (!IsMutating(method))
             return false;
         var r = RouteOf(rawPath);
-        return r == "/editors" || r.StartsWith("/editors/", StringComparison.Ordinal);
+        return r == "/editors" || r.StartsWith("/editors/", StringComparison.Ordinal)
+            || r == "/access-requests" || r.StartsWith("/access-requests/", StringComparison.Ordinal);
     }
 
     /// <summary>

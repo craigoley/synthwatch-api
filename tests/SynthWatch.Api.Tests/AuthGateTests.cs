@@ -98,12 +98,14 @@ public class AuthGateTests
     [Theory]
     [InlineData("POST", "/api/editors")]
     [InlineData("DELETE", "/api/editors/someone@x.test")]
+    [InlineData("DELETE", "/api/access-requests/someone@x.test")]
     public void Editor_is_forbidden_on_admin_only_routes(string method, string path) =>
         Assert.Equal(GateOutcome.Deny403, AuthGate.Decide(method, path, enforcementEnabled: true, role: Roles.Editor));
 
     [Theory]
     [InlineData("POST", "/api/editors")]
     [InlineData("DELETE", "/api/editors/someone@x.test")]
+    [InlineData("DELETE", "/api/access-requests/someone@x.test")]
     public void Admin_is_allowed_on_admin_only_routes(string method, string path) =>
         Assert.Equal(GateOutcome.Allow, AuthGate.Decide(method, path, enforcementEnabled: true, role: Roles.Admin));
 
