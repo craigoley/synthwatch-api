@@ -149,6 +149,27 @@ public class EditorsFunctions
         return ApiResults.Ok(grouped);
     }
 
+    /// <summary>DELETE /api/access-requests/{email} — dismiss/deny a pending access request (admin-only).
+    /// Idempotent: returns 204 even if the email had no pending request.</summary>
+    [Function("DismissAccessRequest")]
+    public async Task<IActionResult> DismissAccessRequest(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "access-requests/{email}")] HttpRequest req,
+        string email,
+        CancellationToken ct)
+    {
+        IActionResult? deny = null;
+        if (await RequireAdminAsync(req, d => deny = d, ct) is null) return deny!;
+
+        var normalized = AuthTokens.NormalizeEmail(email);
+        var rows = await _db.AccessRequests.Where(a => a.Email == normalized).ToListAsync(ct);
+        if (rows.Count > 0)
+        {
+            _db.AccessRequests.RemoveRange(rows);
+            await _db.SaveChangesAsync(ct);
+        }
+        return ApiResults.NoContent();
+    }
+
     /// <summary>Validate + normalize an email (format check only — reveals nothing about existence).</summary>
     private static bool TryReadEmail(string? raw, out string email)
     {
