@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
@@ -26,12 +27,14 @@ public class EditorsFunctions
     private readonly SynthWatchDbContext _db;
     private readonly IAuthPrincipal _auth;
     private readonly IAuditScope _audit;
+    private readonly ILogger<EditorsFunctions> _logger;
 
-    public EditorsFunctions(SynthWatchDbContext db, IAuthPrincipal auth, IAuditScope audit)
+    public EditorsFunctions(SynthWatchDbContext db, IAuthPrincipal auth, IAuditScope audit, ILogger<EditorsFunctions> logger)
     {
         _db = db;
         _auth = auth;
         _audit = audit;
+        _logger = logger;
     }
 
     /// <summary>Resolve the bearer caller and require admin. Returns the admin Principal, or sets
@@ -157,16 +160,33 @@ public class EditorsFunctions
         string email,
         CancellationToken ct)
     {
-        IActionResult? deny = null;
-        if (await RequireAdminAsync(req, d => deny = d, ct) is null) return deny!;
+        _logger.LogInformation("DismissAccessRequest: entry, raw email param = {Email}", email);
+        try
+        {
+            IActionResult? deny = null;
+            if (await RequireAdminAsync(req, d => deny = d, ct) is null)
+            {
+                _logger.LogInformation("DismissAccessRequest: auth denied");
+                return deny!;
+            }
 
-        var normalized = AuthTokens.NormalizeEmail(email);
-        var deleted = await _db.AccessRequests
-            .Where(a => a.Email == normalized)
-            .ExecuteDeleteAsync(ct);
-        if (deleted > 0)
-            _audit.Record("access-request", normalized, before: new { count = deleted }, after: null, note: "dismiss access request");
-        return ApiResults.NoContent();
+            var normalized = AuthTokens.NormalizeEmail(email);
+            _logger.LogInformation("DismissAccessRequest: normalized = {Normalized}, executing delete", normalized);
+
+            var deleted = await _db.AccessRequests
+                .Where(a => a.Email == normalized)
+                .ExecuteDeleteAsync(ct);
+
+            _logger.LogInformation("DismissAccessRequest: deleted {Count} rows, returning 204", deleted);
+            // DIAGNOSTIC: audit record temporarily removed to isolate production 500 cause.
+            // Was: _audit.Record("access-request", normalized, before: new { count = deleted }, after: null, note: "dismiss access request");
+            return ApiResults.NoContent();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "DismissAccessRequest: unhandled exception for email={Email}", email);
+            throw;
+        }
     }
 
     /// <summary>Validate + normalize an email (format check only — reveals nothing about existence).</summary>
