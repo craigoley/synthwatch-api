@@ -112,8 +112,7 @@ public class EditorsFunctions
         var admin = await RequireAdminAsync(req, d => deny = d, ct);
         if (admin is null) return deny!;
 
-        var decoded = Uri.UnescapeDataString(email);
-        var normalized = AuthTokens.NormalizeEmail(decoded);
+        var normalized = AuthTokens.NormalizeEmail(email);
         var editor = await _db.Editors.FirstOrDefaultAsync(e => e.Email == normalized, ct);
         if (editor is null)
             return ApiResults.NotFound($"{normalized} is not an editor.");
@@ -161,8 +160,7 @@ public class EditorsFunctions
         IActionResult? deny = null;
         if (await RequireAdminAsync(req, d => deny = d, ct) is null) return deny!;
 
-        var decoded = Uri.UnescapeDataString(email);
-        var normalized = AuthTokens.NormalizeEmail(decoded);
+        var normalized = AuthTokens.NormalizeEmail(email);
         var rows = await _db.AccessRequests.Where(a => a.Email == normalized).ToListAsync(ct);
         if (rows.Count > 0)
         {
