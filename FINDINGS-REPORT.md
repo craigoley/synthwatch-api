@@ -38,15 +38,15 @@ The API codebase is well-structured with strong fundamentals: fail-closed auth, 
 
 ### A2. [MEDIUM] IncidentRca.generated_at — snake_case leak in an all-camelCase API
 
-**Status:** CONFIRMED — observable on the wire in every incident response containing RCA data.
+**Status:** CONFIRMED leak, but the naive fix is WRONG (corrected after review).
 
-**OBSERVED:** `Data/Entities/IncidentRca.cs` has `[JsonPropertyName("generated_at")]` on one field, producing `generated_at` (snake_case) in JSON output. Every other field in the entire API is camelCase. This leaks into `IncidentDto.rca` and `IncidentDetailDto.rca` (both in `Dtos/RunDtos.cs`).
+**OBSERVED:** `Data/Entities/IncidentRca.cs:25` has `[JsonPropertyName("generated_at")]` on one field, producing `generated_at` (snake_case) in JSON output. Every other field in the entire API is camelCase. This leaks into `IncidentDto.rca` and `IncidentDetailDto.rca` (both in `Dtos/RunDtos.cs`).
 
 **Prod impact:** Any dashboard code parsing `rca.generatedAt` (camelCase, matching the convention) gets `undefined`. Must use `rca.generated_at` instead. A contract inconsistency that will confuse any new consumer.
 
-**Falsification:** Could this be intentional for DB column mapping? The `[JsonPropertyName]` attribute controls JSON serialization, not DB mapping (EF Core uses `[Column]` or conventions). This is a naming error.
+**Falsification:** ~~Could this be intentional for DB column mapping?~~ YES — `IncidentRca` is NOT a pure API DTO. It is persisted as a `jsonb` column via `JsonbColumn<IncidentRca?>()` (`SynthWatchDbContext.cs:344`), using `System.Text.Json` with `JsonbOptions` (`SynthWatchDbContext.cs:534-549`). The same `[JsonPropertyName]` attribute governs both jsonb deserialization from PostgreSQL AND API response serialization. The runner writes this key as `generated_at` (snake_case) — the entity comment at line 24 says so explicitly. Changing the attribute to `"generatedAt"` would silently null out `GeneratedAt` for every existing incident — a data-read regression.
 
-**Fix size:** 1 line — change `"generated_at"` to `"generatedAt"`.
+**Fix size:** MEDIUM — not a 1-line fix. Correct approaches: (a) introduce a separate response DTO with its own `[JsonPropertyName("generatedAt")]` and map from the entity, or (b) split the serialization options so the DB converter uses different settings than the API response.
 
 ---
 
@@ -501,7 +501,7 @@ All verified with file:line evidence:
 | Rank | ID | Category | Severity | Fix Size | Description |
 |------|-----|----------|----------|----------|-------------|
 | 1 | A1 | Prod Bug | HIGH | ~5 lines | Blob transient error → 404 in baseline-diff failing-run path |
-| 2 | A2 | Prod Bug | MEDIUM | 1 line | `generated_at` snake_case leak in IncidentRca |
+| 2 | A2 | Contract | MEDIUM | MEDIUM | `generated_at` snake_case leak in IncidentRca (jsonb dual-use — fix needs DTO split) |
 | 3 | B1 | Risk | HIGH | MEDIUM | No rate limiting on AOAI endpoints |
 | 4 | B4 | Risk | MEDIUM | 0 code | Verify AUTH_ENFORCEMENT_ENABLED=true in prod |
 | 5 | D1 | Cleanup | MEDIUM | ~10 lines | Auth logic duplication in AuthFunctions (divergence risk) |
