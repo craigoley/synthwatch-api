@@ -161,13 +161,11 @@ public class EditorsFunctions
         if (await RequireAdminAsync(req, d => deny = d, ct) is null) return deny!;
 
         var normalized = AuthTokens.NormalizeEmail(email);
-        var rows = await _db.AccessRequests.Where(a => a.Email == normalized).ToListAsync(ct);
-        if (rows.Count > 0)
-        {
-            _db.AccessRequests.RemoveRange(rows);
-            await _db.SaveChangesAsync(ct);
-            _audit.Record("access-request", normalized, before: new { count = rows.Count }, after: null, note: "dismiss access request");
-        }
+        var deleted = await _db.AccessRequests
+            .Where(a => a.Email == normalized)
+            .ExecuteDeleteAsync(ct);
+        if (deleted > 0)
+            _audit.Record("access-request", normalized, before: new { count = deleted }, after: null, note: "dismiss access request");
         return ApiResults.NoContent();
     }
 
