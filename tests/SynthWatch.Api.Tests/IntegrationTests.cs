@@ -2182,6 +2182,15 @@ public class IntegrationTests
             Assert.Contains(reqs, r => r.Email == "want@ed.test");
             Assert.DoesNotContain(reqs, r => r.Email == "ed@ed.test");
 
+            // Dismiss access request → 204, row gone; idempotent (no-match → 204 too).
+            Assert.IsType<NoContentResult>(await fn.DismissAccessRequest(AuthReq(adminTok), "want@ed.test", default));
+            Assert.False(await db.AccessRequests.AnyAsync(a => a.Email == "want@ed.test"));
+            Assert.Equal("access-request", audit.Diff?.TargetType);
+            Assert.IsType<NoContentResult>(await fn.DismissAccessRequest(AuthReq(adminTok), "ghost@ed.test", default));
+
+            // Editor can't dismiss access requests.
+            Assert.Equal(403, StatusOf(await fn.DismissAccessRequest(AuthReq(editorTok), "want@ed.test", default)));
+
             // Admin removes → 204, gone; removing a non-editor → 404.
             Assert.IsType<NoContentResult>(await fn.RemoveEditor(AuthReq(adminTok), "new@ed.test", default));
             Assert.False(await db.Editors.AnyAsync(e => e.Email == "new@ed.test"));
