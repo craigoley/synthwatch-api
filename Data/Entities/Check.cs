@@ -90,6 +90,15 @@ public class Check
     public string? SuccessTraceUrl { get; set; }
     public DateTimeOffset? SuccessTraceAt { get; set; }
 
+    // B10 trace redaction (migration 0046; runner #137). sensitive = a cart/auth monitor whose trace can
+    // carry session tokens / cart contents / account PII; redact_patterns = the JSONB array of regex
+    // strings it declares. Git-AUTHORITATIVE (set by reconcile's manifest upsert), read-only to the API —
+    // BUT the API enforces the same B10 ENABLE GATE: a sensitive check can't be enabled (get a
+    // check_locations cursor) without non-empty redact_patterns. See CheckValidation.SensitiveNeedsRedaction
+    // (mirrors runner reconcile.ts validateManifest). Defaults: sensitive=false, redact_patterns=null.
+    public bool Sensitive { get; set; }
+    public List<string>? RedactPatterns { get; set; }
+
     // Navigation (read-mostly).
     public List<Run> Runs { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();

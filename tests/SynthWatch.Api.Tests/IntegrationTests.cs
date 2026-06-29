@@ -1064,6 +1064,94 @@ public class IntegrationTests
         }
     }
 
+    // ── B10 enable gate (PUT /locations): a sensitive check can't be enabled without redaction ──
+    [SkippableFact]
+    public async Task B10_sensitive_check_without_redaction_cannot_be_enabled_via_locations()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO locations (name, enabled) VALUES ('b10loc', true) ON CONFLICT (name) DO UPDATE SET enabled = true;
+            INSERT INTO checks (name, kind, target_url, sensitive) VALUES ('b10-unwired', 'http', 'https://x.example', true);
+            """);
+        try
+        {
+            var id = await db.Checks.Where(c => c.Name == "b10-unwired").Select(c => c.Id).FirstAsync();
+            var res = await new LocationsFunctions(db).SetCheckLocations(JsonRequest(new { locations = new[] { "b10loc" } }), id, default);
+            var bad = Assert.IsType<BadRequestObjectResult>(res); // refused — B10 (before any cursor is inserted)
+            Assert.Equal(400, bad.StatusCode);
+            Assert.Contains("B10", System.Text.Json.JsonSerializer.Serialize(bad.Value), StringComparison.Ordinal);
+            // The check stays inert (no cursor) — the gate returns before the INSERT.
+            Assert.Equal(0, await db.CheckLocations.CountAsync(cl => cl.CheckId == id));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'b10-unwired'; DELETE FROM locations WHERE name = 'b10loc';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task B10_sensitive_check_WITH_redaction_can_be_enabled()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO locations (name, enabled) VALUES ('b10loc', true) ON CONFLICT (name) DO UPDATE SET enabled = true;
+            INSERT INTO checks (name, kind, target_url, sensitive, redact_patterns)
+                VALUES ('b10-wired', 'http', 'https://x.example', true, '["token=\\S+"]'::jsonb);
+            """);
+        try
+        {
+            var id = await db.Checks.Where(c => c.Name == "b10-wired").Select(c => c.Id).FirstAsync();
+            var res = await new LocationsFunctions(db).SetCheckLocations(JsonRequest(new { locations = new[] { "b10loc" } }), id, default);
+            Assert.IsType<OkObjectResult>(res); // redaction declared → enable allowed
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'b10-wired'; DELETE FROM locations WHERE name = 'b10loc';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task B10_non_sensitive_check_enable_is_unchanged()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO locations (name, enabled) VALUES ('b10loc', true) ON CONFLICT (name) DO UPDATE SET enabled = true;
+            INSERT INTO checks (name, kind, target_url) VALUES ('b10-normal', 'http', 'https://x.example');
+            """);
+        try
+        {
+            var id = await db.Checks.Where(c => c.Name == "b10-normal").Select(c => c.Id).FirstAsync();
+            var res = await new LocationsFunctions(db).SetCheckLocations(JsonRequest(new { locations = new[] { "b10loc" } }), id, default);
+            Assert.IsType<OkObjectResult>(res); // no sensitive flag → no new restriction
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'b10-normal'; DELETE FROM locations WHERE name = 'b10loc';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task B10_created_check_is_never_sensitive_via_the_api()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        try
+        {
+            var res = await new ChecksFunctions(db).CreateCheck(
+                JsonRequest(new { name = "b10-create", kind = "http", targetUrl = "https://x.example" }), default);
+            Assert.IsType<ObjectResult>(res); // created (201)
+            var sensitive = await db.Checks.Where(c => c.Name == "b10-create").Select(c => c.Sensitive).FirstAsync();
+            Assert.False(sensitive); // the create DTO can't set sensitive → always false (safe; no redaction needed)
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'b10-create';");
+        }
+    }
+
     [SkippableFact]
     public async Task Run_without_a_trace_returns_404()
     {

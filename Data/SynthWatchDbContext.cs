@@ -263,6 +263,11 @@ public class SynthWatchDbContext : DbContext
             var (stepsConv, stepsCmp) = JsonbColumn<List<ChainStep>?>();
             e.Property(x => x.Steps).HasColumnName("steps").HasColumnType("jsonb")
                 .HasConversion(stepsConv, stepsCmp);
+            // B10 (migration 0046): sensitive flag + declared redaction patterns (jsonb array of regex).
+            e.Property(x => x.Sensitive).HasColumnName("sensitive");
+            var (redactConv, redactCmp) = JsonbColumn<List<string>?>();
+            e.Property(x => x.RedactPatterns).HasColumnName("redact_patterns").HasColumnType("jsonb")
+                .HasConversion(redactConv, redactCmp);
         });
 
         modelBuilder.Entity<Run>(e =>

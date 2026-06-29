@@ -72,8 +72,20 @@ public class LocationsFunctions
         if (body is null)
             return ApiResults.BadRequest("Request body is required.");
 
-        if (!await _db.Checks.AnyAsync(c => c.Id == id, ct))
+        var check = await _db.Checks.AsNoTracking()
+            .Where(c => c.Id == id)
+            .Select(c => new { c.Sensitive, c.RedactPatterns })
+            .FirstOrDefaultAsync(ct);
+        if (check is null)
             return ApiResults.NotFound($"Check {id} not found.");
+
+        // ★ B10 ENABLE GATE (the canonical "redaction REQUIRED before enable" on the API path): assigning a
+        // location inserts a check_locations cursor = enabling the check there. A sensitive check with no
+        // declared redact_patterns must NOT be enabled — its trace could leak session tokens / cart / PII.
+        // Mirrors the runner reconcile gate, so the bypass is closed on every enable path.
+        if (CheckValidation.SensitiveNeedsRedaction(check.Sensitive, check.RedactPatterns))
+            return ApiResults.BadRequest(
+                "Cannot enable a sensitive check without redaction (B10): declare redact_patterns in the monitor's manifest before assigning locations.");
 
         // Normalize: trim, drop blanks, de-dupe (order-independent set).
         var requested = (body.Locations ?? new List<string>())
