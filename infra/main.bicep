@@ -77,6 +77,12 @@ param artifactsStorageAccountName string = 'synthwatche24e33105c'
 param runnerJobName string = 'synthwatch-runner-job'
 param reconcileJobName string = 'synthwatch-reconcile-job'
 
+@description('AOAI account the RCA path (AiInsights / LocationDiff) calls via DefaultAzureCredential — the MI needs Cognitive Services OpenAI User.')
+param aoaiAccountName string = 'synthwatch-aoai'
+
+@description('ACS resource the OTP-email sender (AcsEmailSender) uses via DefaultAzureCredential — the MI needs Communication and Email Service Owner.')
+param acsResourceName string = 'synthwatch-acs'
+
 var storageAccountName = take(toLower('st${uniqueString(resourceGroup().id, functionAppName)}'), 24)
 var deploymentContainerName = 'app-package'
 
@@ -86,6 +92,10 @@ var storageQueueDataContributorRoleId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
 var storageBlobDataReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 // Container Apps Jobs Operator — includes Microsoft.App/jobs/start/action (the on-demand start the MI uses).
 var containerAppsJobsOperatorRoleId = 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b'
+// Cognitive Services OpenAI User — data-plane chat-completions on the AOAI account (the RCA path).
+var cognitiveServicesOpenAiUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+// Communication and Email Service Owner — send email via ACS (the OTP sign-in / edit-access mails).
+var communicationEmailServiceOwnerRoleId = '09976791-48a7-449e-bb21-39d1a415f350'
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -318,6 +328,36 @@ resource reconcileJobOperatorAssignment 'Microsoft.Authorization/roleAssignments
   scope: reconcileJob
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', containerAppsJobsOperatorRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// The MI calls the AOAI account (RCA) and ACS (OTP email) via DefaultAzureCredential. Both grants existed only
+// as MANUAL CLI assignments (config drift — exactly what the grant-coverage CI check guards). Durable Bicep
+// declarations matching the live RBAC; deterministic guid() names make redeploys idempotent.
+resource aoaiAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
+  name: aoaiAccountName
+}
+resource acsResource 'Microsoft.Communication/communicationServices@2023-04-01' existing = {
+  name: acsResourceName
+}
+
+resource aoaiOpenAiUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(aoaiAccount.id, functionApp.id, cognitiveServicesOpenAiUserRoleId)
+  scope: aoaiAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesOpenAiUserRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource acsEmailOwnerAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(acsResource.id, functionApp.id, communicationEmailServiceOwnerRoleId)
+  scope: acsResource
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', communicationEmailServiceOwnerRoleId)
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
   }

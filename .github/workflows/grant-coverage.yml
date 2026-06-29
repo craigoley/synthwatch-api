@@ -1,0 +1,31 @@
+name: Grant coverage
+
+# Asserts the Azure RBAC roles the synthwatch-api MI is GRANTED in infra/main.bicep exactly match the set its
+# endpoints REQUIRE in infra/required-grants.json — catching the missing-grant class (dismiss-500 / reconcile /
+# AOAI / email) at CI instead of a runtime 500. Fail-closed: a required-but-ungranted (or granted-but-undeclared)
+# role fails the job, which fails ci-gate, which holds the merge.
+#
+# Runs on EVERY PR (no path filter): a PR that adds an endpoint needing a new role must update both the manifest
+# and Bicep even if it doesn't otherwise touch infra/. The check is a sub-second static parse — no Azure calls,
+# no live-RBAC propagation flakiness.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  grant-coverage:
+    name: Grant coverage (MI roles vs Bicep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Assert required grants are covered by Bicep
+        run: node scripts/check-grant-coverage.mjs
