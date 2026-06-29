@@ -200,7 +200,7 @@ public class ReportsFunctions
                     r.CheckId!.Value, names.GetValueOrDefault(r.CheckId.Value, ""),
                     Lat(r), Vit(vitLookup[(g.Key, r.CheckId)].FirstOrDefault()))).ToList();
             var pts = seriesByGroup[g.Key].Select(s => new LatencyPointDto(s.Day, s.AvgMs)).ToList();
-            return new PerformanceGroupDto(g.Key, Lat(groupRow), Vit(vitLookup[(g.Key, (long?)null)].FirstOrDefault()), checks, pts);
+            return new PerformanceGroupDto(g.Key, Lat(groupRow), Vit(vitLookup[(g.Key, null)].FirstOrDefault()), checks, pts);
         }).OrderBy(g => g.Group, StringComparer.Ordinal).ToList();
 
         return ApiResults.Ok(new PerformanceReportDto(string.IsNullOrEmpty(window) ? "30d" : window, grouped ? groupBy : null, groups));
