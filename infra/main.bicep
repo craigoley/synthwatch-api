@@ -73,6 +73,10 @@ param azureOpenAiReasoningEffort string = 'low'
 @description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
 param artifactsStorageAccountName string = 'synthwatche24e33105c'
 
+@description('Runner-owned ACA jobs the API MI starts on-demand: "Run now" (test-send/run) starts the runner job; POST /api/reconcile/trigger starts the reconcile job. The API MI needs Container Apps Jobs Operator on each (covers Microsoft.App/jobs/start/action).')
+param runnerJobName string = 'synthwatch-runner-job'
+param reconcileJobName string = 'synthwatch-reconcile-job'
+
 var storageAccountName = take(toLower('st${uniqueString(resourceGroup().id, functionAppName)}'), 24)
 var deploymentContainerName = 'app-package'
 
@@ -80,6 +84,8 @@ var deploymentContainerName = 'app-package'
 var storageBlobDataOwnerRoleId = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
 var storageQueueDataContributorRoleId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
 var storageBlobDataReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
+// Container Apps Jobs Operator — includes Microsoft.App/jobs/start/action (the on-demand start the MI uses).
+var containerAppsJobsOperatorRoleId = 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b'
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -280,6 +286,38 @@ resource artifactsBlobReaderAssignment 'Microsoft.Authorization/roleAssignments@
   scope: artifactsStorage
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataReaderRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// The Function App's MI starts runner-owned ACA jobs on-demand: "Run now" (ChecksRun/ChannelTest) starts the
+// runner job; POST /api/reconcile/trigger starts the reconcile job. Both need Container Apps Jobs Operator
+// (Microsoft.App/jobs/start/action). PROVEN live (an off-cron reconcile execution fired + Succeeded as this MI).
+// Durable Bicep declaration of grants that were first applied manually — the config-drift lesson: a critical
+// "works-as-admin / 403s-as-the-MI" grant must not live only as a CLI assignment that a redeploy could lose.
+resource runnerJob 'Microsoft.App/jobs@2024-03-01' existing = {
+  name: runnerJobName
+}
+resource reconcileJob 'Microsoft.App/jobs@2024-03-01' existing = {
+  name: reconcileJobName
+}
+
+resource runnerJobOperatorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(runnerJob.id, functionApp.id, containerAppsJobsOperatorRoleId)
+  scope: runnerJob
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', containerAppsJobsOperatorRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource reconcileJobOperatorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(reconcileJob.id, functionApp.id, containerAppsJobsOperatorRoleId)
+  scope: reconcileJob
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', containerAppsJobsOperatorRoleId)
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
   }
