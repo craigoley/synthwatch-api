@@ -12,7 +12,12 @@ public sealed record DiffBaselineRef(string Source, DateTimeOffset? CapturedAt, 
 /// </summary>
 public sealed record DiffInsight(
     string Summary,
-    // regional-waf-cdn | network-allowlist | geo-dns | region-timeout | third-party-blocked | flaky-transient | undetermined
+    // ★ The PRIMARY classification: which LAYER failed.
+    // site-failure | monitor-verification-bug | transient | undetermined
+    string Verdict,
+    // Finer cause (kept for the regional taxonomy + the dashboard card):
+    // site-failure | monitor-verification-bug | regional-waf-cdn | network-allowlist | geo-dns | region-timeout
+    // | third-party-blocked | flaky-transient | undetermined
     string LikelyCause,
     string Confidence,
     bool IsFlaky,

@@ -1888,6 +1888,18 @@ public class IntegrationTests
             Task.FromResult(new AoaiResult(AoaiOutcome.Ok, "{}", "stop", 200, null));
     }
 
+    // Captures the user message so a test can assert WHAT context the RCA actually fed the model.
+    private sealed class CapturingFakeAoai : IAoaiClient
+    {
+        public string? LastUser { get; private set; }
+        public bool IsConfigured => true;
+        public Task<AoaiResult> ChatJsonAsync(string system, string user, CancellationToken ct)
+        {
+            LastUser = user;
+            return Task.FromResult(new AoaiResult(AoaiOutcome.Ok, "{}", "stop", 200, null));
+        }
+    }
+
     // ── ai-insights: a SUCCESS run (trace_url null) whose monitor has NO success baseline yet → clean 404 ──
     [SkippableFact]
     public async Task AiInsights_success_run_with_no_baseline_returns_a_clean_no_trace_not_500()
@@ -1925,6 +1937,29 @@ public class IntegrationTests
         public Task<ArtifactBlob> OpenStreamAsync(string? url, string artifact, long id, CancellationToken ct) => Task.FromResult(result);
     }
 
+    // URL-aware reader returning a FRESH readable stream per call, keyed by a URL substring — needed once the
+    // failing run is also extracted from its own zip (zip-first), so one reader serves run zip AND baseline zip.
+    private sealed class FakeZipReader(params (string urlContains, byte[] zip)[] zips) : IArtifactReader
+    {
+        private Task<ArtifactBlob> Resolve(string? url)
+        {
+            foreach (var (key, bytes) in zips)
+                if (url is not null && url.Contains(key, StringComparison.Ordinal))
+                    return Task.FromResult(ArtifactBlob.Of(new MemoryStream(bytes, writable: false)));
+            return Task.FromResult(ArtifactBlob.Missing);
+        }
+        public Task<ArtifactBlob> DownloadToMemoryAsync(string? url, string artifact, long id, CancellationToken ct) => Resolve(url);
+        public Task<ArtifactBlob> OpenStreamAsync(string? url, string artifact, long id, CancellationToken ct) => Resolve(url);
+    }
+
+    private static byte[] TraceZipBytes(string networkNdjson, string consoleNdjson)
+    {
+        using var s = BuildTraceZip(networkNdjson, consoleNdjson);
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    }
+
     private static Stream BuildTraceZip(string networkNdjson, string consoleNdjson)
     {
         var ms = new MemoryStream();
@@ -1937,40 +1972,50 @@ public class IntegrationTests
         return ms;
     }
 
-    // ── baseline-diff: persisted failing signals (#114) + on-demand baseline → diff + categorized insight ──
+    // ── baseline-diff: zip-first failing signals (mutations) + the FAILED ASSERTION + on-demand baseline ──
+    // The 849441 regression at the integration level: the RCA context MUST carry the failing assertion
+    // (error_message/failed_step) AND the action-under-test's network result (the cart-items POST 200), both of
+    // which the old path dropped. We assert what reaches the MODEL via a capturing fake.
     [SkippableFact]
-    public async Task BaselineDiff_resolves_persisted_failing_and_on_demand_baseline_then_diffs_and_insights()
+    public async Task BaselineDiff_feeds_the_failing_assertion_and_the_action_network_result_to_the_model()
     {
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        // The failing run carries PERSISTED trace_signals (#114) with a site error the baseline won't have.
-        const string failingSignals =
-            """{"targetHost":"x.example","network":{"totalRequests":10,"wireKb":100,"thirdPartyCount":2,"failed":[],"slowest":[],"largest":[],"uncompressed":[],"topThirdParties":[]},"console":{"messages":[{"level":"error","origin":"site","text":"FAILING-ONLY region error"}],"droppedInfoLog":0,"droppedExtensionNoise":0}}""";
         await db.Database.ExecuteSqlRawAsync(
             "INSERT INTO checks (name, kind, target_url, success_trace_url, success_trace_at) " +
             "VALUES ('bdiff', 'http', 'https://x.example', 'https://x.blob.core.windows.net/c/success.zip', now());");
+        // The failing run: a spec-code assertion error + a trace whose network has the cart-items POST 200.
         await db.Database.ExecuteSqlRawAsync(
-            "INSERT INTO runs (check_id, status, started_at, location, trace_url, trace_signals) " +
-            "SELECT id, 'fail', now(), 'eastus2', 'https://x.blob.core.windows.net/c/run.zip', {0}::jsonb " +
-            "FROM checks WHERE name = 'bdiff';", failingSignals);
+            "INSERT INTO runs (check_id, status, started_at, location, trace_url, failed_step, error_message) " +
+            "SELECT id, 'error', now(), 'eastus2', 'https://x.blob.core.windows.net/c/run.zip', " +
+            "'add cheese pizza to cart', 'Cannot read properties of undefined (reading ''toBeNull'')' " +
+            "FROM checks WHERE name = 'bdiff';");
         try
         {
             var runId = await db.Runs.Where(r => r.Check!.Name == "bdiff").Select(r => r.Id).FirstAsync();
-            // The baseline is extracted on-demand: a synthetic zip whose console has a DIFFERENT error.
-            var baselineZip = BuildTraceZip("",
+            // Failing zip: a 200 POST to cart-items (the action SUCCEEDED) + a FAILING-ONLY console error.
+            var failingZip = TraceZipBytes(
+                """{"type":"resource-snapshot","snapshot":{"request":{"url":"https://x.example/api/cart-items","method":"POST"},"response":{"status":200},"_resourceType":"fetch","time":40}}""",
+                """{"type":"console","messageType":"error","text":"FAILING-ONLY region error","location":{"url":"https://x.example/"}}""");
+            var baselineZip = TraceZipBytes("",
                 """{"type":"console","messageType":"error","text":"BASELINE-ONLY benign warning","location":{"url":"https://x.example/"}}""");
-            var fn = new LocationDiffFunctions(db, new FakeArtifactReader(ArtifactBlob.Of(baselineZip)), new ConfiguredFakeAoai());
+            var aoai = new CapturingFakeAoai();
+            var fn = new LocationDiffFunctions(db,
+                new FakeZipReader(("run.zip", failingZip), ("success.zip", baselineZip)), aoai);
 
             var result = await fn.GetBaselineDiff(Request(), runId, default);
             var dto = Assert.IsType<LocationDiffDto>(Assert.IsType<OkObjectResult>(result).Value);
 
             Assert.True(dto.Configured);
             Assert.Equal("eastus2", dto.Failing.Location);
-            Assert.Equal("success-baseline", dto.Baseline.Source);
-            // the diff used the PERSISTED failing signals (not the run blob) and the on-demand baseline:
             Assert.Contains(dto.Diff.Console.OnlyInA, m => m.Text.Contains("FAILING-ONLY", StringComparison.Ordinal));
             Assert.Contains(dto.Diff.Console.OnlyInB, m => m.Text.Contains("BASELINE-ONLY", StringComparison.Ordinal));
-            Assert.NotNull(dto.Insight); // ConfiguredFakeAoai → parsed (defaults)
+
+            // ★ The new context REACHED THE MODEL: the failed assertion + the 2xx action under test.
+            Assert.Contains("add cheese pizza to cart", aoai.LastUser!, StringComparison.Ordinal);
+            Assert.Contains("toBeNull", aoai.LastUser!, StringComparison.Ordinal);
+            Assert.Contains("cart-items", aoai.LastUser!, StringComparison.Ordinal);
+            Assert.Contains("→ 200", aoai.LastUser!, StringComparison.Ordinal);
         }
         finally
         {

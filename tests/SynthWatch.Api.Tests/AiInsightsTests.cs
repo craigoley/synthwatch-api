@@ -13,7 +13,7 @@ public class AiInsightsTests
         Network: new NetworkSummaryDto(
             TotalRequests: 561, WireKb: 11431, ThirdPartyCount: 287,
             Failed: [], Slowest: [], Largest: [], Uncompressed: [],
-            TopThirdParties: [new ThirdPartyDto("images.wegmans.com", 70, 6663)]),
+            TopThirdParties: [new ThirdPartyDto("images.wegmans.com", 70, 6663)], Mutations: []),
         Console: new ConsoleSummaryDto(
             Messages: [new ConsoleMessageDto("error", "site", "SiteHeaderSearch: Invalid discovery pages storage data")],
             DroppedInfoLog: 72, DroppedExtensionNoise: 0));

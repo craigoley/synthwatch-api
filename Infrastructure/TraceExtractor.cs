@@ -65,7 +65,12 @@ public static partial class TraceExtractor
     // ── network ─────────────────────────────────────────────────────────────────────────────────────────
 
     private readonly record struct Req(
-        string Url, int Status, string Rtype, int Time, int Wait, long Size, long Wire, string Enc, bool Third);
+        string Url, int Status, string Rtype, int Time, int Wait, long Size, long Wire, string Enc, bool Third, string Method);
+
+    // Methods whose request mutates state — "the action under test" for cart/auth/submit monitors.
+    private static readonly HashSet<string> MutatingMethods =
+        new(["POST", "PUT", "PATCH", "DELETE"], StringComparer.OrdinalIgnoreCase);
+    private const int MutationCap = 12;
 
     public static NetworkSummaryDto ExtractNetwork(Stream networkNdjson, string? targetHost)
     {
@@ -93,7 +98,8 @@ public static partial class TraceExtractor
                     Size: Long(content, "size"),
                     Wire: Long(resp, "_transferSize"),
                     Enc: Header(resp, "content-encoding"),
-                    Third: !IsSite(HostOf(url), targetHost)));
+                    Third: !IsSite(HostOf(url), targetHost),
+                    Method: Str(req, "method")));
             }
         }
 
@@ -114,7 +120,11 @@ public static partial class TraceExtractor
             // uncompressed: TEXT assets only, no content-encoding, over the size floor.
             Uncompressed: reqs.Where(r => TextTypes.Contains(r.Rtype) && r.Enc.Length == 0 && r.Size > UncompressedMinBytes)
                               .OrderByDescending(r => r.Size).Take(TopN).Select(Slim).ToList(),
-            TopThirdParties: thirdParties);
+            TopThirdParties: thirdParties,
+            // The action(s) under test: every mutating request + the status the site returned, success OR failure
+            // (NOT just status>=400 like Failed) — a 2xx mutation is the decisive "the action actually worked" fact.
+            Mutations: reqs.Where(r => MutatingMethods.Contains(r.Method))
+                           .Take(MutationCap).Select(r => new MutationDto(r.Method, r.Url, r.Status)).ToList());
     }
 
     // ── console (the filter) ────────────────────────────────────────────────────────────────────────────
