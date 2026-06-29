@@ -1,0 +1,25 @@
+# synthwatch-api — Claude rules
+
+Rules Claude should follow when working in this repo.
+
+## Lessons from 2026-06-29
+
+- **The runner (synthwatch repo) OWNS the DB schema + migrations; this API serves reads/writes against it.** API entity/DbContext changes must match columns the runner's migrations create, and any validation gate should MIRROR the runner's canonical rule (`reconcile.ts`, `tags.ts`, `locations.ts`) exactly — as a shared pure helper with a cross-ref comment + predicate-parity `[InlineData]` tests so the two stay in sync. *(from #114 — `CheckValidation.SensitiveNeedsRedaction` mirrors `reconcile.ts:181`; same pattern as the setCheckTags/setCheckLocations mirrors and the "cross-repo contract fix" commits)*
+
+- **Merged ≠ migrated.** This API auto-deploys on merge. Before merging API code that reads a NEW column, verify the runner's migration is actually APPLIED in the target env (`SELECT max(version) FROM schema_migrations`, or confirm the column exists) — not merely merged in the runner repo — or the deploy crashes querying a non-existent column. *(from #114 — runner #137/migration 0046 was merged to runner main while prod was still at 0045 mid-task; the read-only mapping was only deploy-safe once 0046 was applied)*
+
+- **CodeQL `paths-ignore` is a silent no-op for compiled C#.** The manual `dotnet build` compiles `obj/.../*.g.cs` (Functions Worker SDK + regex source generator), so the extractor flags them regardless of the globs; `query-filters` can't scope by path either. The working exclusion is a post-analysis `advanced-security/filter-sarif` step (filters by result location). *(from #113)*
+
+- **CodeQL triage discipline:** dismiss only with a cited reason from {proven false-positive, won't-fix (tests/generated), mitigated-elsewhere}; never dismiss a security-category finding unless proven FP; split a rule group if only some instances are real (generated-file alerts carry `classifications:["generated"]`). The GitHub code-scanning `dismissed_comment` is **capped at 280 chars** (HTTP 422 otherwise) — keep justifications terse. Note: `ExecuteSqlInterpolatedAsync($"…{x}…")` binds args as parameters (FormattableString), so CodeQL "ToString on FormattableString" / SQL-injection flags on those are false positives. *(from #111/#112/#113)*
+
+- **ASP.NET Functions route params arrive ALREADY URL-decoded** (`ConfigureFunctionsWebApplication` decodes before binding) — don't add `Uri.UnescapeDataString` (double-unescape corrupts URL-encoded emails). For set-based deletes use `ExecuteDeleteAsync`, not load-then-`RemoveRange`-then-`SaveChanges` (the tracker/audit path 500'd). *(from the #104→#105→#106→#107 access-requests delete chain — #104 guessed "missing decode" and was the wrong fix; #106 found the real cause)*
+
+- **ARM/ACA job-start POSTs (`Microsoft.App/jobs/start`) require `Content-Type: application/json` even with an empty body** — a `text/plain` empty body returns 415 and the job never fires. *(from #101 — the on-demand "Run now"/reconcile trigger silently no-op'd until this)*
+
+- **The reconcile/run-now triggers fire AS the API's system-assigned managed identity** (`DefaultAzureCredential` in `Program.cs`, not admin/passed creds). To PROVE a MI-gated action, hit the DEPLOYED endpoint authed so the start runs under the function's MI — running `az` as admin proves nothing about the MI. The MI needs `Container Apps Jobs Operator` (covers `Microsoft.App/jobs/start/action`) on the job; codify the grant in `infra/main.bicep`, don't leave it as a manual CLI assignment. *(from #108/#115)*
+
+- **To authenticate as admin for a live proof, mint a `sessions` row directly:** `token_hash` = lowercase sha256-hex of an opaque token, `email` = an `ADMIN_EMAILS` entry, set `expires_at`, then send `Authorization: Bearer <token>`; delete the row afterward. *(from #115 reconcile-trigger proof)*
+
+- **"Stale rows on a 200" from the runs/incidents list endpoints is usually NOT server caching.** These endpoints window by `started_at < to` where `to` defaults to request-time `now`; there is no response cache (scoped DbContext + `AsNoTracking`), so identical real round-trips returning a frozen newest-id is typically the CLIENT freezing the `to` param. Localize the layer with the psql-vs-curl test: run the endpoint's exact query in psql and curl the live endpoint at the same instant. *(from the runs-endpoint-stale-rows recon — the "API is stale" premise was actually the dashboard's `useDateRange` freezing `to` at mount)*
+
+- **Build/verify gate:** `dotnet build -warnaserror` (expect 0/0) + the Testcontainers xUnit suite (needs Docker running). Recon-first earns its keep here — multiple tasks' stated root cause was wrong (B10 "already landed" wasn't; "the API returns stale rows" was a client bug), so verify a task's asserted layer from code + a live test BEFORE building the fix. *(from #114 and the B10 / reconcile / runs-stale recon tasks)*
