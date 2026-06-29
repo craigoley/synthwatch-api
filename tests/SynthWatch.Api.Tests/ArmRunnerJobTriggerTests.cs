@@ -72,4 +72,28 @@ public class ArmRunnerJobTriggerTests
     {
         Assert.False(await Trigger(new CapturingHandler(HttpStatusCode.OK, throws: true)).StartAsync(default));
     }
+
+    // ── by-name overload (reconcile path): same {} + application/json body, a DIFFERENT target job ──
+    [Fact]
+    public async Task Start_by_name_targets_the_named_job_with_the_same_415_fixed_body()
+    {
+        var h = new CapturingHandler(HttpStatusCode.OK);
+        var ok = await Trigger(h).StartAsync("synthwatch-reconcile-job", default);
+
+        Assert.True(ok);
+        // ★ targets the RECONCILE job (not the runner job) — and the 415 fix is shared, not re-implemented.
+        Assert.Contains("Microsoft.App/jobs/synthwatch-reconcile-job/start", h.Request!.RequestUri!.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("synthwatch-runner-job", h.Request.RequestUri!.ToString(), StringComparison.Ordinal);
+        Assert.Equal("application/json", h.ContentType);
+        Assert.Equal("{}", h.Body);
+    }
+
+    [Fact]
+    public async Task The_parameterless_start_still_targets_the_runner_job_unchanged()
+    {
+        var h = new CapturingHandler(HttpStatusCode.OK);
+        await Trigger(h).StartAsync(default); // the "Run now" / test-send path
+
+        Assert.Contains("Microsoft.App/jobs/synthwatch-runner-job/start", h.Request!.RequestUri!.ToString(), StringComparison.Ordinal);
+    }
 }

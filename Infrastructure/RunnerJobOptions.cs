@@ -12,19 +12,23 @@ public class RunnerJobOptions
     public string ResourceGroup { get; set; } = "synthwatch-rg";
     public string JobName { get; set; } = "synthwatch-runner-job";
 
+    /// <summary>The monitors-as-code reconcile ACA job, started on-demand by POST /api/reconcile/trigger.
+    /// Config-sourced (RunnerJob__ReconcileJobName) like <see cref="JobName"/>, not a literal in the handler.</summary>
+    public string ReconcileJobName { get; set; } = "synthwatch-reconcile-job";
+
     /// <summary>ARM api-version for the Microsoft.App/jobs start action.</summary>
     public string ApiVersion { get; set; } = "2024-03-01";
 
     /// <summary>ARM management endpoint (token scope is "{endpoint}/.default").</summary>
     public string ManagementEndpoint { get; set; } = "https://management.azure.com";
 
-    /// <summary>
-    /// POST URL for the job-start action (EMPTY body): no env override, so the job's secretRefs are
-    /// preserved — it picks up the pending test_send_requests row itself.
-    /// </summary>
-    public string StartUrl =>
+    /// <summary>POST URL for the job-start action of a named job (EMPTY body preserves the job's secretRefs).</summary>
+    public string StartUrlFor(string jobName) =>
         $"{ManagementEndpoint.TrimEnd('/')}/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroup}" +
-        $"/providers/Microsoft.App/jobs/{JobName}/start?api-version={ApiVersion}";
+        $"/providers/Microsoft.App/jobs/{jobName}/start?api-version={ApiVersion}";
+
+    /// <summary>POST URL for the default runner job's start action (the "Run now" / test-send path).</summary>
+    public string StartUrl => StartUrlFor(JobName);
 
     /// <summary>OAuth scope for the ARM bearer token.</summary>
     public string TokenScope => $"{ManagementEndpoint.TrimEnd('/')}/.default";

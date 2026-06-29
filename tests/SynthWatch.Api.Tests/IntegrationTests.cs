@@ -460,7 +460,8 @@ public class IntegrationTests
     {
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        var fn = new ReconcileFunctions(db);
+        var fn = new ReconcileFunctions(db, new FakeRunnerJobTrigger(),
+            Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
 
         // Empty table → in sync: items empty, detectedAt null (the dashboard shows "in sync with Git").
         var empty = Assert.IsType<ReconcileDriftDto>(Assert.IsType<OkObjectResult>(
@@ -1638,11 +1639,42 @@ public class IntegrationTests
     private sealed class FakeRunnerJobTrigger : IRunnerJobTrigger
     {
         public int StartCount;
-        public Task<bool> StartAsync(CancellationToken ct)
+        public string? LastJobName;
+        public bool Result = true;
+        public Task<bool> StartAsync(CancellationToken ct) => StartAsync("synthwatch-runner-job", ct);
+        public Task<bool> StartAsync(string jobName, CancellationToken ct)
         {
             StartCount++;
-            return Task.FromResult(true);
+            LastJobName = jobName;
+            return Task.FromResult(Result);
         }
+    }
+
+    // ── POST /reconcile/trigger — starts the RECONCILE job (no DB touched on this path) ──
+    private static ReconcileFunctions ReconcileFn(FakeRunnerJobTrigger trigger)
+    {
+        var opts = new DbContextOptionsBuilder<SynthWatch.Api.Data.SynthWatchDbContext>().UseNpgsql("Host=localhost;Database=none").Options;
+        return new ReconcileFunctions(new SynthWatch.Api.Data.SynthWatchDbContext(opts), trigger,
+            Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
+    }
+
+    [Fact]
+    public async Task Reconcile_trigger_starts_the_reconcile_job_and_202s()
+    {
+        var trigger = new FakeRunnerJobTrigger();
+        var result = await ReconcileFn(trigger).TriggerReconcile(Request(), default);
+
+        var dto = Assert.IsType<ReconcileTriggeredDto>(Assert.IsType<ObjectResult>(result).Value);
+        Assert.True(dto.Triggered);
+        Assert.Equal("synthwatch-reconcile-job", trigger.LastJobName); // ★ the reconcile job, NOT the runner job
+        Assert.Equal(1, trigger.StartCount);
+    }
+
+    [Fact]
+    public async Task Reconcile_trigger_returns_503_on_a_failed_start_not_a_500()
+    {
+        var result = await ReconcileFn(new FakeRunnerJobTrigger { Result = false }).TriggerReconcile(Request(), default);
+        Assert.Equal(503, Assert.IsType<ObjectResult>(result).StatusCode); // clean non-2xx (trigger logged the reason), not an unhandled 500
     }
 
     // ─── Phase 12 slice 2 — the gate (principal resolution, audit write, fail-closed) ───────────────

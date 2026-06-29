@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Dtos;
 using SynthWatch.Api.Infrastructure;
@@ -18,8 +19,34 @@ namespace SynthWatch.Api.Functions;
 public class ReconcileFunctions
 {
     private readonly SynthWatchDbContext _db;
+    private readonly IRunnerJobTrigger _trigger;
+    private readonly RunnerJobOptions _jobOptions;
 
-    public ReconcileFunctions(SynthWatchDbContext db) => _db = db;
+    public ReconcileFunctions(SynthWatchDbContext db, IRunnerJobTrigger trigger, IOptions<RunnerJobOptions> jobOptions)
+    {
+        _db = db;
+        _trigger = trigger;
+        _jobOptions = jobOptions.Value;
+    }
+
+    /// <summary>
+    /// POST /api/reconcile/trigger — ARM-start the reconcile ACA job NOW (don't wait for its hourly cron),
+    /// reusing the #101-fixed job-start ({} body + application/json). Reconcile is start-and-run (no claim
+    /// loop), so there is NO request table — just the bare immediate start. A POST (write verb), so the
+    /// Phase 12 AuthorizationMiddleware requires editor/admin — correct for a manual, compute-spending action.
+    /// Non-fatal: a failed start is LOGGED inside the trigger (ARM status/error) and surfaces as a clean 503,
+    /// never an unhandled 500. 202 on success (fire-and-forget — the job runs async).
+    /// </summary>
+    [Function("TriggerReconcile")]
+    public async Task<IActionResult> TriggerReconcile(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "reconcile/trigger")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var started = await _trigger.StartAsync(_jobOptions.ReconcileJobName, ct);
+        if (!started)
+            return ApiResults.ServiceUnavailable("Couldn't start the reconcile job — please try again.");
+        return ApiResults.Accepted(new ReconcileTriggeredDto(true));
+    }
 
     /// <summary>
     /// GET /api/reconcile/drift — the latest reconcile snapshot (the full current drift set). Empty items
