@@ -1,0 +1,86 @@
+{
+  "$comment": [
+    "SINGLE SOURCE OF TRUTH for the privileges the synthwatch-api managed identity (MI) requires.",
+    "Motivated by four separate missing-grant root-causes (dismiss-500, on-demand reconcile, spec_cache,",
+    "AOAI/email). The grants split across TWO planes:",
+    "  • azureRbac  — Azure control/data-plane role assignments. ENFORCED in CI: scripts/check-grant-coverage.mjs",
+    "                 asserts this set EXACTLY matches the role assignments in infra/main.bicep (fail-closed).",
+    "  • postgres   — table grants on the MI's Postgres role. Granted by RUNNER-owned migrations (separate repo),",
+    "                 so they're DOCUMENTED here (the single place that lists everything) but NOT CI-enforced from",
+    "                 this repo — asserting them needs the live DB / the runner's migrations.",
+    "To add an endpoint that needs a new Azure role: add it to azureRbac AND grant it in main.bicep — the CI",
+    "check fails until both are present (a new endpoint can't merge without its grant)."
+  ],
+  "principal": "synthwatch-api Function App system-assigned managed identity",
+  "azureRbac": [
+    {
+      "role": "Storage Blob Data Owner",
+      "roleId": "b7e6dc6d-f1e8-4753-8033-0f276bb0955b",
+      "scope": "storage",
+      "reason": "Functions host: deployment package (app-package container) + AzureWebJobs host state (shared-key disabled).",
+      "neededBy": "the Functions runtime itself"
+    },
+    {
+      "role": "Storage Queue Data Contributor",
+      "roleId": "974c5e8b-45b9-4653-ba55-5f855dd0fb88",
+      "scope": "storage",
+      "reason": "Functions host: AzureWebJobs queue state on the deployment storage account.",
+      "neededBy": "the Functions runtime itself"
+    },
+    {
+      "role": "Storage Blob Data Reader",
+      "roleId": "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1",
+      "scope": "artifactsStorage",
+      "reason": "Read runner-owned trace/screenshot blobs to stream them through the proxy endpoints.",
+      "neededBy": "ArtifactReader (trace/screenshot proxies, baseline-diff)"
+    },
+    {
+      "role": "Container Apps Jobs Operator",
+      "roleId": "b9a307c4-5aa3-4b52-ba60-2b17c136cd7b",
+      "scope": "runnerJob",
+      "reason": "Microsoft.App/jobs/start/action — start the runner job on-demand ('Run now' / test-send).",
+      "neededBy": "ArmRunnerJobTrigger (POST /checks/{id}/run, channel test)"
+    },
+    {
+      "role": "Container Apps Jobs Operator",
+      "roleId": "b9a307c4-5aa3-4b52-ba60-2b17c136cd7b",
+      "scope": "reconcileJob",
+      "reason": "Microsoft.App/jobs/start/action — start the reconcile job on-demand.",
+      "neededBy": "ArmRunnerJobTrigger (POST /reconcile/trigger)"
+    },
+    {
+      "role": "Cognitive Services OpenAI User",
+      "roleId": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd",
+      "scope": "aoaiAccount",
+      "reason": "Data-plane chat-completions on the AOAI account via DefaultAzureCredential (the RCA / why-is-this-failing path).",
+      "neededBy": "AoaiClient (AiInsightsFunctions, LocationDiffFunctions)"
+    },
+    {
+      "role": "Communication and Email Service Owner",
+      "roleId": "09976791-48a7-449e-bb21-39d1a415f350",
+      "scope": "acsResource",
+      "reason": "Send OTP sign-in / edit-access emails through ACS via DefaultAzureCredential.",
+      "neededBy": "AcsEmailSender (auth / edit-access request flows)"
+    }
+  ],
+  "postgres": [
+    {
+      "grant": "CONNECT + table SELECT/INSERT/UPDATE on the app schema",
+      "object": "synthwatch DB (the MI is an AAD Postgres role; ossrdbms-aad token)",
+      "reason": "All DB-backed endpoints. The MI authenticates with an AAD token, not a password.",
+      "providedBy": "runner migrations (schema + GRANTs); not CI-enforced from this repo"
+    },
+    {
+      "grant": "DELETE on access_requests",
+      "object": "access_requests",
+      "reason": "DELETE /api/access-requests/{email} (the dismiss-500 root cause — the MI role lacked DELETE).",
+      "providedBy": "runner migration 0044_grant_delete_access_requests.sql"
+    },
+    {
+      "grant": "SELECT on spec_cache (least-privilege)",
+      "object": "spec_cache",
+      "reason": "Spec activation / monitor-as-code reads.",
+      "providedBy": "runner migration 0041_spec_cache_least_privilege.sql"
+    }
+  ]
+}
