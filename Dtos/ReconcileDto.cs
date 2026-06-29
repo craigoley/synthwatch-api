@@ -24,3 +24,10 @@ public record ReconcileDriftItemDto(
 public record ReconcileDriftDto(
     [property: JsonPropertyName("items")] IReadOnlyList<ReconcileDriftItemDto> Items,
     [property: JsonPropertyName("detectedAt")] DateTimeOffset? DetectedAt);
+
+/// <summary>
+/// 202 body for POST /api/reconcile/trigger — the reconcile ACA job was ARM-started (fire-and-forget; the job
+/// runs async). triggered is always true here (a failed start returns a non-2xx, not this).
+/// </summary>
+public record ReconcileTriggeredDto(
+    [property: JsonPropertyName("triggered")] bool Triggered);

@@ -31,7 +31,10 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
         _logger = logger;
     }
 
-    public async Task<bool> StartAsync(CancellationToken ct)
+    /// <summary>Start the default runner job (the "Run now" / test-send path) — unchanged behaviour.</summary>
+    public Task<bool> StartAsync(CancellationToken ct) => StartAsync(_options.JobName, ct);
+
+    public async Task<bool> StartAsync(string jobName, CancellationToken ct)
     {
         try
         {
@@ -41,7 +44,7 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
             var http = _httpFactory.CreateClient();
             http.Timeout = TimeSpan.FromSeconds(15); // bounded: a slow ARM must not stall the request
 
-            using var request = new HttpRequestMessage(HttpMethod.Post, _options.StartUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Post, _options.StartUrlFor(jobName));
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
             // ★ JSON content type + an empty-object body. ARM's Microsoft.App/jobs/start REQUIRES
             // application/json — an empty text/plain body returns 415 Unsupported Media Type, so the trigger
@@ -55,18 +58,18 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
             {
                 // Log the immediate fire (Information) so an off-schedule start is OBSERVABLE in App Insights —
                 // the success path was previously silent, which is why a broken trigger looked like a working one.
-                RunnerJobLog.Started(_logger, _options.JobName, (int)response.StatusCode);
+                RunnerJobLog.Started(_logger, jobName, (int)response.StatusCode);
                 return true;
             }
 
             var detail = await response.Content.ReadAsStringAsync(ct);
-            RunnerJobLog.StartNonSuccess(_logger, (int)response.StatusCode, _options.JobName, detail);
+            RunnerJobLog.StartNonSuccess(_logger, (int)response.StatusCode, jobName, detail);
             return false;
         }
         catch (Exception ex)
         {
             // Never throw ARM failures into the request — the pending row is a cron-tick fallback.
-            RunnerJobLog.StartFailed(_logger, _options.JobName, ex);
+            RunnerJobLog.StartFailed(_logger, jobName, ex);
             return false;
         }
     }
