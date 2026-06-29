@@ -59,3 +59,27 @@ jobs:
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: "/language:${{ matrix.language }}"
+          # Don't upload yet — first FILTER generated-code results (next step). For COMPILED languages
+          # (C#), config `paths-ignore` does NOT drop generated files: the manual build compiles
+          # obj/.../*.g.cs (Azure Functions Worker SDK + regex source generator), so CodeQL extracts +
+          # flags them regardless. Filtering the SARIF by result location is what actually works here.
+          output: sarif-results
+          upload: false
+
+      - name: Filter generated-code results out of the SARIF
+        uses: advanced-security/filter-sarif@2da736ff05ef065cb2894ac6892e47b5eac2c3c0 # v1.1
+        with:
+          # Exclusion-only (leading '-') → KEEP all results except those in generated output. Scoped
+          # TIGHTLY to obj/ build output + any *.g.cs; hand-written source (Functions/, Infrastructure/,
+          # Data/, Dtos/) has neither, so real findings still surface.
+          patterns: |
+            -**/obj/**
+            -**/*.g.cs
+          input: sarif-results/${{ matrix.language }}.sarif
+          output: sarif-results/${{ matrix.language }}.sarif
+
+      - name: Upload filtered SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          sarif_file: sarif-results/${{ matrix.language }}.sarif
+          category: "/language:${{ matrix.language }}"

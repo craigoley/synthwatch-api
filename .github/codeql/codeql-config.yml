@@ -4,10 +4,14 @@ name: "SynthWatch API CodeQL config"
 queries:
   - uses: security-and-quality
 
-# Exclude build output and source-generator output from analysis. The Azure Functions Worker SDK
-# emits GeneratedFunctionExecutor.g.cs under obj/ at build time; CodeQL was flagging
-# cs/dereferenced-value-may-be-null in that GENERATED code (not ours, regenerated every build, not
-# editable). Our hand-written code (Functions/, Data/, Dtos/, Infrastructure/) is still analyzed.
+# Exclude build output / source-generator output. ★ paths-ignore does NOT work for COMPILED languages
+# (C#): the manual build compiles obj/.../*.g.cs (Functions Worker SDK + regex source generator), so the
+# CodeQL extractor sees them regardless of these globs — they kept surfacing (cs/dereferenced-value-may-
+# be-null in GeneratedFunctionExecutor.g.cs; cs/useless-assignment + cs/useless-cast in RegexGenerator.g.cs).
+# The ACTUAL fix lives in the workflow: a post-analysis advanced-security/filter-sarif step drops generated-
+# file RESULTS (by location) before upload. These globs are kept as belt-and-suspenders (they DO apply to
+# interpreted languages, e.g. the 'actions' analysis). Hand-written code (Functions/, Data/, Dtos/,
+# Infrastructure/) is always analyzed.
 paths-ignore:
   - '**/obj/**'
   - '**/bin/**'
