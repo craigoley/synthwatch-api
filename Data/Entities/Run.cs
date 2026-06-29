@@ -41,6 +41,12 @@ public class Run
     // SSL checks: measured cert days-remaining at run time. Nullable (null for non-ssl runs).
     public int? CertDaysRemaining { get; set; }
 
+    // Attempts taken to reach this run's verdict (runner migration 0048; runs.retry_count). 1 = first try;
+    // >1 = settled after fast-retry; = retries+1 when retries were exhausted. NULL for pre-telemetry runs.
+    // status=pass AND retry_count>1 is the "degrading-but-green" signal (passes only on retry) the dashboard
+    // surfaces. Additive/nullable — older runs simply have no value.
+    public int? RetryCount { get; set; }
+
     // Multi-location: the region this run executed from (runner multi-location migration). text with
     // DEFAULT 'default' but NULLABLE in the live schema — an explicit NULL is allowed, so the CLR
     // property must be nullable or EF throws InvalidCastException materializing a null row. Every

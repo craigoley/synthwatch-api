@@ -24,7 +24,10 @@ public record RunDto(
     // Multi-location: the region this run executed from. "default" for single-location/legacy runs
     // (never null). The dashboard aggregates per-location verdicts ("up from eastus2, down from
     // westus"); the API serves the raw per-run value.
-    string Location)
+    string Location,
+    // Attempts to reach the verdict (runner 0048). null for pre-telemetry runs; 1 = clean first try;
+    // >1 = settled on retry. pass + retryCount>1 = degrading-but-green. Additive (appended last).
+    int? RetryCount)
 {
     public static RunDto From(Run r) => new(
         r.Id, r.CheckId, r.Status, r.StartedAt, r.FinishedAt, r.DurationMs,
@@ -32,7 +35,8 @@ public record RunDto(
         ScreenshotUrl: string.IsNullOrEmpty(r.ScreenshotUrl) ? null : $"/api/runs/{r.Id}/screenshot",
         CertDaysRemaining: r.CertDaysRemaining,
         TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace",
-        Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location);
+        Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location,
+        RetryCount: r.RetryCount);
 }
 
 public record RunStepDto(
