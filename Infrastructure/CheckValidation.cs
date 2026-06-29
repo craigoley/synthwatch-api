@@ -422,4 +422,15 @@ public static class CheckValidation
     private static bool IsHttpUrl(string value) =>
         Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
         (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+
+    /// <summary>
+    /// B10 ENABLE GATE — the API mirror of the runner's GitOps gate. Returns true when a check is
+    /// <c>sensitive</c> but declares NO <c>redact_patterns</c>: such a check MUST NOT be enabled (get a
+    /// check_locations cursor), because its trace could leak session tokens / cart contents / account PII
+    /// unredacted. ★ Keep EXACTLY in sync with runner reconcile.ts validateManifest (synthwatch #137):
+    ///   e.sensitive === true &amp;&amp; (!Array.isArray(e.redact_patterns) || e.redact_patterns.length === 0)
+    /// — same input → same verdict, so a check valid via the API is valid via reconcile and vice versa.
+    /// </summary>
+    public static bool SensitiveNeedsRedaction(bool sensitive, IReadOnlyList<string>? redactPatterns) =>
+        sensitive && (redactPatterns is null || redactPatterns.Count == 0);
 }

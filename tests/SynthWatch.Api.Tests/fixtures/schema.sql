@@ -121,6 +121,8 @@ CREATE TABLE public.checks (
     spec_path text,
     success_trace_url text,
     success_trace_at timestamptz,
+    sensitive boolean NOT NULL DEFAULT false,
+    redact_patterns jsonb,
     CONSTRAINT browser_needs_flow CHECK (((kind <> 'browser'::text) OR (flow_name IS NOT NULL))),
     CONSTRAINT checks_failure_threshold_check CHECK ((failure_threshold > 0)),
     CONSTRAINT checks_interval_seconds_check CHECK ((interval_seconds > 0)),

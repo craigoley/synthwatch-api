@@ -203,6 +203,13 @@ public class ChecksFunctions
         if (!CheckValidation.TryBuildNew(body, out var check, out var errors))
             return ApiResults.ValidationError(errors);
 
+        // ★ B10 defense-in-depth: the create DTO does NOT expose `sensitive` (it's Git-authoritative via
+        // reconcile), so a created check is always sensitive=false → this never fires today. But it ENSURES
+        // the create path can never seed an unwired sensitive check: if a future DTO field lets the API set
+        // sensitive=true with no redact_patterns, it's rejected here — same gate as PUT /locations + reconcile.
+        if (CheckValidation.SensitiveNeedsRedaction(check.Sensitive, check.RedactPatterns))
+            return ApiResults.BadRequest("Cannot create a sensitive check without redaction (B10): declare redact_patterns.");
+
         _db.Checks.Add(check);
 
         // Seed per-location cadence cursors in the SAME transaction as the check insert, so a check is
