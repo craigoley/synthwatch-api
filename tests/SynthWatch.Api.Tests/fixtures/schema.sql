@@ -316,6 +316,7 @@ CREATE TABLE public.runs (
     trace_url text,
     trace_signals jsonb,
     location text DEFAULT 'default'::text,
+    retry_count integer,
     CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text, 'error'::text, 'running'::text])))
 );
 
