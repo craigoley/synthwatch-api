@@ -45,9 +45,8 @@ public static class AuditWriter
 
     private static string? FirstNumericSegment(string route)
     {
-        foreach (var p in route.Split('/', StringSplitOptions.RemoveEmptyEntries))
-            if (long.TryParse(p, out _))
-                return p;
+        foreach (var p in route.Split('/', StringSplitOptions.RemoveEmptyEntries).Where(p => long.TryParse(p, out _)))
+            return p;
         return null;
     }
 }

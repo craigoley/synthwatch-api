@@ -209,9 +209,8 @@ public static partial class TraceExtractor
     {
         if (resp.ValueKind != JsonValueKind.Object || !resp.TryGetProperty("headers", out var hs) ||
             hs.ValueKind != JsonValueKind.Array) return "";
-        foreach (var h in hs.EnumerateArray())
-            if (Str(h, "name").Equals(name, StringComparison.OrdinalIgnoreCase))
-                return Str(h, "value");
+        foreach (var h in hs.EnumerateArray().Where(h => Str(h, "name").Equals(name, StringComparison.OrdinalIgnoreCase)))
+            return Str(h, "value");
         return "";
     }
 }
