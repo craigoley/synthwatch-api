@@ -369,7 +369,18 @@ public class ChecksFunctions
             ? new CursorPosition(rows[^1].StartedAt, rows[^1].Id).Encode()
             : null;
 
-        return ApiResults.Ok(new CursorPage<RunDto>(runs, nextCursor, range.PageSize));
+        // In-band freshness signal: the most-recent run id for this check, UNWINDOWED (ignores from/to/cursor),
+        // so a client can tell a windowed/stale page from current data (LatestRunId > Items[0].Id ⇒ newer rows
+        // exist outside this window — the frozen-`to` confusion, #131). One cheap LIMIT-1 query, index-served by
+        // runs_check_started_idx (check_id, started_at DESC) — the same (started_at DESC, id DESC) ordering the
+        // list uses, so the client compares like for like. null ⇒ the check has no runs.
+        var latestRunId = await _db.Runs.AsNoTracking()
+            .Where(r => r.CheckId == id)
+            .OrderByDescending(r => r.StartedAt).ThenByDescending(r => r.Id)
+            .Select(r => (long?)r.Id)
+            .FirstOrDefaultAsync(ct);
+
+        return ApiResults.Ok(new RunsPage(runs, nextCursor, range.PageSize, latestRunId));
     }
 
     /// <summary>GET /api/checks/{id}/metrics — run_metrics time series for this check.</summary>
