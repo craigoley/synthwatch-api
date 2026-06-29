@@ -278,14 +278,10 @@ public static class CheckValidation
         {
             errors[$"{prefix}auth.type"] = $"Must be one of: {string.Join(", ", AuthTypes)}.";
         }
-        foreach (var key in auth.Keys)
+        if (auth.Keys.Any(key => !AuthNonSecretKeys.Contains(key) && !key.EndsWith("_env", StringComparison.Ordinal)))
         {
-            if (!AuthNonSecretKeys.Contains(key) && !key.EndsWith("_env", StringComparison.Ordinal))
-            {
-                errors[$"{prefix}auth"] = "Inline credential values are not allowed; reference a secret by " +
-                                 "env-var name (a key ending in '_env', e.g. token_env).";
-                break;
-            }
+            errors[$"{prefix}auth"] = "Inline credential values are not allowed; reference a secret by " +
+                             "env-var name (a key ending in '_env', e.g. token_env).";
         }
     }
 

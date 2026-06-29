@@ -52,9 +52,8 @@ public static class AlertingValidation
         {
             if (value is null) continue;
             var lower = value.ToLowerInvariant();
-            foreach (var marker in SecretMarkers)
-                if (lower.Contains(marker, StringComparison.Ordinal))
-                    return marker;
+            foreach (var marker in SecretMarkers.Where(marker => lower.Contains(marker, StringComparison.Ordinal)))
+                return marker;
         }
         return null;
     }
