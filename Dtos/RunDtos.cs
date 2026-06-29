@@ -221,3 +221,14 @@ public record PagedResult<T>(IReadOnlyList<T> Items, int Page, int PageSize, lon
 /// unbounded append-only table is exactly the all-rows scan cursor pagination exists to avoid.
 /// </summary>
 public record CursorPage<T>(IReadOnlyList<T> Items, string? NextCursor, int PageSize);
+
+/// <summary>
+/// The runs-list response: the cursor envelope PLUS an in-band freshness signal. <c>LatestRunId</c> is the id of
+/// the most-recent run for this check IGNORING the page's date-range/cursor window, so a client can distinguish a
+/// windowed/stale page (<c>LatestRunId &gt; Items[0].Id</c> ⇒ newer runs exist outside this window) from
+/// genuinely-current data (<c>LatestRunId == Items[0].Id</c>). Resolves the frozen-<c>to</c>-class confusion
+/// (#131) in-band — the funnel can prove "nothing newer" vs "the window excluded newer rows" from one response.
+/// <c>null</c> ⇒ the check has no runs at all. <c>Items</c>/<c>NextCursor</c>/<c>PageSize</c> are byte-for-byte the
+/// prior <see cref="CursorPage{T}"/> shape — <c>LatestRunId</c> is purely additive.
+/// </summary>
+public record RunsPage(IReadOnlyList<RunDto> Items, string? NextCursor, int PageSize, long? LatestRunId);

@@ -730,8 +730,8 @@ public class IntegrationTests
         try
         {
             var fn = new ChecksFunctions(db);
-            static CursorPage<RunDto> Page(IActionResult r) =>
-                Assert.IsType<CursorPage<RunDto>>(Assert.IsType<OkObjectResult>(r).Value!);
+            static RunsPage Page(IActionResult r) =>
+                Assert.IsType<RunsPage>(Assert.IsType<OkObjectResult>(r).Value!);
 
             // Runner-truth ordering inside the default 7d window: DESC started_at, then DESC id.
             var expectedRecent = await db.Runs.AsNoTracking()
@@ -744,6 +744,10 @@ public class IntegrationTests
             //    scan of the 3 old runs. This is the whole point of the date-range default.
             var def = Page(await fn.ListCheckRuns(Request(), cid, default));
             Assert.Equal(expectedRecent, def.Items.Select(i => i.Id).ToList());
+            // ── FRESHNESS SIGNAL: latestRunId = the most-recent run id for the check (unwindowed). On the
+            //    default page that IS the newest item, so the client sees it's looking at current data.
+            Assert.Equal(expectedRecent[0], def.LatestRunId);
+            Assert.Equal(def.Items[0].Id, def.LatestRunId);
 
             // ── CURSOR WALK: page size 2 walks the window, each row exactly once, no skips/dupes,
             //    next-cursor null when exhausted.
@@ -768,6 +772,11 @@ public class IntegrationTests
             Assert.Equal(3, old.Items.Count);
             Assert.All(old.Items, i => Assert.True(i.StartedAt < DateTimeOffset.UtcNow.AddDays(-8)));
             Assert.Null(old.NextCursor);
+            // ★ THE FROZEN-`to` CASE, made provable in-band: this WINDOWED page shows only the 3 old runs, but
+            //    latestRunId is the TRUE most-recent run (outside the window) — so a client can prove newer data
+            //    exists (latestRunId > the windowed page's newest id) rather than guessing "nothing newer".
+            Assert.Equal(expectedRecent[0], old.LatestRunId);
+            Assert.True(old.LatestRunId > old.Items[0].Id);
 
             // ── MALFORMED INPUT is 400 — not a 500, and not a silent fall-through to an all-time scan.
             Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
