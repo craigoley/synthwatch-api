@@ -79,7 +79,7 @@ public static class LocationDiffInsight
                 LikelyCause: NormCause(Str(root, "likelyCause")),
                 Confidence: Norm(Str(root, "confidence"), "low", "high", "medium", "low"),
                 IsFlaky: root.TryGetProperty("isFlaky", out var f) && f.ValueKind is JsonValueKind.True or JsonValueKind.False
-                    ? f.GetBoolean() : false,
+                    && f.GetBoolean(),
                 Findings: Findings(root),
                 Caveats: Strings(root, "caveats"));
         }
