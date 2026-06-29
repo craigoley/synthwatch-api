@@ -44,7 +44,11 @@ public class LocationDiffFunctions
             .Select(r => new
             {
                 r.Status, r.Location, r.TraceUrl, r.TraceSignals,
+                // ★ The FAILED ASSERTION — the RCA's primary signal, previously never fed to the model.
+                r.ErrorMessage, r.FailedStep,
                 Target = r.Check!.TargetUrl, BaselineUrl = r.Check!.SuccessTraceUrl, BaselineAt = r.Check!.SuccessTraceAt,
+                // B10: redact the new assertion/URL context for sensitive monitors before it reaches the model.
+                Sensitive = r.Check!.Sensitive, RedactPatterns = r.Check!.RedactPatterns,
             })
             .FirstOrDefaultAsync(ct);
 
@@ -53,8 +57,11 @@ public class LocationDiffFunctions
         var targetHost = !string.IsNullOrEmpty(row.Target) && Uri.TryCreate(row.Target, UriKind.Absolute, out var tu)
             ? tu.Host : null;
 
-        // The failing run's signals: prefer the persisted JSON (#114), else extract on-demand from its trace.
-        var failing = await ResolveSignalsAsync(row.TraceSignals, row.TraceUrl, targetHost, runId, ct);
+        // The failing run's signals. Non-sensitive: ZIP-FIRST so we capture mutations (the action under test).
+        // ★ Sensitive (B10): persisted-ONLY — the runner already redacted the persisted signals; re-extracting the
+        // RAW zip would bypass that redaction. (Sensitive monitors also skip the trace upload, so there's usually
+        // no zip anyway — but the guard makes the no-leak guarantee explicit, not incidental.)
+        var failing = await ResolveSignalsAsync(row.TraceSignals, row.TraceUrl, targetHost, runId, allowZip: !row.Sensitive, ct);
         if (failing is null)
             return ApiResults.NotFound($"No trace to analyze for run {runId}.");
 
@@ -80,8 +87,23 @@ public class LocationDiffFunctions
         if (!_aoai.IsConfigured)
             return ApiResults.Ok(LocationDiffDto.NotConfigured(fRef, bRef, diff));
 
-        var result = await _aoai.ChatJsonAsync(
-            LocationDiffInsight.SystemPrompt, LocationDiffInsight.BuildUser(failingLabel, baselineLabel, diff), ct);
+        // B10: redact the assertion text + each mutation's URL for sensitive monitors (trace_signals are already
+        // runner-scrubbed, but error_message/failed_step + zip-extracted mutation URLs are not).
+        bool sensitive = row.Sensitive;
+        var patterns = row.RedactPatterns;
+        string? failedStep = SensitiveRedaction.Redact(row.FailedStep, sensitive, patterns);
+        string? assertionError = SensitiveRedaction.Redact(row.ErrorMessage, sensitive, patterns);
+        var failingNetwork = sensitive && failing.Network.Mutations.Count > 0
+            ? failing.Network with
+            {
+                Mutations = failing.Network.Mutations
+                    .Select(m => m with { Url = SensitiveRedaction.Redact(m.Url, true, patterns)! }).ToList(),
+            }
+            : failing.Network;
+
+        var user = LocationDiffInsight.BuildUser(
+            failingLabel, baselineLabel, row.Status, failedStep, assertionError, failingNetwork, diff);
+        var result = await _aoai.ChatJsonAsync(LocationDiffInsight.SystemPrompt, user, ct);
         if (result.Outcome != AoaiOutcome.Ok)
         {
             // Reuse the ai-insights honest messages (transient vs deterministic) for the note + retryable flag.
@@ -96,10 +118,24 @@ public class LocationDiffFunctions
             : ApiResults.Ok(LocationDiffDto.Ok(fRef, bRef, diff, insight));
     }
 
-    /// <summary>Signals for a run: the persisted #114 JSON if present (cheap), else on-demand extraction from
-    /// the trace zip, else null (no trace).</summary>
-    private async Task<TraceSignalsDto?> ResolveSignalsAsync(string? persisted, string? traceUrl, string? targetHost, long id, CancellationToken ct)
+    /// <summary>
+    /// Signals for the FAILING run, ZIP-FIRST: re-extract from the trace zip so we capture MUTATIONS (the action
+    /// under test — the persisted #114 slice predates mutation capture and the runner does not persist them).
+    /// Fall back to the persisted JSON when the zip is gone (its counts still drive the baseline diff), else null.
+    /// The extra zip read is acceptable on this gated, on-demand, AOAI-spending endpoint.
+    /// </summary>
+    private async Task<TraceSignalsDto?> ResolveSignalsAsync(
+        string? persisted, string? traceUrl, string? targetHost, long id, bool allowZip, CancellationToken ct)
     {
+        if (allowZip)
+        {
+            var blob = await _artifacts.DownloadToMemoryAsync(traceUrl, "trace", id, ct);
+            if (blob.Status == ArtifactStatus.Ok)
+            {
+                using (blob.Content!) return TraceExtractor.FromZip(blob.Content!, targetHost);
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(persisted))
         {
             try
@@ -107,11 +143,8 @@ public class LocationDiffFunctions
                 var dto = JsonSerializer.Deserialize<TraceSignalsDto>(persisted, Web);
                 if (dto is not null) return dto;
             }
-            catch (JsonException) { /* malformed persisted JSON → fall through to on-demand */ }
+            catch (JsonException) { /* malformed persisted JSON → no signals */ }
         }
-
-        var blob = await _artifacts.DownloadToMemoryAsync(traceUrl, "trace", id, ct);
-        if (blob.Status != ArtifactStatus.Ok) return null;
-        using (blob.Content!) return TraceExtractor.FromZip(blob.Content!, targetHost);
+        return null;
     }
 }

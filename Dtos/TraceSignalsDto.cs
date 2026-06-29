@@ -19,15 +19,23 @@ public sealed record TraceRequestDto(
 /// <summary>A third-party origin's footprint on the page (request count + bytes on the wire).</summary>
 public sealed record ThirdPartyDto(string Host, int Count, long Kb);
 
+/// <summary>
+/// A MUTATING request (POST/PUT/PATCH/DELETE) and the status the site returned — i.e. what actually happened to
+/// "the action under test" (add-to-cart, sign-in, submit). The single most decisive RCA signal: a 2xx here means
+/// the action SUCCEEDED, so an assertion failure on top of it points at the MONITOR's verification, not the site.
+/// </summary>
+public sealed record MutationDto(string Method, string Url, int Status);
+
 public sealed record NetworkSummaryDto(
     int TotalRequests, long WireKb, int ThirdPartyCount,
     IReadOnlyList<TraceRequestDto> Failed,
     IReadOnlyList<TraceRequestDto> Slowest,
     IReadOnlyList<TraceRequestDto> Largest,
     IReadOnlyList<TraceRequestDto> Uncompressed,
-    IReadOnlyList<ThirdPartyDto> TopThirdParties)
+    IReadOnlyList<ThirdPartyDto> TopThirdParties,
+    IReadOnlyList<MutationDto> Mutations)
 {
-    public static readonly NetworkSummaryDto Empty = new(0, 0, 0, [], [], [], [], []);
+    public static readonly NetworkSummaryDto Empty = new(0, 0, 0, [], [], [], [], [], []);
 }
 
 /// <summary>A kept console message: error/warning only, extension-noise filtered, tagged site vs third-party.</summary>
