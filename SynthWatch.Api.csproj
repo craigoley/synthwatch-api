@@ -29,9 +29,9 @@
     </None>
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Azure.Communication.Email" Version="1.0.1" />
+    <PackageReference Include="Azure.Communication.Email" Version="1.1.0" />
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
-    <PackageReference Include="Azure.Storage.Blobs" Version="12.29.0" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.29.1" />
     <!-- HARD PIN to the 2.x line. The 3.x major pulls Microsoft.ApplicationInsights 3.x, whose
          type layout is incompatible with Microsoft.Azure.Functions.Worker.ApplicationInsights
          (2.x): it throws a TypeLoadException on ITelemetryInitializer that crashes the isolated
