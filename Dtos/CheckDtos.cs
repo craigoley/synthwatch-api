@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
+using SynthWatch.Api.Infrastructure;
 
 namespace SynthWatch.Api.Dtos;
 
@@ -71,7 +72,13 @@ public record CheckSummaryDto(
     // Monitors-as-code (Phase 13): the manifest id + spec path this check was activated from (null for
     // hand-made checks). specPath being non-null is what puts the runner on the Git-fetch (Option C) path.
     string? SourceKey,
-    string? SpecPath)
+    string? SpecPath,
+    // B10 redaction status (read-only visibility, June-29). sensitive/hasRedactPatterns are the DB-actual state;
+    // redactionHealth derives "ok"|"misconfigured"|"n/a" so a sensitive-but-unredacted check (or "0/N redacted")
+    // is detectable from the response instead of a manual DB query. See RedactionStatus.
+    bool Sensitive,
+    bool HasRedactPatterns,
+    string RedactionHealth)
 {
     public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m,
         IReadOnlyList<LocationStatusDto> locations, IReadOnlyList<TagDto> tags) => new(
@@ -102,7 +109,10 @@ public record CheckSummaryDto(
         Locations: locations,
         Tags: tags,
         SourceKey: c.SourceKey,
-        SpecPath: c.SpecPath);
+        SpecPath: c.SpecPath,
+        Sensitive: c.Sensitive,
+        HasRedactPatterns: RedactionStatus.HasPatterns(c.RedactPatterns),
+        RedactionHealth: RedactionStatus.Health(c.Sensitive, c.RedactPatterns));
 }
 
 /// <summary>A check's latest-run status from one location (per-location rollup for the grid).</summary>
@@ -164,7 +174,11 @@ public record CheckDetailDto(
     string? SpecPath,
     // Last-known-good success-trace baseline timestamp (migration 0039). null => no baseline yet;
     // the dashboard shows "View last success trace" (-> GET /api/checks/{id}/success-trace) iff set.
-    DateTimeOffset? SuccessTraceAt)
+    DateTimeOffset? SuccessTraceAt,
+    // B10 redaction status (read-only visibility, June-29). See CheckSummaryDto + RedactionStatus.
+    bool Sensitive,
+    bool HasRedactPatterns,
+    string RedactionHealth)
 {
     public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, IReadOnlyList<TagDto> tags, SloDto? slo = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
@@ -185,7 +199,10 @@ public record CheckDetailDto(
         Tags: tags,
         SourceKey: c.SourceKey,
         SpecPath: c.SpecPath,
-        SuccessTraceAt: c.SuccessTraceAt);
+        SuccessTraceAt: c.SuccessTraceAt,
+        Sensitive: c.Sensitive,
+        HasRedactPatterns: RedactionStatus.HasPatterns(c.RedactPatterns),
+        RedactionHealth: RedactionStatus.Health(c.Sensitive, c.RedactPatterns));
 }
 
 /// <summary>
