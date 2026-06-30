@@ -28,6 +28,17 @@ public record ReconcileApplyPlanDto(
     [property: JsonPropertyName("items")] IReadOnlyList<ReconcileApplyPlanItemDto> Items,
     [property: JsonPropertyName("computedAt")] DateTimeOffset? ComputedAt);
 
+/// <summary>Body for POST /api/reconcile/approve | /reject — identifies the plan row (Phase 1).</summary>
+public record ReconcileDecisionRequest(
+    [property: JsonPropertyName("sourceKey")] string? SourceKey,
+    [property: JsonPropertyName("driftType")] string? DriftType);
+
+/// <summary>202 body for POST /api/reconcile/apply — which approved plans were applied / left for retry.</summary>
+public record ReconcileApplyResultDto(
+    [property: JsonPropertyName("applied")] IReadOnlyList<string> Applied,
+    [property: JsonPropertyName("failed")] IReadOnlyList<string> Failed,
+    [property: JsonPropertyName("cap")] int Cap);
+
 public record ReconcileDriftItemDto(
     [property: JsonPropertyName("sourceKey")] string SourceKey,
     [property: JsonPropertyName("driftType")] string DriftType,
