@@ -32,6 +32,52 @@ public class ReportsFunctions
         _ => null,
     };
 
+    private const string Unclassified = "unclassified";
+    private const string RealOutage = "real-outage";
+
+    /// <summary>
+    /// GET /api/reports/incident-breakdown?window=7d|30d|90d — the verdict-taxonomy breakdown over the window:
+    /// count per rca.classification (real-outage | flaky-transient | selector-drift | environment-regional |
+    /// perf-regression), an explicit <c>unclassified</c> bucket (incidents with no RCA yet — never dropped),
+    /// and the ALERT-PRECISION headline = real-outage / classified. One GROUP BY over incidents.rca.
+    /// </summary>
+    [Function("GetIncidentBreakdown")]
+    public async Task<IActionResult> GetIncidentBreakdown(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/incident-breakdown")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var window = req.Query["window"].ToString();
+        if (WindowDays(window) is not int days) return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
+        var normWindow = string.IsNullOrEmpty(window) ? "30d" : window;
+
+        // GROUP BY the rca classification over incidents OPENED in the window. coalesce → an explicit
+        // "unclassified" bucket so incidents with no RCA classification are counted, never silently dropped.
+        var rows = await _db.IncidentBreakdown.FromSql(
+            $@"SELECT coalesce(rca->>'classification', {Unclassified}) AS classification, count(*)::bigint AS count
+               FROM incidents
+               WHERE opened_at >= now() - ({days} * INTERVAL '1 day')
+               GROUP BY 1").AsNoTracking().ToListAsync(ct);
+
+        var total = rows.Sum(r => r.Count);
+        var unclassified = rows.Where(r => r.Classification == Unclassified).Sum(r => r.Count);
+        var classified = total - unclassified;
+        var realOutages = rows.Where(r => r.Classification == RealOutage).Sum(r => r.Count);
+        // ALERT PRECISION = genuine real-outages / CLASSIFIED reds (not /total — unclassified can't be judged).
+        // null when nothing is classified yet — an honest empty, not a misleading 0%.
+        decimal? precision = classified > 0 ? Math.Round((decimal)realOutages / classified, 4) : null;
+
+        var buckets = rows
+            .Select(r => new IncidentBreakdownBucketDto(
+                r.Classification ?? Unclassified, r.Count,
+                total > 0 ? Math.Round((decimal)r.Count / total, 4) : 0m))
+            // count desc, but the unclassified "unknown" bucket always last.
+            .OrderBy(b => b.Classification == Unclassified).ThenByDescending(b => b.Count)
+            .ToList();
+
+        return ApiResults.Ok(new IncidentBreakdownDto(
+            normWindow, total, classified, unclassified, realOutages, precision, buckets));
+    }
+
     /// <summary>GET /api/reports/availability?window=7d|30d|90d&amp;groupBy=&lt;tagKey&gt; — availability by group (from the rollup).</summary>
     [Function("GetAvailabilityReport")]
     public async Task<IActionResult> GetAvailabilityReport(

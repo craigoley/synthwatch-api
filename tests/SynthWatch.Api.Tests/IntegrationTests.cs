@@ -2558,4 +2558,75 @@ public class IntegrationTests
             Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
         }
     }
+
+    // ── Reports P6: the verdict-taxonomy breakdown + ALERT PRECISION, with the response SHAPE pinned ──
+    [SkippableFact]
+    public async Task Incident_breakdown_reports_precision_taxonomy_and_unclassified_with_a_pinned_shape()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // A dedicated check + 4 incidents opened now: 2 real-outage, 1 selector-drift, 1 UNCLASSIFIED (no rca).
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('p6-brk','http','https://p6.example') RETURNING id INTO cid;
+              INSERT INTO incidents (check_id,status,severity,opened_at,rca) VALUES
+                (cid,'resolved','critical',now(), jsonb_build_object('classification','real-outage')),
+                (cid,'resolved','critical',now(), jsonb_build_object('classification','real-outage')),
+                (cid,'resolved','warning', now(), jsonb_build_object('classification','selector-drift')),
+                (cid,'open',    'critical',now(), NULL);
+            END $$;
+            """);
+        try
+        {
+            var fn = new ReportsFunctions(db);
+            var dto = Assert.IsType<IncidentBreakdownDto>(
+                Assert.IsType<OkObjectResult>(await fn.GetIncidentBreakdown(Request("?window=7d"), default)).Value!);
+
+            // The breakdown (this check's 4 incidents are a subset of the window — assert via the buckets we seeded).
+            long BucketOf(string c) => dto.Buckets.Where(b => b.Classification == c).Sum(b => b.Count);
+            Assert.True(BucketOf("real-outage") >= 2);
+            Assert.True(BucketOf("selector-drift") >= 1);
+            Assert.True(dto.Unclassified >= 1);                         // the null-rca incident is its own bucket, never dropped
+            Assert.Contains(dto.Buckets, b => b.Classification == "unclassified");
+            Assert.True(dto.RealOutages >= 2 && dto.Classified >= 3);
+            Assert.NotNull(dto.Precision);                              // classified > 0 → a real number, not null
+            Assert.InRange(dto.Precision!.Value, 0m, 1m);
+            Assert.Equal(dto.Total, dto.Classified + dto.Unclassified); // accounting closes
+
+            // ★ PIN THE WIRE SHAPE (the #123 discipline): exact top-level + bucket key sets.
+            var root = JsonDocument.Parse(JsonSerializer.Serialize((object)dto,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))).RootElement;
+            Assert.Equal(
+                new[] { "buckets", "classified", "precision", "realOutages", "total", "unclassified", "window" },
+                root.EnumerateObject().Select(p => p.Name).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+            Assert.Equal(
+                new[] { "classification", "count", "pctOfTotal" },
+                root.GetProperty("buckets")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+            Assert.Equal("7d", root.GetProperty("window").GetString());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'p6-brk';"); // cascades incidents
+        }
+    }
+
+    [SkippableFact]
+    public async Task Incident_breakdown_honest_accounting_invariants_and_bad_window()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new ReportsFunctions(db);
+        var dto = Assert.IsType<IncidentBreakdownDto>(
+            Assert.IsType<OkObjectResult>(await fn.GetIncidentBreakdown(Request("?window=90d"), default)).Value!);
+
+        // Invariants that hold for ANY data (so they're deterministic in the shared DB):
+        Assert.Equal(dto.Total, dto.Classified + dto.Unclassified);     // nothing dropped
+        Assert.Equal(dto.Total, dto.Buckets.Sum(b => b.Count));         // buckets account for every incident
+        Assert.Equal(dto.Classified == 0, dto.Precision is null);       // ★ honest empty: null IFF nothing classified — never a fake 0%
+        Assert.All(dto.Buckets, b => Assert.InRange(b.PctOfTotal, 0m, 1m));
+
+        // A bad window is a 400, not a silent default scan.
+        Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+            await fn.GetIncidentBreakdown(Request("?window=bogus"), default)).StatusCode);
+    }
 }
