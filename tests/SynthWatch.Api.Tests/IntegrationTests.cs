@@ -1249,6 +1249,42 @@ public class IntegrationTests
         }
     }
 
+    // ★ The non-browser ssl/cert create path (the 3 cert monitors' shape) against the REAL schema + constraints:
+    // an ssl check creates WITHOUT spec_path/flow_name and does NOT trip browser_needs_flow or the spec_path gate
+    // (those are browser-only). Matches the known-good id-10 (Wegmans cert) shape.
+    [SkippableFact]
+    public async Task Ssl_cert_monitor_creates_matching_id10_shape_without_browser_or_spec_gates()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        try
+        {
+            // The Meals2Go cert monitor: kind=ssl, https URL, warn=30 — no spec_path/flow_name, sensitive default false.
+            var res = await new ChecksFunctions(db).CreateCheck(
+                JsonRequest(new { name = "Meals2Go cert", kind = "ssl", targetUrl = "https://www.meals2go.com", certExpiryWarnDays = 30 }),
+                default);
+            Assert.Equal(201, Assert.IsType<ObjectResult>(res).StatusCode); // created — the constraints did NOT reject it
+
+            var c = await db.Checks.AsNoTracking().Where(x => x.Name == "Meals2Go cert").FirstAsync();
+            Assert.Equal("ssl", c.Kind);
+            Assert.Equal("https://www.meals2go.com", c.TargetUrl);
+            Assert.Null(c.SpecPath);                 // ★ NOT a Git-spec check — no spec_path (id-10 shape)
+            Assert.Null(c.FlowName);                 // ★ browser_needs_flow not tripped (ssl needs no flow_name)
+            Assert.False(c.Sensitive);               // cert handshake reads only the public cert — no auth/PII
+            Assert.Equal(30, c.CertExpiryWarnDays);  // the warn window (meals2go ~19d → WARN on first run)
+            Assert.True(c.Enabled);                  // create defaults enabled=true, like id 10
+
+            // ★ A bare ssl host (not an https URL) is REJECTED by the same validator (validate-don't-trust holds).
+            var bad = await new ChecksFunctions(db).CreateCheck(
+                JsonRequest(new { name = "bad-ssl", kind = "ssl", targetUrl = "www.meals2go.com" }), default);
+            Assert.Equal(400, StatusOf(bad));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name IN ('Meals2Go cert','bad-ssl');");
+        }
+    }
+
     [SkippableFact]
     public async Task Run_without_a_trace_returns_404()
     {
