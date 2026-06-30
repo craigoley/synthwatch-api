@@ -840,6 +840,25 @@ CREATE TABLE public.reconcile_drift (
     CONSTRAINT reconcile_drift_pkey PRIMARY KEY (source_key, drift_type)
 );
 
+-- Reconcile-apply plans (runner migration 0052, Phase 1): the per-drift execution plan + its approval state.
+-- The API serves/approves/applies these. Mirrors \d reconcile_apply_plan on the live DB.
+CREATE TABLE public.reconcile_apply_plan (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source_key  text NOT NULL,
+    drift_type  text NOT NULL
+                CONSTRAINT reconcile_apply_plan_drift_type_check
+                CHECK (drift_type = ANY (ARRAY['new'::text, 'changed'::text, 'missing'::text, 'orphan'::text, 'redaction_mismatch'::text])),
+    status      text NOT NULL DEFAULT 'pending'
+                CONSTRAINT reconcile_apply_plan_status_check
+                CHECK (status = ANY (ARRAY['pending'::text, 'auto'::text, 'blocked'::text, 'noop'::text, 'approved'::text, 'rejected'::text, 'applied'::text])),
+    plan        jsonb NOT NULL DEFAULT '{}'::jsonb,
+    computed_at timestamp with time zone NOT NULL DEFAULT now(),
+    decided_at  timestamp with time zone,
+    decided_by  text,
+    applied_at  timestamp with time zone,
+    CONSTRAINT reconcile_apply_plan_source_key_drift_type_key UNIQUE (source_key, drift_type)
+);
+
 --
 -- Manifest-snapshot inventory (runner migration 0036, Phase 13): spec_catalog. The reconcile job
 -- snapshots every manifest spec here (full reload each run) + its runnability probe result, so the API

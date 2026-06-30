@@ -2629,4 +2629,70 @@ public class IntegrationTests
         Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
             await fn.GetIncidentBreakdown(Request("?window=bogus"), default)).StatusCode);
     }
+
+    // Reconcile-apply Phase 1: the APPROVE endpoint, against the real schema (the test #127 was missing).
+    [SkippableFact]
+    public async Task Approve_pending_plan_transitions_to_approved_and_writes_decision()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-approve','new','pending', jsonb_build_object('summary','x'))");
+        try
+        {
+            var fn = new ReconcileFunctions(db, new FakeRunnerJobTrigger(),
+                Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
+            // JsonRequest → a bare HttpContext with NO principal in Items: the live who=null path #127 never ran.
+            var res = await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-approve", driftType = "new" }), default);
+            Assert.IsType<OkObjectResult>(res);
+            var status = (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-approve'");
+            Assert.Equal("approved", status);
+            Assert.Equal(true, (bool?)await ScalarRaw(db, "SELECT decided_at IS NOT NULL FROM reconcile_apply_plan WHERE source_key='t-approve'"));
+            // who=null here (JsonRequest has no principal in Items) → decided_by is null, which is allowed (nullable).
+            Assert.Null((string?)await ScalarRaw(db, "SELECT decided_by FROM reconcile_apply_plan WHERE source_key='t-approve'"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM reconcile_apply_plan WHERE source_key='t-approve'");
+        }
+    }
+
+    // The existing fail-safe guards must hold: a BLOCKED plan (redaction strip) can never be approved, and a
+    // non-pending plan is a 409 — not a silent re-decision.
+    [SkippableFact]
+    public async Task Approve_cannot_approve_a_blocked_or_already_decided_plan()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES " +
+            "('t-blocked','redaction_mismatch','blocked', jsonb_build_object('blockedReason','strip')), " +
+            "('t-done','new','approved', jsonb_build_object('summary','x'))");
+        try
+        {
+            var fn = new ReconcileFunctions(db, new FakeRunnerJobTrigger(),
+                Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
+            // ★ blocked → 409 (the B10 fail-safe: a redaction strip can never be approved into action).
+            Assert.Equal(409, StatusOf(await fn.ApproveReconcilePlan(
+                JsonRequest(new { sourceKey = "t-blocked", driftType = "redaction_mismatch" }), default)));
+            // already 'approved' → 409 (not pending).
+            Assert.Equal(409, StatusOf(await fn.ApproveReconcilePlan(
+                JsonRequest(new { sourceKey = "t-done", driftType = "new" }), default)));
+            // unchanged.
+            Assert.Equal("blocked", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-blocked'"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM reconcile_apply_plan WHERE source_key IN ('t-blocked','t-done')");
+        }
+    }
+
+    private static async Task<object?> ScalarRaw(SynthWatch.Api.Data.SynthWatchDbContext db, string sql)
+    {
+        var conn = (Npgsql.NpgsqlConnection)db.Database.GetDbConnection();
+        var opened = conn.State != System.Data.ConnectionState.Open;
+        if (opened) await conn.OpenAsync();
+        try { await using var cmd = conn.CreateCommand(); cmd.CommandText = sql; var r = await cmd.ExecuteScalarAsync(); return r is DBNull ? null : r; }
+        finally { if (opened) await conn.CloseAsync(); }
+    }
 }
