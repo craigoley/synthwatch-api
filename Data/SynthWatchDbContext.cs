@@ -42,6 +42,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<VitalsReportRow> VitalsReport => Set<VitalsReportRow>();
     public DbSet<LatencySeriesRow> LatencyReportSeries => Set<LatencySeriesRow>();
     public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
+    public DbSet<IncidentBreakdownRow> IncidentBreakdown => Set<IncidentBreakdownRow>();
     public DbSet<ReconcileDriftRow> ReconcileDrift => Set<ReconcileDriftRow>();
     public DbSet<ReconcileApplyPlanRow> ReconcileApplyPlan => Set<ReconcileApplyPlanRow>();
     public DbSet<SpecCatalogRow> SpecCatalog => Set<SpecCatalogRow>();
@@ -386,6 +387,15 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Remaining).HasColumnName("remaining");
             e.Property(x => x.RemainingPct).HasColumnName("remaining_pct");
             e.Property(x => x.BurnRate).HasColumnName("burn_rate");
+        });
+
+        // Keyless: the incident verdict-taxonomy breakdown (GROUP BY rca->>'classification'), raw SQL only.
+        modelBuilder.Entity<IncidentBreakdownRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Classification).HasColumnName("classification");
+            e.Property(x => x.Count).HasColumnName("count");
         });
 
         // Keyless: read the inline availability-over-time bucketed query via raw SQL only.

@@ -37,6 +37,28 @@ public record AvailabilityReportDto(
     [property: JsonPropertyName("groupBy")] string? GroupBy,
     [property: JsonPropertyName("groups")] IReadOnlyList<AvailabilityGroupDto> Groups);
 
+/// <summary>One verdict-taxonomy bucket: an rca.classification (or "unclassified") + its incident count and
+/// share of the window's total. classification is one of the 5 enum values or "unclassified".</summary>
+public record IncidentBreakdownBucketDto(
+    [property: JsonPropertyName("classification")] string Classification,
+    [property: JsonPropertyName("count")] long Count,
+    [property: JsonPropertyName("pctOfTotal")] decimal PctOfTotal);
+
+/// <summary>
+/// Reports P6 — the alert-quality answer to "how many reds were real vs monitor-bug vs transient", from
+/// incidents.rca.classification over the window. ★ ALERT PRECISION = realOutages / classified (the fraction of
+/// JUDGED reds that were genuine real-outages); null when classified == 0 (honest empty, not a fake 0%).
+/// unclassified is an explicit bucket — incidents with no RCA classification yet are never dropped.
+/// </summary>
+public record IncidentBreakdownDto(
+    [property: JsonPropertyName("window")] string Window,
+    [property: JsonPropertyName("total")] long Total,
+    [property: JsonPropertyName("classified")] long Classified,
+    [property: JsonPropertyName("unclassified")] long Unclassified,
+    [property: JsonPropertyName("realOutages")] long RealOutages,
+    [property: JsonPropertyName("precision")] decimal? Precision,
+    [property: JsonPropertyName("buckets")] IReadOnlyList<IncidentBreakdownBucketDto> Buckets);
+
 /// <summary>Latency over the window — percentiles recomputed from raw (NOT averaged daily percentiles).</summary>
 public record LatencyDto(
     [property: JsonPropertyName("sampleCount")] long SampleCount,

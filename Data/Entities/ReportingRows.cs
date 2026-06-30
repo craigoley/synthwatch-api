@@ -58,3 +58,11 @@ public class LatencySeriesRow
     public DateOnly Day { get; set; }
     public double? AvgMs { get; set; }
 }
+
+/// <summary>One GROUP BY row of the incident verdict-taxonomy breakdown: an rca.classification (null =
+/// unclassified) + how many incidents in the window carried it. Read via raw SQL only (keyless).</summary>
+public class IncidentBreakdownRow
+{
+    public string? Classification { get; set; }
+    public long Count { get; set; }
+}
