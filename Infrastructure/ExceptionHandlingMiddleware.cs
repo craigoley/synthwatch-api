@@ -41,11 +41,13 @@ public sealed class ExceptionHandlingMiddleware : IFunctionsWorkerMiddleware
 
             http.Response.Clear();
             http.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            await http.Response.WriteAsJsonAsync(new
-            {
-                error = "internal_error",
-                message = "An unexpected error occurred."
-            });
+            // RFC 9457 problem+json. ★ instance = the invocation id, so the opaque 500 a user/dashboard sees
+            // carries a correlation id they can quote (it was previously only in the server log). Backward-
+            // compatible: ProblemResults keeps error/message, which the dashboard's error path reads.
+            await http.Response.WriteAsJsonAsync(
+                ProblemResults.Body(StatusCodes.Status500InternalServerError, "Internal Server Error",
+                    "An unexpected error occurred.", context.InvocationId, "internal_error"),
+                options: null, contentType: ProblemResults.ContentType);
         }
     }
 }

@@ -1878,6 +1878,34 @@ public class IntegrationTests
         }
     }
 
+    // A denied request now leaves a durable audit_log row — exercised through the SAME isolated-context write
+    // (AuditWriter.TryPersistAsync) the middleware runs on a 401/403.
+    [SkippableFact]
+    public async Task Denied_request_writes_an_audit_log_row()
+    {
+        RequireDocker();
+        await using var ds = Npgsql.NpgsqlDataSource.Create(_pg.ConnectionString);
+        var row = AuditWriter.BuildDenialRow("probe@deny.test", "8.8.8.8", "DELETE", "/api/checks/7", 403);
+        try
+        {
+            Assert.True(await AuditWriter.TryPersistAsync(ds, row)); // the real middleware write path
+            await using var read = _pg.NewDbContext();
+            var saved = await read.AuditLogs.AsNoTracking()
+                .Where(a => a.ActorEmail == "probe@deny.test").OrderByDescending(a => a.Id).FirstAsync();
+            Assert.Equal("auth.denied", saved.Action);
+            Assert.Equal(403, saved.StatusCode);
+            Assert.False(saved.Success!.Value);
+            Assert.Equal("DELETE", saved.HttpMethod);
+            Assert.Equal("checks", saved.TargetType);
+            Assert.Equal("7", saved.TargetId);
+        }
+        finally
+        {
+            await using var c = _pg.NewDbContext();
+            await c.Database.ExecuteSqlRawAsync("DELETE FROM audit_log WHERE actor_email = 'probe@deny.test'");
+        }
+    }
+
     [SkippableFact]
     public async Task Audit_row_is_written_with_a_redacted_diff()
     {

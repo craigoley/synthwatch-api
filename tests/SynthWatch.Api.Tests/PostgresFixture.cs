@@ -20,6 +20,10 @@ public sealed class PostgresFixture : IAsyncLifetime
     public string SkipReason { get; private set; } = "";
     private string _connectionString = "";
 
+    /// <summary>The live container's connection string — for tests that need an NpgsqlDataSource (e.g. the
+    /// isolated-context audit write). Only valid once <see cref="Available"/> is true.</summary>
+    public string ConnectionString => _connectionString;
+
     // Deterministic seed: check 1 is ~10 days old with 25 completed runs in the last 24h (so the
     // 24h SLA window is SUFFICIENT but the 30d window is NOT — only ~33% covered); plus a screenshot
     // run, a no-artifact run, and a resolved incident. IDs are identity — captured via RETURNING.

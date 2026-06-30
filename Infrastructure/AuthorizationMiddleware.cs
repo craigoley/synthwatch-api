@@ -61,7 +61,10 @@ public sealed class AuthorizationMiddleware : IFunctionsWorkerMiddleware
         var outcome = AuthGate.Decide(method, path, enforcementEnabled: true, role: principal?.Role);
         if (outcome != GateOutcome.Allow)
         {
-            await DenyAsync(http, outcome); // short-circuit; do NOT call next (denials are not audited)
+            // ★ Durable record of the denial (the probing/brute-force record that previously went unwritten).
+            // Best-effort + never-throws → the 401/403 RESPONSE is unchanged whether or not the audit write lands.
+            await TryAuditDenialAsync(context, http, principal, method, path, outcome);
+            await DenyAsync(http, outcome, context.InvocationId); // short-circuit; do NOT call next
             return;
         }
 
@@ -83,13 +86,27 @@ public sealed class AuthorizationMiddleware : IFunctionsWorkerMiddleware
         }
     }
 
-    private static async Task DenyAsync(HttpContext http, GateOutcome outcome)
+    private static async Task DenyAsync(HttpContext http, GateOutcome outcome, string instanceId)
     {
-        var (code, error, message) = outcome == GateOutcome.Deny401
-            ? (StatusCodes.Status401Unauthorized, "unauthorized", "Authentication required.")
-            : (StatusCodes.Status403Forbidden, "forbidden", "You do not have permission to perform this action.");
+        var (code, error, title, detail) = outcome == GateOutcome.Deny401
+            ? (StatusCodes.Status401Unauthorized, "unauthorized", "Unauthorized", "Authentication required.")
+            : (StatusCodes.Status403Forbidden, "forbidden", "Forbidden", "You do not have permission to perform this action.");
         http.Response.StatusCode = code;
-        await http.Response.WriteAsJsonAsync(new { error, message });
+        // RFC 9457 problem+json (+ legacy error/message the dashboard reads); instance = the correlation id.
+        await http.Response.WriteAsJsonAsync(ProblemResults.Body(code, title, detail, instanceId, error),
+            options: null, contentType: ProblemResults.ContentType);
+    }
+
+    /// <summary>Best-effort durable record of a DENIED request (401/403): who (null email for a 401), verb, route,
+    /// status. Same isolated-context + NEVER-THROWS guarantee as the authorized-mutation audit — an audit-write
+    /// failure must never turn a denial into a 500.</summary>
+    private async Task TryAuditDenialAsync(FunctionContext context, HttpContext http, Principal? principal,
+        string method, string? path, GateOutcome outcome)
+    {
+        var status = outcome == GateOutcome.Deny401 ? StatusCodes.Status401Unauthorized : StatusCodes.Status403Forbidden;
+        var row = AuditWriter.BuildDenialRow(principal?.Email, ClientIp(http), method, path, status);
+        var ds = context.InstanceServices.GetRequiredService<NpgsqlDataSource>();
+        await AuditWriter.TryPersistAsync(ds, row, ex => AuthzLog.AuditFailed(_logger, ex), context.CancellationToken);
     }
 
     /// <summary>Write the audit envelope (+ redacted diff). Uses a FRESH DbContext so the insert is isolated
@@ -105,14 +122,11 @@ public sealed class AuthorizationMiddleware : IFunctionsWorkerMiddleware
             var row = AuditWriter.BuildRow(principal, ClientIp(http), method, path, status, success, diff);
 
             var ds = context.InstanceServices.GetRequiredService<NpgsqlDataSource>();
-            var options = new DbContextOptionsBuilder<SynthWatchDbContext>().UseNpgsql(ds).Options;
-            await using var auditDb = new SynthWatchDbContext(options);
-            auditDb.AuditLogs.Add(row);
-            await auditDb.SaveChangesAsync(context.CancellationToken);
+            await AuditWriter.TryPersistAsync(ds, row, ex => AuthzLog.AuditFailed(_logger, ex), context.CancellationToken);
         }
         catch (Exception ex)
         {
-            AuthzLog.AuditFailed(_logger, ex);
+            AuthzLog.AuditFailed(_logger, ex); // covers a row-BUILD failure (the write itself never throws)
         }
     }
 
