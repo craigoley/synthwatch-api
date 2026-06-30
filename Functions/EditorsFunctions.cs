@@ -178,8 +178,11 @@ public class EditorsFunctions
                 .ExecuteDeleteAsync(ct);
 
             DismissLog.Completed(_logger, deleted);
-            // DIAGNOSTIC: audit record temporarily removed to isolate production 500 cause.
-            // Was: _audit.Record("access-request", normalized, before: new { count = deleted }, after: null, note: "dismiss access request");
+            // Record the audit diff; AuthorizationMiddleware persists it via AuditWriter.TryPersistAsync (the
+            // never-throw path — a failed audit can NEVER turn a successful dismiss into a 500). The prod 500
+            // this was commented out to isolate was the missing access_requests/audit_log grant class, now
+            // closed by grant-coverage (#133) + migration 0053 — same _audit.Record shape as Add/RemoveEditor.
+            _audit.Record("access-request", normalized, before: new { count = deleted }, after: null, note: "dismiss access request");
             return ApiResults.NoContent();
         }
         catch (Exception ex)
