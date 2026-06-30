@@ -71,13 +71,24 @@ public class RoutingFunctions
                 "Omit a dimension to leave it unchanged; send it explicitly empty (e.g. { \"tagRules\": [] }) to clear it.");
 
         // Build + validate each PRESENT dimension.
+        // ★ F-05: a dimension ENTRY whose `channelIds` is ABSENT means the inner write shape didn't bind (a
+        // client/contract drift) — NOT an intentional clear. The old `set?.ChannelIds ?? new List<long>()`
+        // coalesced that to empty, so a present dimension silently resolved to ZERO rows and the per-dimension
+        // replace below DELETED the routes and inserted nothing → all routes WIPED while returning 200, with
+        // the gap invisible until an alert didn't fire. An intentional clear is unambiguous: clear ONE entry's
+        // channels with `{ "critical": { "channelIds": [] } }` (present-but-empty), or clear the WHOLE
+        // dimension with `{ "severity": {} }`. A missing channelIds key now FAILS LOUDLY (400) before any delete.
         var severityRows = new List<AlertRoute>();
         if (body.Severity is not null)
             foreach (var (severity, set) in body.Severity)
             {
                 if (Array.IndexOf(Severities, severity) < 0)
                     return ApiResults.BadRequest($"unknown severity '{severity}'. Allowed: critical, warning.");
-                foreach (var cid in (set?.ChannelIds ?? new List<long>()).Distinct())
+                if (set?.ChannelIds is null)
+                    return ApiResults.BadRequest(
+                        $"routing.severity['{severity}'] is missing channelIds — expected {{ \"channelIds\": [...] }}. " +
+                        "Refusing a malformed routing write (it would otherwise wipe routes). Send channelIds:[] to clear.");
+                foreach (var cid in set.ChannelIds.Distinct())
                     severityRows.Add(new AlertRoute { Severity = severity, ChannelId = cid });
             }
 
@@ -87,7 +98,11 @@ public class RoutingFunctions
             {
                 if (!long.TryParse(checkKey, out var checkId))
                     return ApiResults.BadRequest($"perCheck key '{checkKey}' is not a valid check id.");
-                foreach (var cid in (set?.ChannelIds ?? new List<long>()).Distinct())
+                if (set?.ChannelIds is null)
+                    return ApiResults.BadRequest(
+                        $"routing.perCheck['{checkKey}'] is missing channelIds — expected {{ \"channelIds\": [...] }}. " +
+                        "Refusing a malformed routing write (it would otherwise wipe routes). Send channelIds:[] to clear.");
+                foreach (var cid in set.ChannelIds.Distinct())
                     perCheckRows.Add(new AlertRoute { CheckId = checkId, ChannelId = cid });
             }
 
