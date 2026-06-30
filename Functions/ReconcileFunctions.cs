@@ -107,8 +107,14 @@ public class ReconcileFunctions
 
     private const int ApplyCap = 5; // ★ max plans applied per call — one buggy apply can't rewrite the fleet.
 
+    // ★ The drift_types ApplyReconcilePlans can actually EXECUTE — must mirror the apply WHERE filter
+    // (`drift_type = 'new'`, see ApplyReconcilePlans). The approve gate uses this so an operator can't approve
+    // a plan apply would silently ignore. Widen this set ONLY when the executor learns the new type.
+    private static readonly HashSet<string> ApplyExecutableDriftTypes = new(StringComparer.Ordinal) { "new" };
+
     /// <summary>POST /api/reconcile/approve — pending → approved. ★ A 'blocked' plan (a redaction strip) can
-    /// NEVER be approved (422). Body {sourceKey, driftType}.</summary>
+    /// NEVER be approved (409); nor can a drift_type apply can't yet execute (changed/missing) — that would be
+    /// an indefinite silent no-op at apply time. Body {sourceKey, driftType}.</summary>
     [Function("ApproveReconcilePlan")]
     public async Task<IActionResult> ApproveReconcilePlan(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "reconcile/approve")] HttpRequest req,
@@ -136,6 +142,13 @@ public class ReconcileFunctions
         // ★ The B10 fail-safe: a blocked redaction-strip can never be approved/rejected into action.
         if (current.Status == "blocked")
             return ApiResults.Conflict("This plan is BLOCKED (reconcile cannot strip redaction) and cannot be approved.");
+        // ★ Mirror that fail-safe for executability: only drift_types apply can EXECUTE may be APPROVED. Approving
+        // a non-executable type (changed/missing) would move it to 'approved' where apply (WHERE drift_type='new')
+        // silently ignores it forever — an indefinite no-op. Honest 409 now beats a silent swallow later. Reject
+        // is always allowed (you can reject anything that can't be applied).
+        if (decision == "approved" && !ApplyExecutableDriftTypes.Contains(current.DriftType))
+            return ApiResults.Conflict(
+                $"drift_type '{current.DriftType}' is not yet executable by apply (only 'new' is). Reject it, or wait for the executor to support it.");
         if (current.Status != "pending")
             return ApiResults.Conflict($"Plan is already '{current.Status}', not pending.");
 
