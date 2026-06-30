@@ -2558,9 +2558,12 @@ public class IntegrationTests
             Assert.DoesNotContain(reqs, r => r.Email == "ed@ed.test");
 
             // Dismiss access request → 204, row gone; idempotent (no-match → 204 too).
-            // Audit assertion temporarily removed while diagnosing production 500.
             Assert.IsType<NoContentResult>(await fn.DismissAccessRequest(AuthReq(adminTok), "want@ed.test", default));
             Assert.False(await db.AccessRequests.AnyAsync(a => a.Email == "want@ed.test"));
+            // ★ The dismiss now RECORDS its audit diff again (restored — the prod 500 it was removed to isolate
+            // was the grant gap, not this write). The middleware persists it via TryPersistAsync.
+            Assert.Equal("access-request", audit.Diff?.TargetType);
+            Assert.Equal("want@ed.test", audit.Diff?.TargetId);
             Assert.IsType<NoContentResult>(await fn.DismissAccessRequest(AuthReq(adminTok), "ghost@ed.test", default));
 
             // Editor can't dismiss access requests.
@@ -2577,6 +2580,52 @@ public class IntegrationTests
             await using var cleanup = _pg.NewDbContext();
             await cleanup.Database.ExecuteSqlRawAsync(
                 "DELETE FROM sessions WHERE email LIKE '%@ed.test'; DELETE FROM editors WHERE email LIKE '%@ed.test'; DELETE FROM access_requests WHERE email LIKE '%@ed.test';");
+        }
+    }
+
+    // ★ The audit_log WRITE PATH for a dismiss — the #127-class gap (CI-compiled, never exercised). Proves the
+    // handler RECORDS the diff AND it PERSISTS to audit_log under the now-present grants, with the right
+    // Action/principal/target — end-to-end through the middleware's exact BuildRow + never-throw TryPersistAsync.
+    [SkippableFact]
+    public async Task Dismiss_access_request_persists_an_audit_row()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "boss@dismiss.test");
+        await using var db = _pg.NewDbContext();
+        var audit = new AuditScope();
+        var fn = new EditorsFunctions(db, new AuthPrincipalService(db), audit, NullLogger<EditorsFunctions>.Instance);
+        const string adminTok = "swt_admin_dismiss";
+        try
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(adminTok)}, 'boss@dismiss.test', now() + interval '1 hour')");
+            await db.Database.ExecuteSqlRawAsync("INSERT INTO access_requests (email) VALUES ('want@dismiss.test')");
+
+            // Handler → 204 + records the audit diff on the scope (the restored _audit.Record call).
+            Assert.IsType<NoContentResult>(await fn.DismissAccessRequest(AuthReq(adminTok), "want@dismiss.test", default));
+            Assert.Equal("access-request", audit.Diff?.TargetType);
+
+            // Persist exactly as AuthorizationMiddleware does → a REAL audit_log INSERT (the path the grant gap broke).
+            await using var ds = Npgsql.NpgsqlDataSource.Create(_pg.ConnectionString);
+            var row = AuditWriter.BuildRow(new Principal("boss@dismiss.test", Roles.Admin), "1.2.3.4",
+                "DELETE", "/api/access-requests/want@dismiss.test", 204, success: true, audit.Diff);
+            Assert.True(await AuditWriter.TryPersistAsync(ds, row)); // never-throws; true = row written under current grants
+
+            await using var read = _pg.NewDbContext();
+            var saved = await read.AuditLogs.AsNoTracking()
+                .Where(a => a.ActorEmail == "boss@dismiss.test").OrderByDescending(a => a.Id).FirstAsync();
+            Assert.Equal("delete", saved.Action);                 // ActionFor("DELETE")
+            Assert.Equal("access-request", saved.TargetType);     // from the handler's diff
+            Assert.Equal("want@dismiss.test", saved.TargetId);
+            Assert.True(saved.Success!.Value);
+            Assert.Equal("dismiss access request", saved.Note);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+            await using var c = _pg.NewDbContext();
+            await c.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email = 'boss@dismiss.test'; DELETE FROM access_requests WHERE email = 'want@dismiss.test'; DELETE FROM audit_log WHERE actor_email = 'boss@dismiss.test';");
         }
     }
 
