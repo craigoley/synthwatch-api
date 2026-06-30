@@ -28,6 +28,10 @@ public sealed class RequestLoggingMiddleware : IFunctionsWorkerMiddleware
             return;
         }
 
+        // Set the ambient correlation id (the invocation id) for THIS request before invoking downstream, so a
+        // handler's ApiResults.* 4xx can stamp `instance` — the same correlation id the 500/denial paths emit.
+        RequestCorrelation.Current = context.InvocationId;
+
         var sw = Stopwatch.GetTimestamp();
         try
         {

@@ -27,4 +27,21 @@ public static class ProblemResults
         error = legacyError,
         message = detail,
     };
+
+    /// <summary>
+    /// The 400 validation-error body — RFC 9457 + the legacy <c>{error:"validation_error", details}</c> the
+    /// dashboard reads (<c>body.details</c> is the field→error map). <c>details</c> is an RFC 9457 extension
+    /// member; <c>error</c>/<c>message</c> are kept too, so the dashboard's error path is unaffected.
+    /// </summary>
+    public static object ValidationBody(string? instance, object details) => new
+    {
+        type = "about:blank",
+        title = "Bad Request",
+        status = 400,
+        detail = "One or more fields are invalid.",
+        instance,
+        error = "validation_error",
+        message = "One or more fields are invalid.",
+        details, // the field→error map — legacy + RFC 9457 extension member (dashboard reads body.details)
+    };
 }
