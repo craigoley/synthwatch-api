@@ -1,9 +1,12 @@
 name: Grant coverage
 
-# Asserts the Azure RBAC roles the synthwatch-api MI is GRANTED in infra/main.bicep exactly match the set its
-# endpoints REQUIRE in infra/required-grants.json — catching the missing-grant class (dismiss-500 / reconcile /
-# AOAI / email) at CI instead of a runtime 500. Fail-closed: a required-but-ungranted (or granted-but-undeclared)
-# role fails the job, which fails ci-gate, which holds the merge.
+# Two fail-closed jobs that catch the missing-grant class (dismiss-500 / approve-500 / reconcile / AOAI / email)
+# at CI instead of a runtime 500 — across BOTH grant planes:
+#   • grant-coverage      — Azure RBAC role assignments the MI is GRANTED in infra/main.bicep vs REQUIRED in
+#                           infra/required-grants.json (azureRbac).
+#   • pg-grant-coverage   — Postgres table grants: every table the synthwatch-api role WRITES (required-grants.json
+#                           postgres.writes) must have its GRANT in the RUNNER repo's migrations (∪ opsBaseline).
+# A failure fails ci-gate, which holds the merge.
 #
 # Runs on EVERY PR (no path filter): a PR that adds an endpoint needing a new role must update both the manifest
 # and Bicep even if it doesn't otherwise touch infra/. The check is a sub-second static parse — no Azure calls,
@@ -29,3 +32,22 @@ jobs:
 
       - name: Assert required grants are covered by Bicep
         run: node scripts/check-grant-coverage.mjs
+
+  pg-grant-coverage:
+    name: Grant coverage (Postgres table grants)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (synthwatch-api — required set + raw-write scan)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The GRANT … TO "synthwatch-api" statements live in the RUNNER repo's migrations (it owns the schema).
+      # Both repos are public, so the default token reads it. persist-credentials:false — we only read files.
+      - name: Checkout runner repo (the GRANT migrations = the granted set)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: craigoley/synthwatch
+          path: runner-repo
+          persist-credentials: false
+
+      - name: Assert every API-written table has its Postgres GRANT
+        run: node scripts/check-pg-grant-coverage.mjs   # auto-resolves ./runner-repo/db/migrations

@@ -9,8 +9,8 @@
 //     the honest single source of truth.
 //
 // Non-flaky by design: a pure static parse of the Bicep SOURCE + the manifest — NO live Azure RBAC query (which
-// is subject to propagation lag). The Postgres-plane grants (runner-owned migrations) are documented in the
-// manifest but not enforced here — asserting them needs the live DB / the runner repo.
+// is subject to propagation lag). The Postgres-plane grants (runner-owned migrations) are enforced by the SIBLING
+// check (scripts/check-pg-grant-coverage.mjs, the pg-grant-coverage job) against required-grants.json `postgres`.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

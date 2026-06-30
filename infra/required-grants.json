@@ -63,24 +63,55 @@
       "neededBy": "AcsEmailSender (auth / edit-access request flows)"
     }
   ],
-  "postgres": [
-    {
-      "grant": "CONNECT + table SELECT/INSERT/UPDATE on the app schema",
-      "object": "synthwatch DB (the MI is an AAD Postgres role; ossrdbms-aad token)",
-      "reason": "All DB-backed endpoints. The MI authenticates with an AAD token, not a password.",
-      "providedBy": "runner migrations (schema + GRANTs); not CI-enforced from this repo"
-    },
-    {
-      "grant": "DELETE on access_requests",
-      "object": "access_requests",
-      "reason": "DELETE /api/access-requests/{email} (the dismiss-500 root cause — the MI role lacked DELETE).",
-      "providedBy": "runner migration 0044_grant_delete_access_requests.sql"
-    },
-    {
-      "grant": "SELECT on spec_cache (least-privilege)",
-      "object": "spec_cache",
-      "reason": "Spec activation / monitor-as-code reads.",
-      "providedBy": "runner migration 0041_spec_cache_least_privilege.sql"
+  "postgres": {
+    "$comment": [
+      "★ NOW CI-ENFORCED (scripts/check-pg-grant-coverage.mjs) — this closes the gap the old comment named.",
+      "The two worst 500s this session lived on this plane: dismiss-500 (missing DELETE on access_requests),",
+      "approve-500 (missing UPDATE on reconcile_apply_plan). They are INVISIBLE to admin psql + Testcontainers",
+      "(both run as SUPERUSER, and the snapshot has no synthwatch-api role) — they only surface as a prod 500.",
+      "",
+      "The check compares:",
+      "  REQUIRED  = `writes` below (the WRITE privileges the synthwatch-api role needs, per the handlers).",
+      "  GRANTED   = the GRANT … TO \\\"synthwatch-api\\\" statements parsed from the RUNNER repo's db/migrations/*.sql",
+      "              (the runner owns the schema/grants), UNIONed with `opsBaseline` below.",
+      "It FAILS if any required (table, privilege) is in neither — naming the table + missing privilege.",
+      "",
+      "Why an allowlist (approach b), not parsing the C#: the write surface is part raw SQL (regex-able) and",
+      "part EF change-tracking — incl. IMPLICIT updates (a fetched-then-mutated entity + SaveChanges emits",
+      "UPDATE with no syntactic marker, e.g. PATCH check / edit channel). That makes UPDATEs unreliable to",
+      "enumerate statically, so the required WRITE set is a maintained allowlist. (The check ALSO scans the",
+      "API's raw-SQL writes and fails if one names a table absent from `writes` — an auto-catch for the common",
+      "case.) SELECT is covered for every table by ALTER DEFAULT PRIVILEGES (ops), so only WRITES are listed.",
+      "",
+      "TO ADD an endpoint that writes a NEW table/privilege: add it to `writes` here AND add a runner migration",
+      "`GRANT <priv> ON <table> TO \\\"synthwatch-api\\\";` — CI fails until both are present (no merge without the grant)."
+    ],
+    "writes": [
+      { "table": "access_requests",     "privileges": ["INSERT", "DELETE"],          "neededBy": "POST /access-requests (request) + DELETE /access-requests/{email} (dismiss-500)" },
+      { "table": "alert_routes",         "privileges": ["INSERT", "DELETE"],          "neededBy": "PUT /routing — per-dimension replace (ExecuteDelete + AddRange)" },
+      { "table": "audit_log",            "privileges": ["INSERT"],                    "neededBy": "the authz/audit envelope writes one row per authorized mutation" },
+      { "table": "channels",             "privileges": ["INSERT", "UPDATE", "DELETE"], "neededBy": "channel CRUD (create / edit / delete)" },
+      { "table": "check_locations",      "privileges": ["INSERT", "DELETE"],          "neededBy": "PUT /checks/{id}/locations — assign/de-assign; create-check seeding" },
+      { "table": "check_tags",           "privileges": ["INSERT", "DELETE"],          "neededBy": "PUT /checks/{id}/tags — replace tags" },
+      { "table": "checks",               "privileges": ["INSERT", "UPDATE", "DELETE"], "neededBy": "create / PATCH / delete check; reconcile-apply materialize" },
+      { "table": "editors",              "privileges": ["INSERT", "DELETE"],          "neededBy": "edit-access editor add/remove" },
+      { "table": "otp_codes",            "privileges": ["INSERT", "UPDATE"],          "neededBy": "OTP sign-in — issue + consume" },
+      { "table": "reconcile_apply_plan", "privileges": ["UPDATE"],                    "neededBy": "POST /reconcile/approve|reject|apply (approve-500)" },
+      { "table": "run_requests",         "privileges": ["INSERT"],                    "neededBy": "POST /checks/{id}/run — enqueue an on-demand run" },
+      { "table": "sessions",             "privileges": ["INSERT", "UPDATE"],          "neededBy": "auth session create + refresh" },
+      { "table": "tag_routes",           "privileges": ["INSERT", "DELETE"],          "neededBy": "PUT /routing — tag-rule replace (ExecuteDelete + AddRange)" },
+      { "table": "test_send_requests",   "privileges": ["INSERT"],                    "neededBy": "POST channel test-send" }
+    ],
+    "opsBaseline": {
+      "$comment": [
+        "WRITE grants applied at role setup (Azure ops), NOT via a repo migration — so the migration parse",
+        "can't see them and would false-fail without this list. Verified against the live DB on 2026-07-01:",
+        "  SELECT table_name, string_agg(privilege_type,',') FROM information_schema.role_table_grants",
+        "  WHERE grantee='synthwatch-api' GROUP BY 1;",
+        "`checks` is the only API-write table granted out-of-band (every other write table is migration-granted).",
+        "Re-verify + update this if the bootstrap grants ever change."
+      ],
+      "checks": ["INSERT", "UPDATE", "DELETE"]
     }
-  ]
+  }
 }
