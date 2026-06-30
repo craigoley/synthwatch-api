@@ -9,6 +9,25 @@ namespace SynthWatch.Api.Dtos;
 /// varies by driftType — e.g. a 'changed' row carries { fields: { name: { git, live }, … } }). The
 /// dashboard groups + labels these (resolvable config drift vs the known orphan gap).
 /// </summary>
+/// <summary>
+/// One reconcile_apply_plan row served read-only (reconcile-apply Phase 0, dry-run). status ∈
+/// pending (needs Phase-1 human approval) | auto (already auto-applied, #144) | blocked (a forbidden
+/// redaction-strip) | noop (orphan). plan is the runner-written jsonb passed through verbatim:
+/// { summary, disposition, statements:[{purpose,text,values?,regions?}], blockedReason? }.
+/// ★ Read-only preview — the API never applies and (this phase) never approves/rejects.
+/// </summary>
+public record ReconcileApplyPlanItemDto(
+    [property: JsonPropertyName("sourceKey")] string SourceKey,
+    [property: JsonPropertyName("driftType")] string DriftType,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("plan")] JsonElement Plan,
+    [property: JsonPropertyName("computedAt")] DateTimeOffset ComputedAt);
+
+/// <summary>GET /api/reconcile/plan — the dry-run apply plan per drift row. items empty = no plan yet.</summary>
+public record ReconcileApplyPlanDto(
+    [property: JsonPropertyName("items")] IReadOnlyList<ReconcileApplyPlanItemDto> Items,
+    [property: JsonPropertyName("computedAt")] DateTimeOffset? ComputedAt);
+
 public record ReconcileDriftItemDto(
     [property: JsonPropertyName("sourceKey")] string SourceKey,
     [property: JsonPropertyName("driftType")] string DriftType,

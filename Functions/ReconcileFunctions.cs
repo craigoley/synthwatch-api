@@ -75,6 +75,31 @@ public class ReconcileFunctions
         return ApiResults.Ok(new ReconcileDriftDto(items, detectedAt));
     }
 
+    /// <summary>
+    /// GET /api/reconcile/plan — the DRY-RUN apply plan per drift row (reconcile-apply Phase 0). For each
+    /// drift the runner computed the statement(s) apply WOULD run; this serves them read-only. ★ Nothing is
+    /// applied, and (this phase) nothing is approved/rejected — preview only. plan jsonb passes through verbatim.
+    /// </summary>
+    [Function("GetReconcilePlan")]
+    public async Task<IActionResult> GetReconcilePlan(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reconcile/plan")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var rows = await _db.ReconcileApplyPlan.FromSql(
+            $@"SELECT source_key, drift_type, status, plan::text AS plan, computed_at
+               FROM reconcile_apply_plan
+               ORDER BY status, drift_type, source_key").AsNoTracking().ToListAsync(ct);
+
+        var items = rows.Select(r =>
+            new ReconcileApplyPlanItemDto(r.SourceKey, r.DriftType, r.Status, SafeJson(r.Plan), r.ComputedAt)).ToList();
+
+        DateTimeOffset? computedAt = rows.Count == 0 ? null : rows.Max(r => r.ComputedAt);
+
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(new ReconcileApplyPlanDto(items, computedAt));
+    }
+
     // Parse runner-written jsonb (read as text) defensively — a malformed value degrades to {}, never throws.
     private static JsonElement SafeJson(string? json)
     {
