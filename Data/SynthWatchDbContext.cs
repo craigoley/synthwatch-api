@@ -43,6 +43,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<LatencySeriesRow> LatencyReportSeries => Set<LatencySeriesRow>();
     public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
     public DbSet<ReconcileDriftRow> ReconcileDrift => Set<ReconcileDriftRow>();
+    public DbSet<ReconcileApplyPlanRow> ReconcileApplyPlan => Set<ReconcileApplyPlanRow>();
     public DbSet<SpecCatalogRow> SpecCatalog => Set<SpecCatalogRow>();
 
     // Auth identity (Phase 12 slice 1, migration 0037). API-owned: the only writes the API makes
@@ -481,6 +482,18 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.DriftType).HasColumnName("drift_type");
             e.Property(x => x.Detail).HasColumnName("detail");
             e.Property(x => x.DetectedAt).HasColumnName("detected_at");
+        });
+
+        // Keyless: the runner-written reconcile_apply_plan (dry-run, runner migration 0051) via raw SQL only.
+        modelBuilder.Entity<ReconcileApplyPlanRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.SourceKey).HasColumnName("source_key");
+            e.Property(x => x.DriftType).HasColumnName("drift_type");
+            e.Property(x => x.Status).HasColumnName("status");
+            e.Property(x => x.Plan).HasColumnName("plan");
+            e.Property(x => x.ComputedAt).HasColumnName("computed_at");
         });
 
         // Keyless: the spec-catalog read (spec_catalog LEFT JOIN checks + health) via raw SQL only.
