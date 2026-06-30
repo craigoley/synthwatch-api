@@ -2427,4 +2427,107 @@ public class IntegrationTests
                 "DELETE FROM sessions WHERE email LIKE '%@ed.test'; DELETE FROM editors WHERE email LIKE '%@ed.test'; DELETE FROM access_requests WHERE email LIKE '%@ed.test';");
         }
     }
+
+    // ── List-endpoint SHAPE CONTRACT ────────────────────────────────────────────────────────────────────
+    // The API-side anchor for the envelope-drift class: pins each list endpoint's TOP-LEVEL WIRE shape (bare
+    // array vs which envelope + its exact keys) so a flip fails CI instead of silently emptying the dashboard.
+    // Two prior prod incidents (routing {defaults,overrides} silent-wipe; performance-report nesting) shipped
+    // because NO test pinned the shape. We assert the SERIALIZED JSON (camelCase = the actual wire, verified
+    // against the live host which writes null keys) — catching BOTH a record-type swap AND a key rename/casing
+    // change. NOT a full-DTO test — only the top-level shape that, if flipped, breaks a consumer.
+    // ★ This pins the CURRENT shapes (per the task). Converging the 7 bare arrays onto {items} is a SEPARATE
+    //   breaking change coordinated with the dashboard — deliberately NOT done here.
+    private static readonly JsonSerializerOptions WireJson = new(JsonSerializerDefaults.Web);
+
+    private static JsonElement WireRoot(IActionResult r)
+    {
+        var ok = Assert.IsType<OkObjectResult>(r);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, WireJson));
+        return doc.RootElement.Clone();
+    }
+
+    private static void AssertBareArray(IActionResult r) =>
+        Assert.Equal(JsonValueKind.Array, WireRoot(r).ValueKind);
+
+    private static void AssertEnvelope(IActionResult r, params string[] expectedKeys)
+    {
+        var root = WireRoot(r);
+        Assert.Equal(JsonValueKind.Object, root.ValueKind);
+        var actual = root.EnumerateObject().Select(p => p.Name).OrderBy(k => k, StringComparer.Ordinal).ToArray();
+        Assert.Equal(expectedKeys.OrderBy(k => k, StringComparer.Ordinal).ToArray(), actual);
+    }
+
+    [SkippableFact]
+    public async Task List_endpoint_top_level_shapes_are_pinned()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "shapeadmin@shape.test");
+        await using var db = _pg.NewDbContext();
+        // Seed one check + one run + an admin session so per-check + admin-gated lists return their 200 shape.
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url) VALUES ('shape-check', 'http', 'https://x.example');");
+        var checkId = await db.Checks.Where(c => c.Name == "shape-check").Select(c => c.Id).FirstAsync();
+        await db.Database.ExecuteSqlRawAsync(
+            $"INSERT INTO runs (check_id, status, started_at) VALUES ({checkId}, 'pass', now());");
+        var runId = await db.Runs.Where(r => r.CheckId == checkId).Select(r => r.Id).FirstAsync();
+        const string adminTok = "swt_shape_admin";
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(adminTok)}, 'shapeadmin@shape.test', now() + interval '1 hour')");
+        try
+        {
+            var checks = new ChecksFunctions(db);
+            var runs = new RunsFunctions(db);
+            var channels = new ChannelsFunctions(db);
+            var flows = new FlowsFunctions(db);
+            var editors = new EditorsFunctions(db, new AuthPrincipalService(db), new AuditScope(), NullLogger<EditorsFunctions>.Instance);
+            var tags = new TagsFunctions(db);
+            var incidents = new IncidentsFunctions(db);
+            var locations = new LocationsFunctions(db);
+            var specs = new SpecsFunctions(db);
+            var reconcile = new ReconcileFunctions(db, new FakeRunnerJobTrigger(),
+                Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
+            var routing = new RoutingFunctions(db);
+            var sla = new SlaFunctions(db);
+            var reports = new ReportsFunctions(db);
+
+            // ── BARE ARRAYS (7) — must stay top-level JSON arrays ──
+            AssertBareArray(await checks.ListChecks(Request(), default));                  // GET /checks
+            AssertBareArray(await runs.ListRunSteps(Request(), runId, default));           // GET /runs/{id}/steps
+            AssertBareArray(await channels.GetChannels(Request(), default));               // GET /channels
+            AssertBareArray(await flows.ListFlows(Request(), default));                    // GET /flows
+            AssertBareArray(await editors.ListEditors(AuthReq(adminTok), default));        // GET /editors (admin)
+            AssertBareArray(await editors.ListAccessRequests(AuthReq(adminTok), default)); // GET /access-requests (admin)
+            AssertBareArray(TagsFunctions.GetSuggestedTagKeys(Request()));                 // GET /tags/suggested
+
+            // ── ENVELOPES — pin the exact top-level key set (the wire writes null keys, so all are present) ──
+            AssertEnvelope(await checks.ListCheckRuns(Request(), checkId, default), "items", "nextCursor", "pageSize", "latestRunId");
+            AssertEnvelope(await incidents.ListIncidents(Request(), default), "items", "nextCursor", "pageSize");
+            AssertEnvelope(await checks.ListCheckMetrics(Request(), checkId, default), "items", "page", "pageSize", "total");
+            AssertEnvelope(await specs.GetSpecCatalog(Request(), default), "items", "probedAt");
+            AssertEnvelope(await reconcile.GetReconcileDrift(Request(), default), "items", "detectedAt");
+            AssertEnvelope(await tags.GetTagsInUse(Request(), default), "tags");
+            AssertEnvelope(await tags.GetCheckTags(Request(), checkId, default), "tags");
+            AssertEnvelope(await locations.GetLocations(Request(), default), "locations");
+            AssertEnvelope(await locations.GetCheckLocations(Request(), checkId, default), "locations");
+            AssertEnvelope(await checks.GetAvailabilitySeries(Request(), checkId, default), "window", "bucket", "points");
+            AssertEnvelope(await sla.GetSla(Request(), default), "window", "fleet", "items");
+            AssertEnvelope(await routing.GetRouting(Request(), default), "severity", "perCheck", "tagRules");
+            AssertEnvelope(await reports.GetAvailabilityReport(Request(), default), "window", "groupBy", "groups");
+            AssertEnvelope(await reports.GetPerformanceReport(Request(), default), "window", "groupBy", "groups");
+
+            // ── ★ SIBLING TRAPS — pin each side so they can't silently converge/diverge (the sharpest drift risk) ──
+            // /tags is enveloped {tags}; its sibling /tags/suggested is a BARE string[].
+            AssertEnvelope(await tags.GetTagsInUse(Request(), default), "tags");
+            AssertBareArray(TagsFunctions.GetSuggestedTagKeys(Request()));
+            // /checks/{id}/runs is the {items,…} cursor envelope; its sibling /runs/{id}/steps is a BARE array.
+            AssertEnvelope(await checks.ListCheckRuns(Request(), checkId, default), "items", "nextCursor", "pageSize", "latestRunId");
+            AssertBareArray(await runs.ListRunSteps(Request(), runId, default));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'shape-check';"); // cascades runs
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM sessions WHERE email = 'shapeadmin@shape.test';");
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+        }
+    }
 }
