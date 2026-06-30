@@ -100,6 +100,123 @@ public class ReconcileFunctions
         return ApiResults.Ok(new ReconcileApplyPlanDto(items, computedAt));
     }
 
+    // ───────────────────────────────────────────────────────────────────────────────────────────────
+    // Reconcile-apply PHASE 1 — approve / reject / APPLY. The middleware editor-gates + audits every POST.
+    // ★ This is the first thing that writes LIVE monitor config — safety leads (see the per-method ★ notes).
+    // ───────────────────────────────────────────────────────────────────────────────────────────────
+
+    private const int ApplyCap = 5; // ★ max plans applied per call — one buggy apply can't rewrite the fleet.
+
+    /// <summary>POST /api/reconcile/approve — pending → approved. ★ A 'blocked' plan (a redaction strip) can
+    /// NEVER be approved (422). Body {sourceKey, driftType}.</summary>
+    [Function("ApproveReconcilePlan")]
+    public async Task<IActionResult> ApproveReconcilePlan(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "reconcile/approve")] HttpRequest req,
+        CancellationToken ct) => await DecideAsync(req, "approved", ct);
+
+    /// <summary>POST /api/reconcile/reject — pending → rejected. Body {sourceKey, driftType}.</summary>
+    [Function("RejectReconcilePlan")]
+    public async Task<IActionResult> RejectReconcilePlan(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "reconcile/reject")] HttpRequest req,
+        CancellationToken ct) => await DecideAsync(req, "rejected", ct);
+
+    private async Task<IActionResult> DecideAsync(HttpRequest req, string decision, CancellationToken ct)
+    {
+        ReconcileDecisionRequest? body;
+        try { body = await req.ReadFromJsonAsync<ReconcileDecisionRequest>(ct); }
+        catch (JsonException) { return ApiResults.BadRequest("Request body is not valid JSON."); }
+        if (body?.SourceKey is null || body.DriftType is null)
+            return ApiResults.BadRequest("sourceKey and driftType are required.");
+
+        var current = (await _db.ReconcileApplyPlan.FromSql(
+            $@"SELECT source_key, drift_type, status, plan::text AS plan, computed_at
+               FROM reconcile_apply_plan WHERE source_key = {body.SourceKey} AND drift_type = {body.DriftType}")
+            .AsNoTracking().ToListAsync(ct)).FirstOrDefault();
+        if (current is null) return ApiResults.NotFound("No plan for that source_key + drift_type.");
+        // ★ The B10 fail-safe: a blocked redaction-strip can never be approved/rejected into action.
+        if (current.Status == "blocked")
+            return ApiResults.Conflict("This plan is BLOCKED (reconcile cannot strip redaction) and cannot be approved.");
+        if (current.Status != "pending")
+            return ApiResults.Conflict($"Plan is already '{current.Status}', not pending.");
+
+        var who = (req.HttpContext.Items.TryGetValue("principal", out var p) ? p as Principal : null)?.Email;
+        // Gate on status='pending' so a concurrent decision can't double-apply (rowCount 0 = lost the race).
+        var n = await _db.Database.ExecuteSqlInterpolatedAsync(
+            $@"UPDATE reconcile_apply_plan SET status = {decision}, decided_at = now(), decided_by = {who}
+               WHERE source_key = {body.SourceKey} AND drift_type = {body.DriftType} AND status = 'pending'", ct);
+        if (n == 0) return ApiResults.Conflict("Plan is no longer pending.");
+        return ApiResults.Ok(new { sourceKey = body.SourceKey, driftType = body.DriftType, status = decision });
+    }
+
+    /// <summary>POST /api/reconcile/apply — execute the APPROVED plans (cap 5). ★ Each plan in ONE transaction;
+    /// materialize the check with sensitive INLINE (atomic — no non-sensitive window) and enabled=FALSE
+    /// (Phase 1 never enables), then seed check_locations. ROLLBACK on any error (the plan stays 'approved',
+    /// re-appliable). Idempotent (ON CONFLICT). Only 'new' (materialize) is wired (the only pending type).</summary>
+    [Function("ApplyReconcilePlans")]
+    public async Task<IActionResult> ApplyReconcilePlans(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "reconcile/apply")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var approved = await _db.ReconcileApplyPlan.FromSql(
+            $@"SELECT source_key, drift_type, status, plan::text AS plan, computed_at
+               FROM reconcile_apply_plan WHERE status = 'approved' AND drift_type = 'new'
+               ORDER BY source_key LIMIT {ApplyCap}").AsNoTracking().ToListAsync(ct);
+
+        var applied = new List<string>();
+        var failed = new List<string>();
+        var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        foreach (var p in approved)
+        {
+            // ★ ONE transaction per plan — all-or-nothing (no check without locations, no non-sensitive window).
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
+            try
+            {
+                var doc = JsonSerializer.Deserialize<PlanDoc>(p.Plan, opts);
+                var v = doc?.Statements?.FirstOrDefault()?.Values;
+                if (v is null || v.Count < 9) throw new InvalidOperationException("plan has no materialize values");
+                string src = v[0].GetString()!, name = v[1].GetString()!, kind = v[2].GetString()!,
+                       url = v[3].GetString()!, flow = v[4].GetString()!, redact = v[6].GetString()!;
+                bool sensitive = v[5].GetBoolean();
+                int interval = v[7].GetInt32();
+
+                // ★ ATOMIC SENSITIVE + ENABLED=FALSE: one INSERT sets sensitive inline and enabled hard-coded
+                //   false; ON CONFLICT (the partial index) makes a re-apply idempotent (updates git-auth only).
+                await _db.Database.ExecuteSqlInterpolatedAsync(
+                    $@"INSERT INTO checks (source_key, name, kind, target_url, flow_name, sensitive, redact_patterns, interval_seconds, enabled)
+                       VALUES ({src}, {name}, {kind}, {url}, {flow}, {sensitive}, {redact}::jsonb, {interval}, false)
+                       ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO UPDATE SET
+                         name = EXCLUDED.name, kind = EXCLUDED.kind, target_url = EXCLUDED.target_url,
+                         flow_name = EXCLUDED.flow_name, sensitive = EXCLUDED.sensitive, redact_patterns = EXCLUDED.redact_patterns", ct);
+
+                // The check now exists (same txn/connection) — read its id by the unique source_key to seed locations.
+                long newId = await _db.Checks.AsNoTracking().Where(c => c.SourceKey == src).Select(c => c.Id).FirstAsync(ct);
+
+                await _db.Database.ExecuteSqlInterpolatedAsync(
+                    $@"INSERT INTO check_locations (check_id, location)
+                       SELECT {newId}, name FROM locations WHERE enabled
+                       ON CONFLICT (check_id, location) DO NOTHING", ct);
+
+                await _db.Database.ExecuteSqlInterpolatedAsync(
+                    $@"UPDATE reconcile_apply_plan SET status = 'applied', applied_at = now()
+                       WHERE source_key = {p.SourceKey} AND drift_type = 'new' AND status = 'approved'", ct);
+
+                await tx.CommitAsync(ct);
+                applied.Add(p.SourceKey);
+            }
+            catch
+            {
+                await tx.RollbackAsync(ct); // ★ never half-apply — the plan stays 'approved' for retry.
+                failed.Add(p.SourceKey);
+            }
+        }
+        return ApiResults.Ok(new ReconcileApplyResultDto(applied, failed, ApplyCap));
+    }
+
+    // The runner-written plan jsonb shape (only the bits the executor reads).
+    private sealed record PlanDoc(List<PlanStmt>? Statements);
+    private sealed record PlanStmt(string? Text, List<JsonElement>? Values, List<string>? Regions);
+
     // Parse runner-written jsonb (read as text) defensively — a malformed value degrades to {}, never throws.
     private static JsonElement SafeJson(string? json)
     {
