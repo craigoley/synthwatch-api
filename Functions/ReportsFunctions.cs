@@ -32,11 +32,24 @@ public class ReportsFunctions
         _ => null,
     };
 
+    /// <summary>
+    /// Parse the repeatable <c>?tag=key:value</c> filter into a normalized "key:value"[] (distinct, trimmed).
+    /// Empty array = no filter. The query clause below ANDs across all selected tags (a check must carry EVERY
+    /// one) — mirrors the dashboard's multi-select-AND tag filter. Passed as a single text[] param so the same
+    /// no-op-when-empty clause drops into every report query (cardinality=0 → the guard short-circuits true).
+    /// </summary>
+    private static string[] TagFilter(HttpRequest req) =>
+        req.Query["tag"]
+            .Where(t => !string.IsNullOrWhiteSpace(t) && t!.Contains(':'))
+            .Select(t => t!.Trim())
+            .Distinct()
+            .ToArray();
+
     private const string Unclassified = "unclassified";
     private const string RealOutage = "real-outage";
 
     /// <summary>
-    /// GET /api/reports/incident-breakdown?window=7d|30d|90d — the verdict-taxonomy breakdown over the window:
+    /// GET /api/reports/incident-breakdown?window=7d|30d|90d&tag=key:value (repeatable, AND) — the verdict-taxonomy breakdown over the window:
     /// count per rca.classification (real-outage | flaky-transient | selector-drift | environment-regional |
     /// perf-regression), an explicit <c>unclassified</c> bucket (incidents with no RCA yet — never dropped),
     /// and the ALERT-PRECISION headline = real-outage / classified. One GROUP BY over incidents.rca.
@@ -49,13 +62,19 @@ public class ReportsFunctions
         var window = req.Query["window"].ToString();
         if (WindowDays(window) is not int days) return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
         var normWindow = string.IsNullOrEmpty(window) ? "30d" : window;
+        var tags = TagFilter(req);
 
         // GROUP BY the rca classification over incidents OPENED in the window. coalesce → an explicit
         // "unclassified" bucket so incidents with no RCA classification are counted, never silently dropped.
+        // Tag filter: restrict to incidents whose CHECK carries all selected tags (no-op when none selected).
         var rows = await _db.IncidentBreakdown.FromSql(
             $@"SELECT coalesce(rca->>'classification', {Unclassified}) AS classification, count(*)::bigint AS count
                FROM incidents
                WHERE opened_at >= now() - ({days} * INTERVAL '1 day')
+                 AND (cardinality({tags}) = 0 OR check_id IN (
+                       SELECT ft.check_id FROM check_tags ft
+                       WHERE ft.key || ':' || ft.value = ANY({tags})
+                       GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
                GROUP BY 1").AsNoTracking().ToListAsync(ct);
 
         var total = rows.Sum(r => r.Count);
@@ -78,7 +97,7 @@ public class ReportsFunctions
             normWindow, total, classified, unclassified, realOutages, precision, buckets));
     }
 
-    /// <summary>GET /api/reports/availability?window=7d|30d|90d&amp;groupBy=&lt;tagKey&gt; — availability by group (from the rollup).</summary>
+    /// <summary>GET /api/reports/availability?window=&amp;groupBy=&lt;tagKey&gt;&amp;tag=key:value (repeatable, AND-filter) — availability by group (from the rollup).</summary>
     [Function("GetAvailabilityReport")]
     public async Task<IActionResult> GetAvailabilityReport(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/availability")] HttpRequest req,
@@ -89,8 +108,10 @@ public class ReportsFunctions
         var offset = days - 1;
         var groupBy = req.Query["groupBy"].ToString();
         var grouped = IsGrouped(groupBy);
+        var tags = TagFilter(req);
 
         // Per-(group, check) availability summed from the daily rollup counts (additive — NOT averaged %).
+        // Tag filter (no-op when empty): restrict to checks carrying all selected tags.
         var rows = grouped
             ? await _db.AvailabilityReport.FromSql(
                 $@"SELECT ct.value AS group_value, r.check_id AS check_id, c.name AS check_name,
@@ -100,6 +121,9 @@ public class ReportsFunctions
                    JOIN checks c ON c.id = r.check_id
                    JOIN check_tags ct ON ct.check_id = r.check_id AND ct.key = {groupBy}
                    WHERE r.day >= CURRENT_DATE - {offset}
+                     AND (cardinality({tags}) = 0 OR r.check_id IN (
+                           SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                           GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
                    GROUP BY ct.value, r.check_id, c.name").AsNoTracking().ToListAsync(ct)
             : await _db.AvailabilityReport.FromSql(
                 $@"SELECT NULL::text AS group_value, r.check_id AS check_id, c.name AS check_name,
@@ -108,6 +132,9 @@ public class ReportsFunctions
                    FROM daily_check_rollup r
                    JOIN checks c ON c.id = r.check_id
                    WHERE r.day >= CURRENT_DATE - {offset}
+                     AND (cardinality({tags}) = 0 OR r.check_id IN (
+                           SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                           GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
                    GROUP BY r.check_id, c.name").AsNoTracking().ToListAsync(ct);
 
         var series = grouped
@@ -116,11 +143,17 @@ public class ReportsFunctions
                    FROM daily_check_rollup r
                    JOIN check_tags ct ON ct.check_id = r.check_id AND ct.key = {groupBy}
                    WHERE r.day >= CURRENT_DATE - {offset}
+                     AND (cardinality({tags}) = 0 OR r.check_id IN (
+                           SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                           GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
                    GROUP BY ct.value, r.day ORDER BY r.day").AsNoTracking().ToListAsync(ct)
             : await _db.AvailabilityReportSeries.FromSql(
                 $@"SELECT NULL::text AS group_value, r.day AS day, sum(r.up_count) AS up_count, sum(r.down_count) AS down_count
                    FROM daily_check_rollup r
                    WHERE r.day >= CURRENT_DATE - {offset}
+                     AND (cardinality({tags}) = 0 OR r.check_id IN (
+                           SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                           GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
                    GROUP BY r.day ORDER BY r.day").AsNoTracking().ToListAsync(ct);
 
         var seriesByGroup = series.ToLookup(s => s.GroupValue);
@@ -137,7 +170,7 @@ public class ReportsFunctions
         return ApiResults.Ok(new AvailabilityReportDto(string.IsNullOrEmpty(window) ? "30d" : window, grouped ? groupBy : null, groups));
     }
 
-    /// <summary>GET /api/reports/performance?window=&amp;groupBy= — latency (p50/p95/p99 RECOMPUTED FROM RAW) + browser web-vitals.</summary>
+    /// <summary>GET /api/reports/performance?window=&amp;groupBy=&amp;tag=key:value (repeatable, AND-filter) — latency (p50/p95/p99 RECOMPUTED FROM RAW) + browser web-vitals.</summary>
     [Function("GetPerformanceReport")]
     public async Task<IActionResult> GetPerformanceReport(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/performance")] HttpRequest req,
@@ -148,6 +181,7 @@ public class ReportsFunctions
         var offset = days - 1;
         var groupBy = req.Query["groupBy"].ToString();
         var grouped = IsGrouped(groupBy);
+        var tags = TagFilter(req);
 
         // Latency over the window, RECOMPUTED FROM RAW (#88's MW-excluded / running-excluded / UP-runs
         // filter). GROUPING SETS yields both per-check rows AND the group-level aggregate (check_id NULL)
@@ -159,7 +193,10 @@ public class ReportsFunctions
                      WHERE r.started_at >= (CURRENT_DATE - {offset})::timestamptz AND r.status <> 'running'
                        AND NOT EXISTS (SELECT 1 FROM maintenance_windows mw
                           WHERE (mw.check_id = r.check_id OR mw.check_id IS NULL)
-                            AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at))
+                            AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at)
+                       AND (cardinality({tags}) = 0 OR r.check_id IN (
+                             SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                             GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags}))))
                    SELECT ct.value AS group_value, mwx.check_id AS check_id,
                      count(mwx.duration_ms) FILTER (WHERE mwx.status IN ('pass','warn')) AS latency_count,
                      round(avg(mwx.duration_ms) FILTER (WHERE mwx.status IN ('pass','warn')), 1) AS avg_ms,
@@ -174,7 +211,10 @@ public class ReportsFunctions
                      WHERE r.started_at >= (CURRENT_DATE - {offset})::timestamptz AND r.status <> 'running'
                        AND NOT EXISTS (SELECT 1 FROM maintenance_windows mw
                           WHERE (mw.check_id = r.check_id OR mw.check_id IS NULL)
-                            AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at))
+                            AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at)
+                       AND (cardinality({tags}) = 0 OR r.check_id IN (
+                             SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                             GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags}))))
                    SELECT NULL::text AS group_value, mwx.check_id AS check_id,
                      count(mwx.duration_ms) FILTER (WHERE mwx.status IN ('pass','warn')) AS latency_count,
                      round(avg(mwx.duration_ms) FILTER (WHERE mwx.status IN ('pass','warn')), 1) AS avg_ms,
@@ -191,7 +231,10 @@ public class ReportsFunctions
                      WHERE r.started_at >= (CURRENT_DATE - {offset})::timestamptz AND r.status <> 'running'
                        AND NOT EXISTS (SELECT 1 FROM maintenance_windows mw
                           WHERE (mw.check_id = r.check_id OR mw.check_id IS NULL)
-                            AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at))
+                            AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at)
+                       AND (cardinality({tags}) = 0 OR r.check_id IN (
+                             SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                             GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags}))))
                    SELECT ct.value AS group_value, mwx.check_id AS check_id, count(m.run_id) AS vitals_count,
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.lcp_ms))::int  AS lcp_p75_ms,
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.fcp_ms))::int  AS fcp_p75_ms,
@@ -207,7 +250,10 @@ public class ReportsFunctions
                      WHERE r.started_at >= (CURRENT_DATE - {offset})::timestamptz AND r.status <> 'running'
                        AND NOT EXISTS (SELECT 1 FROM maintenance_windows mw
                           WHERE (mw.check_id = r.check_id OR mw.check_id IS NULL)
-                            AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at))
+                            AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at)
+                       AND (cardinality({tags}) = 0 OR r.check_id IN (
+                             SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                             GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags}))))
                    SELECT NULL::text AS group_value, mwx.check_id AS check_id, count(m.run_id) AS vitals_count,
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.lcp_ms))::int  AS lcp_p75_ms,
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.fcp_ms))::int  AS fcp_p75_ms,
@@ -225,12 +271,18 @@ public class ReportsFunctions
                    FROM daily_check_rollup r
                    JOIN check_tags ct ON ct.check_id = r.check_id AND ct.key = {groupBy}
                    WHERE r.day >= CURRENT_DATE - {offset} AND r.latency_count > 0
+                     AND (cardinality({tags}) = 0 OR r.check_id IN (
+                           SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                           GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
                    GROUP BY ct.value, r.day ORDER BY r.day").AsNoTracking().ToListAsync(ct)
             : await _db.LatencyReportSeries.FromSql(
                 $@"SELECT NULL::text AS group_value, r.day AS day,
                           round(sum(r.duration_avg_ms * r.latency_count) / nullif(sum(r.latency_count), 0), 1) AS avg_ms
                    FROM daily_check_rollup r
                    WHERE r.day >= CURRENT_DATE - {offset} AND r.latency_count > 0
+                     AND (cardinality({tags}) = 0 OR r.check_id IN (
+                           SELECT ft.check_id FROM check_tags ft WHERE ft.key || ':' || ft.value = ANY({tags})
+                           GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
                    GROUP BY r.day ORDER BY r.day").AsNoTracking().ToListAsync(ct);
 
         var names = await _db.Checks.AsNoTracking().ToDictionaryAsync(c => c.Id, c => c.Name, ct);
