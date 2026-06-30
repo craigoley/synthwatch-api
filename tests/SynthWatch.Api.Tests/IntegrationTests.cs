@@ -2860,6 +2860,48 @@ public class IntegrationTests
         }
     }
 
+    // ★ The approve/apply asymmetry fix: only drift_types apply can EXECUTE may be APPROVED. Approving a
+    // 'changed'/'missing' plan would move it to 'approved' where ApplyReconcilePlans (WHERE drift_type='new')
+    // silently ignores it forever — an indefinite no-op. The gate is approve-only: REJECT stays open for all
+    // (you can always reject what can't be applied). Also delivers the absent reject integration coverage.
+    [SkippableFact]
+    public async Task Approve_gates_non_executable_drift_types_but_reject_allows_them()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES " +
+            "('t-new','new','pending', jsonb_build_object('summary','x')), " +
+            "('t-changed','changed','pending', jsonb_build_object('summary','x')), " +
+            "('t-missing','missing','pending', jsonb_build_object('summary','x'))");
+        try
+        {
+            var fn = new ReconcileFunctions(db, new FakeRunnerJobTrigger(),
+                Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
+
+            // approve 'new' (executable) → 200, transitions to approved.
+            Assert.IsType<OkObjectResult>(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-new", driftType = "new" }), default));
+            Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-new'"));
+
+            // ★ approve 'changed' / 'missing' (apply can't execute them) → 409, and the plan STAYS pending
+            // (no silent move to a state apply would ignore — the whole point).
+            Assert.Equal(409, StatusOf(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-changed", driftType = "changed" }), default)));
+            Assert.Equal(409, StatusOf(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-missing", driftType = "missing" }), default)));
+            Assert.Equal("pending", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-changed'"));
+            Assert.Equal("pending", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-missing'"));
+
+            // ★ reject is ALWAYS allowed — you can reject a plan apply can't execute.
+            Assert.IsType<OkObjectResult>(await fn.RejectReconcilePlan(JsonRequest(new { sourceKey = "t-changed", driftType = "changed" }), default));
+            Assert.IsType<OkObjectResult>(await fn.RejectReconcilePlan(JsonRequest(new { sourceKey = "t-missing", driftType = "missing" }), default));
+            Assert.Equal("rejected", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-changed'"));
+            Assert.Equal("rejected", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-missing'"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM reconcile_apply_plan WHERE source_key IN ('t-new','t-changed','t-missing')");
+        }
+    }
+
     private static async Task<object?> ScalarRaw(SynthWatch.Api.Data.SynthWatchDbContext db, string sql)
     {
         var conn = (Npgsql.NpgsqlConnection)db.Database.GetDbConnection();
