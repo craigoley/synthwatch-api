@@ -702,6 +702,94 @@ public class IntegrationTests
         }
     }
 
+    // ★ The repeatable ?tag=key:value filter scopes EVERY report aggregate to the tagged subset (multi-select
+    // AND), so a tag-filtered reports surface shows tag-scoped CWV / trend / verdict-breakdown — not the fleet
+    // numbers. Empty filter = whole fleet (no-op). A tag with no matching checks = honest empty, never a lie.
+    [SkippableFact]
+    public async Task Reports_tag_filter_scopes_every_aggregate_to_the_tagged_subset()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // tag-api (http, team:platform + env:prod): rollup + 50 runs + a real-outage incident.
+        // tag-web (browser, team:web): rollup + 20 runs w/ web-vitals + a flaky-transient incident.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE api_id bigint; web_id bigint; rid bigint; i int;
+            BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('tag-api','http','https://a.example') RETURNING id INTO api_id;
+              INSERT INTO checks (name,kind,target_url,flow_name) VALUES ('tag-web','browser','https://w.example','tag-flow') RETURNING id INTO web_id;
+              INSERT INTO check_tags (check_id,key,value) VALUES (api_id,'team','platform'),(api_id,'env','prod'),(web_id,'team','web');
+              INSERT INTO daily_check_rollup (check_id,day,up_count,down_count,total_count,availability_pct,latency_count,duration_avg_ms,duration_p95_ms)
+                VALUES (api_id, CURRENT_DATE-1, 50,5,55, 90.9, 50, 100, 120);
+              INSERT INTO daily_check_rollup (check_id,day,up_count,down_count,total_count,availability_pct,latency_count,duration_avg_ms,duration_p95_ms,vitals_count,lcp_p75_ms)
+                VALUES (web_id, CURRENT_DATE-1, 20,0,20, 100.0, 20, 200, 250, 20, 1300);
+              FOR i IN 1..50 LOOP
+                INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms)
+                  VALUES (api_id,'pass',(CURRENT_DATE-1)::timestamptz + interval '6 hours',(CURRENT_DATE-1)::timestamptz + interval '6 hours',100);
+              END LOOP;
+              FOR i IN 1..20 LOOP
+                INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms)
+                  VALUES (web_id,'pass',(CURRENT_DATE-1)::timestamptz + interval '6 hours',(CURRENT_DATE-1)::timestamptz + interval '6 hours',200) RETURNING id INTO rid;
+                INSERT INTO run_metrics (run_id,lcp_ms,fcp_ms,ttfb_ms,cls) VALUES (rid,1300,800,150,0.05);
+              END LOOP;
+              INSERT INTO incidents (check_id,status,severity,opened_at,rca)
+                VALUES (api_id,'resolved','critical',now() - interval '1 day','{{"classification":"real-outage"}}'),
+                       (web_id,'resolved','warning',now() - interval '1 day','{{"classification":"flaky-transient"}}');
+            END $$;
+            """);
+        try
+        {
+            var fn = new ReportsFunctions(db);
+
+            // ── AVAILABILITY scoped to team:platform → only tag-api (tag-web excluded). ──
+            var avail = Assert.IsType<AvailabilityReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetAvailabilityReport(Request("?window=30d&tag=team:platform"), default)).Value!);
+            var ag = Assert.Single(avail.Groups);
+            Assert.Equal(50, ag.UpCount);                                  // tag-api only — NOT 70 (fleet)
+            Assert.Single(ag.Checks, c => c.CheckName == "tag-api");
+            Assert.DoesNotContain(ag.Checks, c => c.CheckName == "tag-web");
+            Assert.True(ag.Series.Count >= 1);                             // tag-scoped trend present
+
+            // ── PERFORMANCE scoped to team:web → web-vitals present (browser), latency from tag-web only. ──
+            var perf = Assert.IsType<PerformanceReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetPerformanceReport(Request("?window=30d&tag=team:web"), default)).Value!);
+            var pgrp = Assert.Single(perf.Groups);
+            Assert.NotNull(pgrp.WebVitals);
+            Assert.Equal(1300, pgrp.WebVitals!.LcpP75Ms);                  // tag-scoped CWV
+            Assert.Single(pgrp.Checks, c => c.CheckName == "tag-web");
+            Assert.NotEmpty(pgrp.Series);                                  // tag-scoped latency trend
+
+            // ── INCIDENT BREAKDOWN scoped to team:platform → only the real-outage; precision 1.0 (honest). ──
+            var brk = Assert.IsType<IncidentBreakdownDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetIncidentBreakdown(Request("?window=30d&tag=team:platform"), default)).Value!);
+            Assert.Equal(1, brk.Total);
+            Assert.Equal(1m, brk.Precision);                              // 1 real / 1 classified
+            Assert.Contains(brk.Buckets, b => b.Classification == "real-outage" && b.Count == 1);
+            Assert.DoesNotContain(brk.Buckets, b => b.Classification == "flaky-transient");
+
+            // ── MULTI-TAG AND: both tags on tag-api → matches; an impossible AND → empty (not a fake number). ──
+            var both = Assert.IsType<AvailabilityReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetAvailabilityReport(Request("?window=30d&tag=team:platform&tag=env:prod"), default)).Value!);
+            Assert.Equal(50, Assert.Single(both.Groups).UpCount);
+            var none = Assert.IsType<AvailabilityReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetAvailabilityReport(Request("?window=30d&tag=team:platform&tag=env:nope"), default)).Value!);
+            Assert.Empty(none.Groups);                                    // no check has BOTH → honest empty
+            var brkNone = Assert.IsType<IncidentBreakdownDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetIncidentBreakdown(Request("?window=30d&tag=team:nope"), default)).Value!);
+            Assert.Equal(0, brkNone.Total);
+            Assert.Null(brkNone.Precision);                              // ★ honest-empty: null, NOT 0% "real"
+
+            // ── NO tag param → whole fleet (the filter is a no-op when absent; regression guard). ──
+            var all = Assert.IsType<AvailabilityReportDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetAvailabilityReport(Request("?window=30d"), default)).Value!);
+            Assert.Equal(70, Assert.Single(all.Groups).UpCount);          // 50 + 20 — both checks
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name IN ('tag-api','tag-web');");
+        }
+    }
+
     [SkippableFact]
     public async Task Check_runs_are_cursor_paginated_over_a_bounded_window()
     {
