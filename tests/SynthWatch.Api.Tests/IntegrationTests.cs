@@ -1539,6 +1539,55 @@ public class IntegrationTests
         }
     }
 
+    // ★ F-05: a PRESENT dimension whose entry is MISSING channelIds (inner write-shape drift) must 400 and
+    // leave routes UNTOUCHED — never coalesce-to-empty → DELETE-then-insert-nothing → wipe + 200. This is the
+    // silent-integrity class on the alerting path: invisible until an alert doesn't fire. (Distinct from the
+    // #66 wrong-TOP-LEVEL-key guard above; this anchors the INNER { channelIds } shape.)
+    [SkippableFact]
+    public async Task Routing_put_rejects_a_present_dimension_missing_channelIds_without_wiping()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var rt = new RoutingFunctions(db);
+        async Task<int> RouteCount()
+        {
+            await using var c = _pg.NewDbContext();
+            return await c.AlertRoutes.CountAsync();
+        }
+        try
+        {
+            // Known state: critical -> channel 1.
+            Assert.IsType<OkObjectResult>(await rt.SetRouting(
+                JsonRequest(new RoutingDto { Severity = new() { ["critical"] = new ChannelIdsDto(new long[] { 1 }) } }), default));
+            Assert.Equal(1, await RouteCount());
+
+            // severity PRESENT but the entry omits channelIds (e.g. a client that renamed the inner key) ->
+            // 400, routes UNTOUCHED (the wipe-on-mismatch this fixes).
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(
+                JsonRequest(new { severity = new { critical = new { } } }), default));
+            Assert.Equal(1, await RouteCount());
+
+            // perCheck PRESENT but the entry omits channelIds -> 400, still untouched.
+            Assert.IsType<BadRequestObjectResult>(await rt.SetRouting(
+                JsonRequest(new { perCheck = new Dictionary<string, object> { ["1"] = new { } } }), default));
+            Assert.Equal(1, await RouteCount());
+
+            // ✓ the explicit per-entry clear (channelIds:[]) is STILL allowed — present-but-empty is intentional.
+            var ok = Assert.IsType<RoutingDto>(Assert.IsType<OkObjectResult>(await rt.SetRouting(
+                JsonRequest(new RoutingDto { Severity = new() { ["critical"] = new ChannelIdsDto(System.Array.Empty<long>()) } }), default)).Value!);
+            Assert.True(ok.Severity is null || !ok.Severity.ContainsKey("critical") || ok.Severity["critical"].ChannelIds.Count == 0);
+            Assert.Equal(0, await RouteCount()); // critical cleared (intended), not a malformed wipe
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("""
+                DELETE FROM alert_routes;
+                INSERT INTO alert_routes (severity, channel_id)
+                  SELECT s, c.id FROM (VALUES ('critical'), ('warning')) v(s) CROSS JOIN channels c WHERE c.name IN ('email','webhook');
+                """);
+        }
+    }
+
     [SkippableFact]
     public async Task Tag_crud_normalization_distinct_and_suggested()
     {
