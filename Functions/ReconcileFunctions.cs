@@ -179,15 +179,28 @@ public class ReconcileFunctions
                        url = v[3].GetString()!, flow = v[4].GetString()!, redact = v[6].GetString()!;
                 bool sensitive = v[5].GetBoolean();
                 int interval = v[7].GetInt32();
+                // ★ spec_path (plan value index 9) — the REAL runtime resolution path for a browser check: the
+                //   runner fetches + compiles this Git spec. WITHOUT it a browser check falls back to
+                //   loadFlow(flow_name) -> a baked-in dist/checks/<name>.js a manifest monitor never has, so it
+                //   can ONLY fail ("Cannot find module"). Older plans (pre-spec_path) lack v[9] -> null.
+                string? specPath = v.Count > 9 ? v[9].GetString() : null;
+                // ★ FAIL-CLOSED gate: never materialize a browser check with no spec_path — it could only fail.
+                //   Throw -> the txn rolls back, the plan stays 'approved', and the next reconcile recomputes a
+                //   plan that carries spec_path. (The runner's computeApplyPlan blocks this upstream too.)
+                if (kind == "browser" && string.IsNullOrEmpty(specPath))
+                    throw new InvalidOperationException(
+                        "browser check plan has no spec_path; refusing to materialize an unresolvable check");
 
                 // ★ ATOMIC SENSITIVE + ENABLED=FALSE: one INSERT sets sensitive inline and enabled hard-coded
-                //   false; ON CONFLICT (the partial index) makes a re-apply idempotent (updates git-auth only).
+                //   false; ON CONFLICT (the partial index) makes a re-apply idempotent (updates git-auth +
+                //   spec_path, so a row materialized before this fix self-heals from NULL -> the manifest spec).
                 await _db.Database.ExecuteSqlInterpolatedAsync(
-                    $@"INSERT INTO checks (source_key, name, kind, target_url, flow_name, sensitive, redact_patterns, interval_seconds, enabled)
-                       VALUES ({src}, {name}, {kind}, {url}, {flow}, {sensitive}, {redact}::jsonb, {interval}, false)
+                    $@"INSERT INTO checks (source_key, name, kind, target_url, flow_name, sensitive, redact_patterns, interval_seconds, enabled, spec_path)
+                       VALUES ({src}, {name}, {kind}, {url}, {flow}, {sensitive}, {redact}::jsonb, {interval}, false, {specPath})
                        ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO UPDATE SET
                          name = EXCLUDED.name, kind = EXCLUDED.kind, target_url = EXCLUDED.target_url,
-                         flow_name = EXCLUDED.flow_name, sensitive = EXCLUDED.sensitive, redact_patterns = EXCLUDED.redact_patterns", ct);
+                         flow_name = EXCLUDED.flow_name, sensitive = EXCLUDED.sensitive, redact_patterns = EXCLUDED.redact_patterns,
+                         spec_path = EXCLUDED.spec_path", ct);
 
                 // The check now exists (same txn/connection) — read its id by the unique source_key to seed locations.
                 long newId = await _db.Checks.AsNoTracking().Where(c => c.SourceKey == src).Select(c => c.Id).FirstAsync(ct);
