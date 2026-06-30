@@ -733,8 +733,8 @@ public class IntegrationTests
                 INSERT INTO run_metrics (run_id,lcp_ms,fcp_ms,ttfb_ms,cls) VALUES (rid,1300,800,150,0.05);
               END LOOP;
               INSERT INTO incidents (check_id,status,severity,opened_at,rca)
-                VALUES (api_id,'resolved','critical',now() - interval '1 day','{"classification":"real-outage"}'),
-                       (web_id,'resolved','warning',now() - interval '1 day','{"classification":"flaky-transient"}');
+                VALUES (api_id,'resolved','critical',now() - interval '1 day','{{"classification":"real-outage"}}'),
+                       (web_id,'resolved','warning',now() - interval '1 day','{{"classification":"flaky-transient"}}');
             END $$;
             """);
         try
