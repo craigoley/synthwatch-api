@@ -25,6 +25,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<Incident> Incidents => Set<Incident>();
     public DbSet<SlaAvailabilityRow> SlaAvailability => Set<SlaAvailabilityRow>();
     public DbSet<SloStatusRow> SloStatus => Set<SloStatusRow>();
+    public DbSet<SloReportRow> SloReport => Set<SloReportRow>();
     public DbSet<AvailabilitySeriesPointRow> AvailabilitySeries => Set<AvailabilitySeriesPointRow>();
     public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
     public DbSet<FlowManifest> FlowManifests => Set<FlowManifest>();
@@ -380,6 +381,24 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.SloTarget).HasColumnName("slo_target");
             e.Property(x => x.WindowFrom).HasColumnName("window_from");
             e.Property(x => x.WindowTo).HasColumnName("window_to");
+            e.Property(x => x.TotalRuns).HasColumnName("total_runs");
+            e.Property(x => x.DownRuns).HasColumnName("down_runs");
+            e.Property(x => x.Budget).HasColumnName("budget");
+            e.Property(x => x.Consumed).HasColumnName("consumed");
+            e.Property(x => x.Remaining).HasColumnName("remaining");
+            e.Property(x => x.RemainingPct).HasColumnName("remaining_pct");
+            e.Property(x => x.BurnRate).HasColumnName("burn_rate");
+        });
+
+        // Keyless: GET /reports/slo — per-check budget from LATERAL slo_status(...) + name/kind, raw SQL only.
+        modelBuilder.Entity<SloReportRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.CheckName).HasColumnName("check_name");
+            e.Property(x => x.Kind).HasColumnName("kind");
+            e.Property(x => x.SloTarget).HasColumnName("slo_target");
             e.Property(x => x.TotalRuns).HasColumnName("total_runs");
             e.Property(x => x.DownRuns).HasColumnName("down_runs");
             e.Property(x => x.Budget).HasColumnName("budget");
