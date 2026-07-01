@@ -2915,6 +2915,7 @@ public class IntegrationTests
             AssertEnvelope(await sla.GetSla(Request(), default), "window", "fleet", "items");
             AssertEnvelope(await new StatusFunctions(db).GetStatus(Request(), default), "window", "properties", "recentIncidents");
             AssertEnvelope(await reports.GetSloReport(Request(), default), "window", "fleet", "items");
+            AssertEnvelope(await reports.GetDeploysReport(Request("?host=shape.example"), default), "host", "window", "deploys");
             AssertEnvelope(await reports.GetMttrReport(Request(), default), "window", "fleet", "items", "classification", "trend");
             AssertEnvelope(await routing.GetRouting(Request(), default), "severity", "perCheck", "tagRules");
             AssertEnvelope(await reports.GetAvailabilityReport(Request(), default), "window", "groupBy", "groups");
@@ -3094,6 +3095,60 @@ public class IntegrationTests
                 "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'st-%'); " +
                 "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'st-%'); " +
                 "DELETE FROM checks WHERE name LIKE 'st-%';");
+        }
+    }
+
+    // ★ GET /reports/deploys — the deploy-marker overlay source (deploy-markers v1). Proves: host-scoped;
+    // a git-sha marker exposes its sha, a non-sha (etag) marker exposes NULL sha + is_sha=false (honest);
+    // window filtering; host required (400); and the wire shape.
+    [SkippableFact]
+    public async Task Deploys_report_is_host_scoped_and_labels_sha_vs_non_sha_honestly()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO deploys (target_host, sha, fingerprint, is_sha, source, deployed_at) VALUES
+              ('www.meals2go.com', 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0', 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0', true,  'sentry-release', now() - interval '5 days'),
+              ('www.meals2go.com', NULL,                                       '93718211',                                 false, 'etag',           now() - interval '1 day'),
+              ('other.example',    NULL,                                       'zzzz',                                     false, 'etag',           now() - interval '1 day');
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var dto = Assert.IsType<DeploysReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetDeploysReport(Request("?host=www.meals2go.com&window=30d"), default)).Value!);
+
+            Assert.Equal("www.meals2go.com", dto.Host);
+            Assert.Equal(2, dto.Deploys.Count);                              // host-scoped: other.example excluded
+            // ordered by deployed_at → the sentry-release (5d ago) first, the etag (1d ago) second
+            Assert.True(dto.Deploys[0].IsSha);
+            Assert.Equal("a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", dto.Deploys[0].Sha);
+            Assert.Equal("sentry-release", dto.Deploys[0].Source);
+            // ★ a non-sha (etag) marker → NULL sha + is_sha=false (the UI labels it "no commit id", never a fake)
+            Assert.False(dto.Deploys[1].IsSha);
+            Assert.Null(dto.Deploys[1].Sha);
+            Assert.Equal("etag", dto.Deploys[1].Source);
+
+            // host is required
+            Assert.Equal(400, StatusOf(await reports.GetDeploysReport(Request("?window=30d"), default)));
+            // bad window → 400
+            Assert.Equal(400, StatusOf(await reports.GetDeploysReport(Request("?host=x&window=1y"), default)));
+            // an unknown host → honest empty (not a 500)
+            var empty = Assert.IsType<DeploysReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetDeploysReport(Request("?host=nobody.example"), default)).Value!);
+            Assert.Empty(empty.Deploys);
+
+            // ★ wire-shape pin (#123)
+            var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+            var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(dto, web)).RootElement;
+            Assert.Equal(new[] { "deploys", "host", "window" },
+                root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(new[] { "deployedAt", "isSha", "sha", "source" },
+                root.GetProperty("deploys")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM deploys WHERE target_host IN ('www.meals2go.com','other.example');");
         }
     }
 

@@ -33,6 +33,45 @@ public class ReportsFunctions
     };
 
     /// <summary>
+    /// GET /api/reports/deploys?host=&amp;window=7d|30d|90d — auto-detected deploy markers for a host over the
+    /// window (deploy-markers v1), for overlaying ReferenceLines on the time-series charts. Read-only.
+    /// ★ Tolerates the deploys table not being migrated yet (merged ≠ migrated, #114) → serves empty, never 500.
+    /// </summary>
+    [Function("GetDeploysReport")]
+    public async Task<IActionResult> GetDeploysReport(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/deploys")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var host = req.Query["host"].ToString().Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(host)) return ApiResults.BadRequest("host is required.");
+        var window = req.Query["window"].ToString();
+        if (WindowDays(window) is not int days) return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
+        var normWindow = string.IsNullOrEmpty(window) ? "30d" : window;
+
+        List<DeployRow> rows;
+        try
+        {
+            rows = await _db.Deploys.FromSql(
+                $@"SELECT target_host, sha, fingerprint, is_sha, source, deployed_at
+                   FROM deploys
+                   WHERE target_host = {host} AND deployed_at >= now() - ({days} * INTERVAL '1 day')
+                   ORDER BY deployed_at").AsNoTracking().ToListAsync(ct);
+        }
+        catch (Npgsql.PostgresException e) when (e.SqlState == "42P01")
+        {
+            rows = new(); // deploys not migrated yet (runner PR deploys first) — serve empty, not a 500.
+        }
+
+        // sha only when it's a real commit id; the UI labels a non-sha marker "deploy detected (no commit id)".
+        var deploys = rows
+            .Select(r => new DeployMarkerDto(r.IsSha ? r.Sha : null, r.IsSha, r.Source, r.DeployedAt))
+            .ToList();
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(new DeploysReportDto(host, normWindow, deploys));
+    }
+
+    /// <summary>
     /// Parse the repeatable <c>?tag=key:value</c> filter into a normalized "key:value"[] (distinct, trimmed).
     /// Empty array = no filter. The query clause below ANDs across all selected tags (a check must carry EVERY
     /// one) — mirrors the dashboard's multi-select-AND tag filter. Passed as a single text[] param so the same

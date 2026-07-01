@@ -48,6 +48,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<StatusCheckRow> StatusChecks => Set<StatusCheckRow>();
     public DbSet<StatusSlaRow> StatusSla => Set<StatusSlaRow>();
     public DbSet<StatusIncidentRow> StatusIncidents => Set<StatusIncidentRow>();
+    public DbSet<DeployRow> Deploys => Set<DeployRow>();
     public DbSet<ReconcileDriftRow> ReconcileDrift => Set<ReconcileDriftRow>();
     public DbSet<ReconcileApplyPlanRow> ReconcileApplyPlan => Set<ReconcileApplyPlanRow>();
     public DbSet<SpecCatalogRow> SpecCatalog => Set<SpecCatalogRow>();
@@ -470,6 +471,19 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.ResolvedAt).HasColumnName("resolved_at");
             e.Property(x => x.Status).HasColumnName("status");
             e.Property(x => x.Severity).HasColumnName("severity");
+        });
+
+        // Keyless: GET /reports/deploys — auto-detected deploy markers per host (migration 0056), raw SQL only.
+        modelBuilder.Entity<DeployRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.TargetHost).HasColumnName("target_host");
+            e.Property(x => x.Sha).HasColumnName("sha");
+            e.Property(x => x.Fingerprint).HasColumnName("fingerprint");
+            e.Property(x => x.IsSha).HasColumnName("is_sha");
+            e.Property(x => x.Source).HasColumnName("source");
+            e.Property(x => x.DeployedAt).HasColumnName("deployed_at");
         });
 
         // Keyless: read the inline availability-over-time bucketed query via raw SQL only.
