@@ -49,6 +49,12 @@ public class VitalsReportRow
     public int? FcpP75Ms { get; set; }
     public int? TtfbP75Ms { get; set; }
     public double? ClsP75 { get; set; }
+    // INP is captured only on interaction runs (~half; load-only runs have NULL inp_ms — correct, not a bug),
+    // so its sample size differs from VitalsCount. InpCount = count of non-null inp_ms; InpP75Ms is the p75 over
+    // that subset (null when zero). ResourceCount = avg resources/page (a 100%-captured page-weight sibling).
+    public int? InpP75Ms { get; set; }
+    public long InpCount { get; set; }
+    public int? ResourceCount { get; set; }
 }
 
 /// <summary>Daily latency trend per group — count-weighted avg from the rollup (avg IS aggregatable).</summary>

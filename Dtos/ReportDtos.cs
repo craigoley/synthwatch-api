@@ -73,7 +73,14 @@ public record WebVitalsDto(
     [property: JsonPropertyName("lcpP75Ms")] int? LcpP75Ms,
     [property: JsonPropertyName("fcpP75Ms")] int? FcpP75Ms,
     [property: JsonPropertyName("ttfbP75Ms")] int? TtfbP75Ms,
-    [property: JsonPropertyName("clsP75")] double? ClsP75);
+    [property: JsonPropertyName("clsP75")] double? ClsP75,
+    // ★ INP is captured only on interaction runs (~half; load-only runs have none). inpP75Ms is the p75 over
+    // the non-null subset (null when zero); inpCount is that subset's size — DISTINCT from sampleCount, so the
+    // UI can honestly show "INP over N runs" and not present a half-sample p75 as if it were the full sample.
+    [property: JsonPropertyName("inpP75Ms")] int? InpP75Ms,
+    [property: JsonPropertyName("inpCount")] long InpCount,
+    // avg resources/page (a 100%-captured page-weight sibling — averaged like page weight, not a percentile).
+    [property: JsonPropertyName("resourceCount")] int? ResourceCount);
 
 public record LatencyPointDto(
     [property: JsonPropertyName("day")] DateOnly Day,

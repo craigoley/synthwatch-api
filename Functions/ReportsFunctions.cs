@@ -402,7 +402,10 @@ public class ReportsFunctions
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.lcp_ms))::int  AS lcp_p75_ms,
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.fcp_ms))::int  AS fcp_p75_ms,
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.ttfb_ms))::int AS ttfb_p75_ms,
-                     percentile_cont(0.75) WITHIN GROUP (ORDER BY m.cls) AS cls_p75
+                     percentile_cont(0.75) WITHIN GROUP (ORDER BY m.cls) AS cls_p75,
+                     count(m.inp_ms) AS inp_count,
+                     round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.inp_ms))::int AS inp_p75_ms,
+                     round(avg(m.resource_count))::int AS resource_count
                    FROM mwx JOIN run_metrics m ON m.run_id = mwx.id
                             JOIN check_tags ct ON ct.check_id = mwx.check_id AND ct.key = {groupBy}
                    WHERE mwx.status IN ('pass','warn')
@@ -421,7 +424,10 @@ public class ReportsFunctions
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.lcp_ms))::int  AS lcp_p75_ms,
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.fcp_ms))::int  AS fcp_p75_ms,
                      round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.ttfb_ms))::int AS ttfb_p75_ms,
-                     percentile_cont(0.75) WITHIN GROUP (ORDER BY m.cls) AS cls_p75
+                     percentile_cont(0.75) WITHIN GROUP (ORDER BY m.cls) AS cls_p75,
+                     count(m.inp_ms) AS inp_count,
+                     round(percentile_cont(0.75) WITHIN GROUP (ORDER BY m.inp_ms))::int AS inp_p75_ms,
+                     round(avg(m.resource_count))::int AS resource_count
                    FROM mwx JOIN run_metrics m ON m.run_id = mwx.id
                    WHERE mwx.status IN ('pass','warn')
                    GROUP BY GROUPING SETS ((mwx.check_id), ())").AsNoTracking().ToListAsync(ct);
@@ -482,7 +488,8 @@ public class ReportsFunctions
 
     private static WebVitalsDto? Vit(VitalsReportRow? v) =>
         v is null || v.VitalsCount == 0 ? null
-            : new WebVitalsDto(v.VitalsCount, v.LcpP75Ms, v.FcpP75Ms, v.TtfbP75Ms, v.ClsP75);
+            : new WebVitalsDto(v.VitalsCount, v.LcpP75Ms, v.FcpP75Ms, v.TtfbP75Ms, v.ClsP75,
+                v.InpP75Ms, v.InpCount, v.ResourceCount);
 
     /// <summary>
     /// GET /api/reports/narrative?scope=fleet|monitor&amp;key=&lt;checkId|'fleet'&gt;&amp;window=7d|30d|90d —
