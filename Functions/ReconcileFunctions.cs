@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Options;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Dtos;
@@ -107,10 +108,12 @@ public class ReconcileFunctions
 
     private const int ApplyCap = 5; // ★ max plans applied per call — one buggy apply can't rewrite the fleet.
 
-    // ★ The drift_types ApplyReconcilePlans can actually EXECUTE — must mirror the apply WHERE filter
-    // (`drift_type = 'new'`, see ApplyReconcilePlans). The approve gate uses this so an operator can't approve
-    // a plan apply would silently ignore. Widen this set ONLY when the executor learns the new type.
-    private static readonly HashSet<string> ApplyExecutableDriftTypes = new(StringComparer.Ordinal) { "new" };
+    // ★ The drift_types ApplyReconcilePlans can actually EXECUTE — the SINGLE source of truth for BOTH the
+    // apply WHERE filter (`drift_type = ANY(...)`) and the approve gate, so an operator can't approve a plan
+    // apply would silently ignore. 'new' = materialize; 'missing' = soft-disable. Widen ONLY when a per-type
+    // branch is wired in the loop below. ('changed' is deliberately NOT here yet — it carries the
+    // redaction-strip-bypass risk and lands as its own PR2, runner+API paired.)
+    private static readonly HashSet<string> ApplyExecutableDriftTypes = new(StringComparer.Ordinal) { "new", "missing" };
 
     /// <summary>POST /api/reconcile/approve — pending → approved. ★ A 'blocked' plan (a redaction strip) can
     /// NEVER be approved (409); nor can a drift_type apply can't yet execute (changed/missing) — that would be
@@ -161,18 +164,20 @@ public class ReconcileFunctions
         return ApiResults.Ok(new { sourceKey = body.SourceKey, driftType = body.DriftType, status = decision });
     }
 
-    /// <summary>POST /api/reconcile/apply — execute the APPROVED plans (cap 5). ★ Each plan in ONE transaction;
-    /// materialize the check with sensitive INLINE (atomic — no non-sensitive window) and enabled=FALSE
-    /// (Phase 1 never enables), then seed check_locations. ROLLBACK on any error (the plan stays 'approved',
-    /// re-appliable). Idempotent (ON CONFLICT). Only 'new' (materialize) is wired (the only pending type).</summary>
+    /// <summary>POST /api/reconcile/apply — execute the APPROVED plans (cap 5). ★ Each plan in ONE transaction:
+    /// 'new' materializes the check (sensitive INLINE, enabled=FALSE) + seeds check_locations; 'missing'
+    /// SOFT-DISABLES it (enabled=false, never delete — history preserved). The write + the plan→'applied' flip
+    /// commit together; ROLLBACK on any error (the plan stays 'approved', re-appliable). Executable types are
+    /// ApplyExecutableDriftTypes ('changed' is a separate PR — redaction-strip risk).</summary>
     [Function("ApplyReconcilePlans")]
     public async Task<IActionResult> ApplyReconcilePlans(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "reconcile/apply")] HttpRequest req,
         CancellationToken ct)
     {
+        var executable = ApplyExecutableDriftTypes.ToArray();
         var approved = await _db.ReconcileApplyPlan.FromSql(
             $@"SELECT source_key, drift_type, status, plan::text AS plan, computed_at
-               FROM reconcile_apply_plan WHERE status = 'approved' AND drift_type = 'new'
+               FROM reconcile_apply_plan WHERE status = 'approved' AND drift_type = ANY({executable})
                ORDER BY source_key LIMIT {ApplyCap}").AsNoTracking().ToListAsync(ct);
 
         var applied = new List<string>();
@@ -186,6 +191,16 @@ public class ReconcileFunctions
             try
             {
                 var doc = JsonSerializer.Deserialize<PlanDoc>(p.Plan, opts);
+                if (p.DriftType == "missing")
+                {
+                    // ★ MISSING — a Git-deleted spec. SOFT-DISABLE only (enabled=false), executed AS-EMITTED
+                    //   from the plan. NEVER a delete: the check row + its runs/incidents/history survive, so a
+                    //   re-added spec can re-enable it later.
+                    await ApplyMissingAsync(doc, tx, ct);
+                }
+                else
+                {
+                // === 'new' — materialize (unchanged) ===
                 var v = doc?.Statements?.FirstOrDefault()?.Values;
                 if (v is null || v.Count < 9) throw new InvalidOperationException("plan has no materialize values");
                 string src = v[0].GetString()!, name = v[1].GetString()!, kind = v[2].GetString()!,
@@ -222,10 +237,13 @@ public class ReconcileFunctions
                     $@"INSERT INTO check_locations (check_id, location)
                        SELECT {newId}, name FROM locations WHERE enabled
                        ON CONFLICT (check_id, location) DO NOTHING", ct);
+                }
 
+                // ★ plan → applied (generic drift_type — both 'new' materialize and 'missing' soft-disable),
+                //   in the SAME txn, so an apply is atomic: the write + the status flip commit together.
                 await _db.Database.ExecuteSqlInterpolatedAsync(
                     $@"UPDATE reconcile_apply_plan SET status = 'applied', applied_at = now()
-                       WHERE source_key = {p.SourceKey} AND drift_type = 'new' AND status = 'approved'", ct);
+                       WHERE source_key = {p.SourceKey} AND drift_type = {p.DriftType} AND status = 'approved'", ct);
 
                 await tx.CommitAsync(ct);
                 applied.Add(p.SourceKey);
@@ -237,6 +255,36 @@ public class ReconcileFunctions
             }
         }
         return ApiResults.Ok(new ReconcileApplyResultDto(applied, failed, ApplyCap));
+    }
+
+    /// <summary>
+    /// Apply a 'missing' plan: SOFT-DISABLE the check (enabled=false) by executing the plan's statement
+    /// AS-EMITTED by the runner (plan-as-contract — not hand-constructed). ★ Guarded to the single soft-disable
+    /// UPDATE by source_key: if the plan isn't exactly that (or contains a delete), REFUSE (throw → the caller
+    /// rolls back). A 'missing' apply must NEVER delete the check — the row + its runs/incidents/history are
+    /// preserved so a re-added spec can re-enable it later.
+    /// </summary>
+    private async Task ApplyMissingAsync(PlanDoc? doc, IDbContextTransaction tx, CancellationToken ct)
+    {
+        var stmt = doc?.Statements?.FirstOrDefault();
+        var text = stmt?.Text;
+        var normalized = text is null ? null : new string(text.Where(c => !char.IsWhiteSpace(c)).ToArray());
+        // ★ Contract: exactly ONE statement — a soft-disable UPDATE by source_key with one value, never a delete.
+        if (text is null || stmt!.Values is not { Count: 1 } vals || normalized is null
+            || !normalized.Contains("UPDATEchecksSETenabled=falseWHEREsource_key=$1", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("DELETE", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "missing plan is not the expected single soft-disable statement — refusing to apply.");
+
+        // Execute the runner-emitted statement verbatim ($1 = source_key from the plan values), on this txn.
+        var conn = _db.Database.GetDbConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = text;
+        cmd.Transaction = tx.GetDbTransaction();
+        var pr = cmd.CreateParameter();
+        pr.Value = vals[0].GetString() ?? (object)DBNull.Value;
+        cmd.Parameters.Add(pr);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     // The runner-written plan jsonb shape (only the bits the executor reads).
