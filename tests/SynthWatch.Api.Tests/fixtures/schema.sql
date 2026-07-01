@@ -1007,3 +1007,19 @@ CREATE TABLE audit_log (
     note         text
 );
 CREATE INDEX audit_log_ts_idx ON audit_log (ts DESC);
+
+-- deploys (migration 0056) — auto-detected deploy markers, one row per (host, distinct marker). Added to the
+-- test snapshot so GET /reports/deploys can read it.
+CREATE TABLE public.deploys (
+    id           bigserial   PRIMARY KEY,
+    target_host  text        NOT NULL,
+    sha          text,
+    fingerprint  text        NOT NULL,
+    is_sha       boolean     NOT NULL DEFAULT false,
+    source       text        NOT NULL,
+    deployed_at  timestamp with time zone NOT NULL DEFAULT now(),
+    detected_at  timestamp with time zone NOT NULL DEFAULT now(),
+    detail       jsonb,
+    CONSTRAINT deploys_host_fingerprint_key UNIQUE (target_host, fingerprint)
+);
+CREATE INDEX deploys_host_time_idx ON public.deploys (target_host, deployed_at DESC);
