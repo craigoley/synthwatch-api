@@ -406,6 +406,8 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Remaining).HasColumnName("remaining");
             e.Property(x => x.RemainingPct).HasColumnName("remaining_pct");
             e.Property(x => x.BurnRate).HasColumnName("burn_rate");
+            e.Property(x => x.BurnState).HasColumnName("burn_state");
+            e.Property(x => x.ReportedBurn).HasColumnName("reported_burn");
         });
 
         // Keyless: the incident verdict-taxonomy breakdown (GROUP BY rca->>'classification'), raw SQL only.

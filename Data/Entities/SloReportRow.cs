@@ -18,5 +18,9 @@ public class SloReportRow
     public long Consumed { get; set; }              // down-runs in the window (== DownRuns)
     public decimal Remaining { get; set; }          // budget - consumed (negative => over budget)
     public decimal? RemainingPct { get; set; }      // null when budget is 0
-    public decimal BurnRate { get; set; }           // (down/total) / (1 - target) — informational (pooled)
+    public decimal BurnRate { get; set; }           // (down/total) / (1 - target) — informational (pooled, window)
+    // ★ P5 PR2 — the LOCATION-AWARE burn STATE from slo_burn_status(c.id): the SAME verdict the runner pages
+    // on (read == page). 'fast' | 'slow' | 'none'; reported_burn = max at-floor burn of the firing window.
+    public string BurnState { get; set; } = "none";
+    public double ReportedBurn { get; set; }
 }

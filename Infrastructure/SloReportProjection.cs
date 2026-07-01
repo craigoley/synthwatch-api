@@ -37,6 +37,8 @@ public static class SloReportProjection
                 Remaining: r.Remaining,
                 RemainingPct: insufficient ? null : r.RemainingPct,   // never a fake % on thin data
                 BurnRate: r.BurnRate,
+                BurnState: r.BurnState,
+                ReportedBurn: r.ReportedBurn,
                 InsufficientData: insufficient));
 
             sumTotal += r.TotalRuns;
