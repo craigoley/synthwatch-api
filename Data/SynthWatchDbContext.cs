@@ -26,6 +26,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<SlaAvailabilityRow> SlaAvailability => Set<SlaAvailabilityRow>();
     public DbSet<SloStatusRow> SloStatus => Set<SloStatusRow>();
     public DbSet<SloReportRow> SloReport => Set<SloReportRow>();
+    public DbSet<MttrIncidentRow> MttrIncidents => Set<MttrIncidentRow>();
     public DbSet<AvailabilitySeriesPointRow> AvailabilitySeries => Set<AvailabilitySeriesPointRow>();
     public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
     public DbSet<FlowManifest> FlowManifests => Set<FlowManifest>();
@@ -408,6 +409,22 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.BurnRate).HasColumnName("burn_rate");
             e.Property(x => x.BurnState).HasColumnName("burn_state");
             e.Property(x => x.ReportedBurn).HasColumnName("reported_burn");
+        });
+
+        // Keyless: GET /reports/mttr — one row per incident in the window (+ its check), raw SQL only.
+        modelBuilder.Entity<MttrIncidentRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.CheckName).HasColumnName("check_name");
+            e.Property(x => x.Kind).HasColumnName("kind");
+            e.Property(x => x.Status).HasColumnName("status");
+            e.Property(x => x.OpenedAt).HasColumnName("opened_at");
+            e.Property(x => x.ResolvedAt).HasColumnName("resolved_at");
+            e.Property(x => x.Classification).HasColumnName("classification");
+            e.Property(x => x.ConsecutiveFailures).HasColumnName("consecutive_failures");
+            e.Property(x => x.IntervalSeconds).HasColumnName("interval_seconds");
         });
 
         // Keyless: the incident verdict-taxonomy breakdown (GROUP BY rca->>'classification'), raw SQL only.
