@@ -49,6 +49,49 @@ public class ReportsFunctions
     private const string RealOutage = "real-outage";
 
     /// <summary>
+    /// GET /api/reports/slo?window=7d|30d|90d&amp;tag=key:value (repeatable, AND) — fleet + per-check error
+    /// BUDGET over the window. Only checks WITH an slo_target appear (opt-in; slo_status returns no row
+    /// otherwise, so the LATERAL drops them). One CROSS JOIN LATERAL slo_status(c.id, from, to) per SLO
+    /// check — reuses the per-check function, NO fleet SQL function. Run-weighted ADDITIVE fleet rollup +
+    /// insufficientData honesty (see SloReportProjection). Read-only (stays open per the GET default).
+    /// ★ No fast/slow-burn pills — pooled burn false-pages; location-aware burn is a follow-up PR.
+    /// </summary>
+    [Function("GetSloReport")]
+    public async Task<IActionResult> GetSloReport(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/slo")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var window = req.Query["window"].ToString();
+        if (WindowDays(window) is not int days)
+            return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
+        var tags = TagFilter(req);
+        var to = DateTimeOffset.UtcNow;
+        var from = to - TimeSpan.FromDays(days);
+
+        // One row per SLO-having check: LATERAL slo_status(...) gives budget/consumed/remaining/burn; the
+        // tag clause ANDs across selected tags (no-op when none) — the same idiom as the other reports.
+        var rows = await _db.SloReport.FromSql(
+            $@"SELECT c.id AS check_id, c.name AS check_name, c.kind AS kind,
+                      s.slo_target, s.total_runs, s.down_runs, s.budget, s.consumed, s.remaining, s.remaining_pct, s.burn_rate
+               FROM checks c
+               CROSS JOIN LATERAL slo_status(c.id, {from}, {to}) s
+               WHERE c.slo_target IS NOT NULL
+                 AND (cardinality({tags}) = 0 OR c.id IN (
+                       SELECT ft.check_id FROM check_tags ft
+                       WHERE ft.key || ':' || ft.value = ANY({tags})
+                       GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
+               ORDER BY c.name").AsNoTracking().ToListAsync(ct);
+
+        var projection = SloReportProjection.Build(rows);
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(new SloReportResponseDto(
+            Window: string.IsNullOrEmpty(window) ? "30d" : window,
+            Fleet: projection.Fleet,
+            Items: projection.Items));
+    }
+
+    /// <summary>
     /// GET /api/reports/incident-breakdown?window=7d|30d|90d&tag=key:value (repeatable, AND) — the verdict-taxonomy breakdown over the window:
     /// count per rca.classification (real-outage | flaky-transient | selector-drift | environment-regional |
     /// perf-regression), an explicit <c>unclassified</c> bucket (incidents with no RCA yet — never dropped),

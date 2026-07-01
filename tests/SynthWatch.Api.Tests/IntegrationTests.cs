@@ -175,6 +175,98 @@ public class IntegrationTests
         }
     }
 
+    // ★ GET /reports/slo — fleet + per-check error budget (P5 v1). Proves: only SLO-having checks appear;
+    // per-check budget math; the fleet rollup is ADDITIVE (not an average of per-check %); tag scoping;
+    // insufficientData + empty-scope honesty (never a fabricated %); and pins the response wire shape.
+    [SkippableFact]
+    public async Task Slo_report_is_additive_tag_scoped_and_honest_about_thin_data()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // A: 200 runs / 2 down (budget 2, pct 0). B: 100 runs / 0 down (budget 1, pct 1). Both tagged team:slorep.
+        // C: tagged team:slorep but NO slo_target → must be EXCLUDED. D: tagged team:thin, target 0.95, 5 runs → thin.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE a bigint; b bigint; c bigint; d bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, slo_target) VALUES ('slo-rep-a','http','https://a.ex',0.99) RETURNING id INTO a;
+              INSERT INTO checks (name, kind, target_url, slo_target) VALUES ('slo-rep-b','http','https://b.ex',0.99) RETURNING id INTO b;
+              INSERT INTO checks (name, kind, target_url)            VALUES ('slo-rep-c','http','https://c.ex')      RETURNING id INTO c;
+              INSERT INTO checks (name, kind, target_url, slo_target) VALUES ('slo-rep-d','http','https://d.ex',0.95) RETURNING id INTO d;
+              INSERT INTO check_tags (check_id, key, value) VALUES (a,'team','slorep'), (b,'team','slorep'), (c,'team','slorep'), (d,'team','thin');
+              FOR i IN 1..200 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (a, CASE WHEN i <= 2 THEN 'fail' ELSE 'pass' END, now() - (i || ' minutes')::interval); END LOOP;
+              FOR i IN 1..100 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (b, 'pass', now() - (i || ' minutes')::interval); END LOOP;
+              FOR i IN 1..50  LOOP INSERT INTO runs (check_id, status, started_at) VALUES (c, 'pass', now() - (i || ' minutes')::interval); END LOOP;
+              FOR i IN 1..5   LOOP INSERT INTO runs (check_id, status, started_at) VALUES (d, 'pass', now() - (i || ' minutes')::interval); END LOOP;
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+
+            // ── scope to team:slorep → exactly A + B (C excluded: it carries the tag but has NO slo_target) ──
+            var scoped = Assert.IsType<SloReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetSloReport(Request("?window=30d&tag=team:slorep"), default)).Value!);
+            Assert.Equal(new[] { "slo-rep-a", "slo-rep-b" }, scoped.Items.Select(i => i.CheckName).OrderBy(n => n).ToArray());
+            Assert.DoesNotContain(scoped.Items, i => i.CheckName == "slo-rep-c"); // no slo_target ⇒ opt-out
+
+            var a = scoped.Items.First(i => i.CheckName == "slo-rep-a");
+            var b = scoped.Items.First(i => i.CheckName == "slo-rep-b");
+            Assert.True(Math.Abs(a.Budget - 2m) < 0.1m);   // (1-0.99)*200
+            Assert.Equal(2, a.Consumed);                   // 2 down
+            Assert.True(Math.Abs(a.Remaining - 0m) < 0.1m);
+            Assert.True(a.RemainingPct is decimal ap && Math.Abs(ap - 0m) < 0.05m);  // budget fully consumed
+            Assert.False(a.InsufficientData);
+            Assert.True(Math.Abs(b.Budget - 1m) < 0.1m);
+            Assert.Equal(0, b.Consumed);
+            Assert.True(b.RemainingPct is decimal bp && Math.Abs(bp - 1m) < 0.05m);
+
+            // ── ★ fleet rollup is ADDITIVE: Σbudget=3, Σconsumed=2 → 1 - 2/3 = 0.333…, NOT the mean of the
+            //     per-check %s (0 and 1 → 0.5). This is the teeth: an averaging bug would read 0.5. ──
+            Assert.True(Math.Abs(scoped.Fleet.Budget - 3m) < 0.2m);
+            Assert.Equal(2, scoped.Fleet.Consumed);
+            Assert.True(Math.Abs(scoped.Fleet.Remaining - 1m) < 0.2m);
+            Assert.False(scoped.Fleet.InsufficientData);
+            var fleetPct = scoped.Fleet.RemainingPct!.Value;
+            Assert.True(Math.Abs(fleetPct - 0.3333m) < 0.02m, $"expected additive ~0.333, got {fleetPct}");
+            Assert.True(Math.Abs(fleetPct - 0.5m) > 0.1m, "fleet % must NOT be the average of per-check %s");
+
+            // ── insufficientData honesty: D has 5 runs (< 20) → flagged + a NULL pct, never a fabricated number ──
+            var thin = Assert.IsType<SloReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetSloReport(Request("?tag=team:thin"), default)).Value!);
+            var d = Assert.Single(thin.Items);
+            Assert.True(d.InsufficientData);
+            Assert.Null(d.RemainingPct);
+            Assert.True(thin.Fleet.InsufficientData);
+            Assert.Null(thin.Fleet.RemainingPct);
+
+            // ── scoped-empty honesty: a tag matching nothing → empty items + honest insufficient fleet, no fake % ──
+            var empty = Assert.IsType<SloReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetSloReport(Request("?tag=team:doesnotexist"), default)).Value!);
+            Assert.Empty(empty.Items);
+            Assert.True(empty.Fleet.InsufficientData);
+            Assert.Null(empty.Fleet.RemainingPct);
+
+            // ── window validation ──
+            Assert.IsType<BadRequestObjectResult>(await reports.GetSloReport(Request("?window=1y"), default));
+
+            // ── ★ wire-shape pin (#123): top-level + per-item + fleet key sets ──
+            var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+            var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(scoped, web)).RootElement;
+            Assert.Equal(new[] { "fleet", "items", "window" }, root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(new[] { "budget", "consumed", "downRuns", "insufficientData", "remaining", "remainingPct", "totalRuns" },
+                root.GetProperty("fleet").EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(
+                new[] { "budget", "burnRate", "checkId", "checkName", "consumed", "downRuns", "insufficientData", "kind", "remaining", "remainingPct", "target", "totalRuns" },
+                root.GetProperty("items")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'slo-rep-%'); DELETE FROM checks WHERE name LIKE 'slo-rep-%';");
+        }
+    }
+
     [SkippableFact]
     public async Task Check_detail_does_not_500_when_slo_target_is_1_0()
     {
@@ -2712,6 +2804,7 @@ public class IntegrationTests
             AssertEnvelope(await locations.GetCheckLocations(Request(), checkId, default), "locations");
             AssertEnvelope(await checks.GetAvailabilitySeries(Request(), checkId, default), "window", "bucket", "points");
             AssertEnvelope(await sla.GetSla(Request(), default), "window", "fleet", "items");
+            AssertEnvelope(await reports.GetSloReport(Request(), default), "window", "fleet", "items");
             AssertEnvelope(await routing.GetRouting(Request(), default), "severity", "perCheck", "tagRules");
             AssertEnvelope(await reports.GetAvailabilityReport(Request(), default), "window", "groupBy", "groups");
             AssertEnvelope(await reports.GetPerformanceReport(Request(), default), "window", "groupBy", "groups");
