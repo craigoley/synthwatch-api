@@ -2902,6 +2902,127 @@ public class IntegrationTests
         }
     }
 
+    // ═══ The APPLY EXECUTOR — the riskiest write in the repo (live config, sensitive-inline, txn/rollback) and
+    // the one path with no e2e coverage (API analysis #3 / #137 follow-up). ★ These run as the postgres
+    // SUPERUSER (Testcontainers default), so they cover MATERIALIZATION CORRECTNESS, not grants — a missing
+    // GRANT would NOT fail here (that's pg-grant-coverage CI's job, #133). The seeded plan jsonb matches the
+    // executor's read contract (plan.statements[0].values = [src,name,kind,url,flow,sensitive,redact,interval,
+    // enabled(ignored),specPath], ReconcileFunctions.cs:188-216).
+
+    // Build a materialize-plan jsonb matching what computeApplyPlan emits + what the executor reads (v[0..9]).
+    private static string MaterializePlan(string src, string name, string kind, string url, string flow,
+        bool sensitive, string redact, int interval, string? specPath)
+    {
+        var values = new object?[] { src, name, kind, url, flow, sensitive, redact, interval, false /*enabled v8 — executor ignores it, hard-codes false*/, specPath };
+        var plan = new { statements = new[] { new { text = "INSERT INTO checks …", values, regions = new[] { "eastus2" } } } };
+        return System.Text.Json.JsonSerializer.Serialize(plan);
+    }
+
+    private static async Task CleanupApply(SynthWatch.Api.Data.SynthWatchDbContext db, string src, string[] locs)
+    {
+        await db.Database.ExecuteSqlRawAsync(
+            $"DELETE FROM check_locations WHERE check_id IN (SELECT id FROM checks WHERE source_key = '{src}'); " +
+            $"DELETE FROM checks WHERE source_key = '{src}'; " +
+            $"DELETE FROM reconcile_apply_plan WHERE source_key = '{src}';");
+        foreach (var l in locs)
+            await db.Database.ExecuteSqlRawAsync($"DELETE FROM locations WHERE name = '{l}'");
+    }
+
+    private static ReconcileFunctions ApplyFn(SynthWatch.Api.Data.SynthWatchDbContext db) =>
+        new(db, new FakeRunnerJobTrigger(),
+            Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
+
+    // ★ Happy path: an approved 'new' browser plan materializes a runnable check — spec_path set (#131/#156),
+    // enabled=FALSE (the Phase-1 invariant), locations seeded for every enabled region, plan approved→applied.
+    [SkippableFact]
+    public async Task Apply_materializes_an_approved_new_plan_disabled_with_spec_path_and_locations()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO locations (name, enabled) VALUES ('t-eastus2', true), ('t-centralus', true), ('t-westus', true) " +
+            "ON CONFLICT (name) DO UPDATE SET enabled = true");
+        var plan = MaterializePlan("t-apply-browser", "Apply Browser", "browser", "https://apply.test", "apply-flow",
+            sensitive: false, redact: "[]", interval: 300, specPath: "monitors/apply-test.spec.ts");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-apply-browser','new','approved', {plan}::jsonb)");
+        try
+        {
+            var res = Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default));
+            var dto = Assert.IsType<ReconcileApplyResultDto>(res.Value);
+            Assert.Contains("t-apply-browser", dto.Applied);
+            Assert.DoesNotContain("t-apply-browser", dto.Failed);
+
+            var c = await db.Checks.AsNoTracking().Where(x => x.SourceKey == "t-apply-browser").FirstAsync();
+            Assert.Equal("Apply Browser", c.Name);
+            Assert.Equal("browser", c.Kind);
+            Assert.Equal("https://apply.test", c.TargetUrl);
+            Assert.Equal("apply-flow", c.FlowName);
+            Assert.Equal("monitors/apply-test.spec.ts", c.SpecPath);  // ★ #131/#156 — spec_path materialized (runnable)
+            Assert.False(c.Sensitive);
+            Assert.False(c.Enabled);                                   // ★ INVARIANT: enabled=FALSE on materialize
+
+            // ★ check_locations seeded for ALL enabled regions (executor: SELECT name FROM locations WHERE enabled).
+            var seeded = (long)(await ScalarRaw(db, $"SELECT count(*) FROM check_locations WHERE check_id = {c.Id}"))!;
+            var enabled = (long)(await ScalarRaw(db, "SELECT count(*) FROM locations WHERE enabled"))!;
+            Assert.Equal(enabled, seeded);
+            Assert.Equal(true, (bool?)await ScalarRaw(db, $"SELECT EXISTS(SELECT 1 FROM check_locations WHERE check_id = {c.Id} AND location = 't-eastus2')"));
+
+            // ★ plan flipped approved → applied, applied_at set.
+            Assert.Equal("applied", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-apply-browser'"));
+            Assert.Equal(true, (bool?)await ScalarRaw(db, "SELECT applied_at IS NOT NULL FROM reconcile_apply_plan WHERE source_key='t-apply-browser'"));
+        }
+        finally { await CleanupApply(db, "t-apply-browser", new[] { "t-eastus2", "t-centralus", "t-westus" }); }
+    }
+
+    // ★ Sensitive inline: an approved sensitive 'new' plan → sensitive=true straight from the INSERT (no
+    // non-sensitive window), still enabled=FALSE.
+    [SkippableFact]
+    public async Task Apply_sets_sensitive_inline_and_enabled_false()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var plan = MaterializePlan("t-apply-sensitive", "Apply Sensitive", "http", "https://sensitive.test", "",
+            sensitive: true, redact: "[\"authorization\"]", interval: 300, specPath: null);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-apply-sensitive','new','approved', {plan}::jsonb)");
+        try
+        {
+            Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default));
+            var c = await db.Checks.AsNoTracking().Where(x => x.SourceKey == "t-apply-sensitive").FirstAsync();
+            Assert.True(c.Sensitive);   // ★ sensitive=true atomically from the INSERT — no window where it's non-sensitive
+            Assert.False(c.Enabled);    // ★ still disabled on materialize
+            Assert.Equal("http", c.Kind);
+        }
+        finally { await CleanupApply(db, "t-apply-sensitive", System.Array.Empty<string>()); }
+    }
+
+    // ★ Rollback: a materialize that fails mid-txn (interval_seconds=0 violates checks_interval_seconds_check)
+    // → NO check row, NO locations, the plan STAYS 'approved' (re-appliable — never half-applied).
+    [SkippableFact]
+    public async Task Apply_rolls_back_a_failed_materialize_leaving_the_plan_approved()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var plan = MaterializePlan("t-apply-fail", "Apply Fail", "http", "https://fail.test", "",
+            sensitive: false, redact: "[]", interval: 0 /*→ violates checks_interval_seconds_check (>0)*/, specPath: null);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-apply-fail','new','approved', {plan}::jsonb)");
+        try
+        {
+            var dto = Assert.IsType<ReconcileApplyResultDto>(
+                Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default)).Value);
+            Assert.Contains("t-apply-fail", dto.Failed);        // reported failed, not applied
+            Assert.DoesNotContain("t-apply-fail", dto.Applied);
+
+            // ★ ROLLBACK: nothing materialized, plan stays approved for retry.
+            Assert.False(await db.Checks.AsNoTracking().AnyAsync(x => x.SourceKey == "t-apply-fail"));
+            Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-apply-fail'"));
+            Assert.Equal(true, (bool?)await ScalarRaw(db, "SELECT applied_at IS NULL FROM reconcile_apply_plan WHERE source_key='t-apply-fail'"));
+        }
+        finally { await CleanupApply(db, "t-apply-fail", System.Array.Empty<string>()); }
+    }
+
     private static async Task<object?> ScalarRaw(SynthWatch.Api.Data.SynthWatchDbContext db, string sql)
     {
         var conn = (Npgsql.NpgsqlConnection)db.Database.GetDbConnection();
