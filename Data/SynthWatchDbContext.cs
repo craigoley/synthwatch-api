@@ -466,6 +466,8 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Unclassified).HasColumnName("unclassified");
             e.Property(x => x.ExecutedSha256).HasColumnName("executed_sha256");
             e.Property(x => x.SpecPath).HasColumnName("spec_path");
+            e.Property(x => x.RedTestedAt).HasColumnName("red_tested_at");
+            e.Property(x => x.RedTestMethod).HasColumnName("red_test_method");
         });
 
         // Keyless: §D1 trust detail — daily retry-rate trend for one check (the detail sparkline). Raw SQL only.

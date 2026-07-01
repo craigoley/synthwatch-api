@@ -1025,3 +1025,14 @@ CREATE TABLE public.deploys (
     CONSTRAINT deploys_host_fingerprint_key UNIQUE (target_host, fingerprint)
 );
 CREATE INDEX deploys_host_time_idx ON public.deploys (target_host, deployed_at DESC);
+
+-- red_tests (migration 0057) — §D1 red-test capture. The API reads it for the trust scorecard.
+CREATE TABLE public.red_tests (
+    id         bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    check_id   bigint      NOT NULL REFERENCES public.checks(id) ON DELETE CASCADE,
+    tested_at  timestamp with time zone NOT NULL DEFAULT now(),
+    method     text        NOT NULL CHECK (method IN ('executed-red-fixture', 'attested-manual')),
+    outcome    text        NOT NULL CHECK (outcome IN ('red')),
+    detail     jsonb
+);
+CREATE INDEX red_tests_check_time_idx ON public.red_tests (check_id, tested_at DESC);

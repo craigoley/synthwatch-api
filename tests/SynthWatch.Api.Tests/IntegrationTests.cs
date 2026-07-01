@@ -523,8 +523,15 @@ public class IntegrationTests
             Assert.Null(empty.RetryRate);
             Assert.Null(empty.LastGreenAt);
 
-            // ── ★ redTest.captured is ALWAYS false in v1 — the honest contract slot, never fabricated ──
-            Assert.All(m.Values, x => Assert.False(x.RedTest.Captured));
+            // ── ★ redTest.captured=false is the HONEST DEFAULT — none of these monitors has a red_tests row, so
+            //    captured stays false with testedAt/method null (never fabricated). The captured=true path is
+            //    covered by Trust_redTest_captured_reflects_a_recorded_red_test below. ──
+            Assert.All(m.Values, x =>
+            {
+                Assert.False(x.RedTest.Captured);
+                Assert.Null(x.RedTest.TestedAt);
+                Assert.Null(x.RedTest.Method);
+            });
 
             // ── detail endpoint: same row + a daily retry-rate series (null on run-less days) ──
             var detail = Assert.IsType<TrustMonitorDetailDto>(Assert.IsType<OkObjectResult>(
@@ -548,6 +555,59 @@ public class IntegrationTests
                 "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'trust-%'); " +
                 "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'trust-%'); " +
                 "DELETE FROM checks WHERE name LIKE 'trust-%';");
+        }
+    }
+
+    // ★ §D1 v2 (0057): redTest.captured flips true ONLY for a monitor with a harness-confirmed red_tests row.
+    // The two methods (executed vs attested) are surfaced DISTINCTLY; a monitor without a row stays the honest
+    // {captured:false, testedAt:null, method:null}.
+    [SkippableFact]
+    public async Task Trust_redTest_captured_reflects_a_recorded_red_test()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE ex bigint; at bigint; none bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url) VALUES ('redtest-executed','http','https://x.ex') RETURNING id INTO ex;
+              INSERT INTO checks (name, kind, target_url) VALUES ('redtest-attested','http','https://y.ex') RETURNING id INTO at;
+              INSERT INTO checks (name, kind, target_url) VALUES ('redtest-none','http','https://z.ex')     RETURNING id INTO none;
+              -- executed monitor: an OLD + a NEW red row → the latest (newest tested_at) must win.
+              INSERT INTO red_tests (check_id, method, outcome, tested_at) VALUES (ex, 'executed-red-fixture', 'red', now() - interval '9 days');
+              INSERT INTO red_tests (check_id, method, outcome, tested_at) VALUES (ex, 'executed-red-fixture', 'red', now() - interval '2 days');
+              INSERT INTO red_tests (check_id, method, outcome, tested_at) VALUES (at, 'attested-manual',      'red', now() - interval '1 day');
+              -- redtest-none: NO row → captured must stay false.
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var all = Assert.IsType<TrustReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetTrustReport(Request("?window=30d"), default)).Value!);
+            var m = all.Monitors.Where(x => x.CheckName.StartsWith("redtest-")).ToDictionary(x => x.CheckName);
+
+            var executed = m["redtest-executed"];
+            Assert.True(executed.RedTest.Captured);
+            Assert.NotNull(executed.RedTest.TestedAt);
+            Assert.Equal("executed-red-fixture", executed.RedTest.Method);       // ★ method surfaced, distinct
+            // the LATEST red-test wins (2 days ago, not 9) — not windowed, but newest-first
+            Assert.True(executed.RedTest.TestedAt > DateTimeOffset.UtcNow - TimeSpan.FromDays(5));
+
+            var attested = m["redtest-attested"];
+            Assert.True(attested.RedTest.Captured);
+            Assert.Equal("attested-manual", attested.RedTest.Method);            // ★ DISTINCT from 'executed'
+            Assert.NotEqual(executed.RedTest.Method, attested.RedTest.Method);   // the honesty distinction
+
+            // ★ the honest default preserved: no row → captured false, testedAt/method null
+            var none = m["redtest-none"];
+            Assert.False(none.RedTest.Captured);
+            Assert.Null(none.RedTest.TestedAt);
+            Assert.Null(none.RedTest.Method);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name LIKE 'redtest-%';"); // CASCADE clears red_tests
         }
     }
 
