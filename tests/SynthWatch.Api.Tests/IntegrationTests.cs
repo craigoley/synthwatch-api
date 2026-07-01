@@ -3228,22 +3228,20 @@ public class IntegrationTests
             var fn = new ReconcileFunctions(db, new FakeRunnerJobTrigger(),
                 Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
 
-            // approve 'new' (executable) → 200, transitions to approved.
+            // approve 'new' + 'missing' (both EXECUTABLE now) → 200, transitions to approved.
             Assert.IsType<OkObjectResult>(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-new", driftType = "new" }), default));
             Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-new'"));
+            // ★ 'missing' is now executable (this PR) → approve no longer 409s; it moves to approved.
+            Assert.IsType<OkObjectResult>(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-missing", driftType = "missing" }), default));
+            Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-missing'"));
 
-            // ★ approve 'changed' / 'missing' (apply can't execute them) → 409, and the plan STAYS pending
-            // (no silent move to a state apply would ignore — the whole point).
+            // ★ approve 'changed' (apply STILL can't execute it — PR2) → 409, and the plan STAYS pending.
             Assert.Equal(409, StatusOf(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-changed", driftType = "changed" }), default)));
-            Assert.Equal(409, StatusOf(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-missing", driftType = "missing" }), default)));
             Assert.Equal("pending", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-changed'"));
-            Assert.Equal("pending", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-missing'"));
 
             // ★ reject is ALWAYS allowed — you can reject a plan apply can't execute.
             Assert.IsType<OkObjectResult>(await fn.RejectReconcilePlan(JsonRequest(new { sourceKey = "t-changed", driftType = "changed" }), default));
-            Assert.IsType<OkObjectResult>(await fn.RejectReconcilePlan(JsonRequest(new { sourceKey = "t-missing", driftType = "missing" }), default));
             Assert.Equal("rejected", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-changed'"));
-            Assert.Equal("rejected", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-missing'"));
         }
         finally
         {
@@ -3370,6 +3368,94 @@ public class IntegrationTests
             Assert.Equal(true, (bool?)await ScalarRaw(db, "SELECT applied_at IS NULL FROM reconcile_apply_plan WHERE source_key='t-apply-fail'"));
         }
         finally { await CleanupApply(db, "t-apply-fail", System.Array.Empty<string>()); }
+    }
+
+    // The runner-emitted 'missing' plan: a single soft-disable UPDATE by source_key (text overridable for the
+    // guard test). Matches computeApplyPlan's missing branch (reconcile.ts): enabled=false WHERE source_key=$1.
+    private static string MissingPlan(string src, string? text = null)
+    {
+        var stmt = new { text = text ?? "UPDATE checks SET enabled = false WHERE source_key = $1", values = new object?[] { src } };
+        return System.Text.Json.JsonSerializer.Serialize(new { statements = new[] { stmt } });
+    }
+
+    // ★ 'missing' executor — a Git-deleted spec SOFT-DISABLES the check (enabled=false), NEVER deletes it. This
+    // test proves the RIGHT thing: it asserts the row + its runs + its incident STILL EXIST (a hard-delete
+    // would pass an enabled-only check but FAIL these), and the plan flips approved→applied.
+    [SkippableFact]
+    public async Task Apply_soft_disables_a_missing_check_and_preserves_its_history()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, source_key, enabled) VALUES ('miss-me','http','https://miss.test','t-miss', true) RETURNING id INTO cid;
+              INSERT INTO runs (check_id, status, started_at) VALUES (cid,'pass', now()-interval '1 hour');
+              INSERT INTO incidents (check_id, status, severity, opened_at, summary) VALUES (cid,'resolved','critical', now()-interval '2 hours', 'past outage');
+            END $$;
+            """);
+        var plan = MissingPlan("t-miss");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-miss','missing','approved', {plan}::jsonb)");
+        try
+        {
+            var dto = Assert.IsType<ReconcileApplyResultDto>(
+                Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default)).Value);
+            Assert.Contains("t-miss", dto.Applied);
+            Assert.DoesNotContain("t-miss", dto.Failed);
+
+            var cid = (long)(await ScalarRaw(db, "SELECT id FROM checks WHERE source_key='t-miss'"))!;
+            // ★ soft-disabled
+            Assert.Equal(false, (bool?)await ScalarRaw(db, "SELECT enabled FROM checks WHERE source_key='t-miss'"));
+            // ★★ MUST-GO-RED: the row + its history STILL EXIST (a hard-delete would zero these out).
+            Assert.True(await db.Checks.AsNoTracking().AnyAsync(c => c.SourceKey == "t-miss"));                        // row preserved
+            Assert.Equal(1L, (long)(await ScalarRaw(db, $"SELECT count(*) FROM runs WHERE check_id={cid}"))!);        // runs preserved
+            Assert.Equal(1L, (long)(await ScalarRaw(db, $"SELECT count(*) FROM incidents WHERE check_id={cid}"))!);   // incident preserved
+            // ★ plan → applied
+            Assert.Equal("applied", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-miss'"));
+            Assert.Equal(true, (bool?)await ScalarRaw(db, "SELECT applied_at IS NOT NULL FROM reconcile_apply_plan WHERE source_key='t-miss'"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE source_key='t-miss'); " +
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE source_key='t-miss'); " +
+                "DELETE FROM reconcile_apply_plan WHERE source_key='t-miss'; " +
+                "DELETE FROM checks WHERE source_key='t-miss';");
+        }
+    }
+
+    // ★ Rollback + the guard: a 'missing' plan whose statement is NOT the soft-disable (here a DELETE) is
+    // REFUSED — the executor never runs it → rollback → the check is untouched (NOT deleted) + the plan stays
+    // 'approved' (re-appliable). Proves the executor can't be tricked into a hard-delete via the plan text.
+    [SkippableFact]
+    public async Task Apply_missing_refuses_a_non_soft_disable_statement_and_rolls_back()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url, source_key, enabled) VALUES ('dont-delete-me','http','https://x.test','t-miss-guard', true)");
+        var badPlan = MissingPlan("t-miss-guard", text: "DELETE FROM checks WHERE source_key = $1"); // hostile: a delete
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-miss-guard','missing','approved', {badPlan}::jsonb)");
+        try
+        {
+            var dto = Assert.IsType<ReconcileApplyResultDto>(
+                Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default)).Value);
+            Assert.Contains("t-miss-guard", dto.Failed);            // refused → rolled back
+            Assert.DoesNotContain("t-miss-guard", dto.Applied);
+
+            // ★★ the check was NOT deleted (guard refused the DELETE), stays enabled; the plan stays approved.
+            Assert.True(await db.Checks.AsNoTracking().AnyAsync(c => c.SourceKey == "t-miss-guard"));
+            Assert.Equal(true, (bool?)await ScalarRaw(db, "SELECT enabled FROM checks WHERE source_key='t-miss-guard'"));
+            Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-miss-guard'"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM reconcile_apply_plan WHERE source_key='t-miss-guard'; DELETE FROM checks WHERE source_key='t-miss-guard';");
+        }
     }
 
     private static async Task<object?> ScalarRaw(SynthWatch.Api.Data.SynthWatchDbContext db, string sql)
