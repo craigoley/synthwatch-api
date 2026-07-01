@@ -3222,30 +3222,34 @@ public class IntegrationTests
             "INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES " +
             "('t-new','new','pending', jsonb_build_object('summary','x')), " +
             "('t-changed','changed','pending', jsonb_build_object('summary','x')), " +
-            "('t-missing','missing','pending', jsonb_build_object('summary','x'))");
+            "('t-missing','missing','pending', jsonb_build_object('summary','x')), " +
+            "('t-orphan','orphan','pending', jsonb_build_object('summary','x'))");
         try
         {
             var fn = new ReconcileFunctions(db, new FakeRunnerJobTrigger(),
                 Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()));
 
-            // approve 'new' + 'missing' (both EXECUTABLE now) → 200, transitions to approved.
+            // approve 'new' + 'missing' + 'changed' (all EXECUTABLE now) → 200, transitions to approved.
             Assert.IsType<OkObjectResult>(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-new", driftType = "new" }), default));
             Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-new'"));
-            // ★ 'missing' is now executable (this PR) → approve no longer 409s; it moves to approved.
             Assert.IsType<OkObjectResult>(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-missing", driftType = "missing" }), default));
             Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-missing'"));
+            // ★ 'changed' is now executable (this PR) → approve no longer 409s; it moves to approved.
+            Assert.IsType<OkObjectResult>(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-changed", driftType = "changed" }), default));
+            Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-changed'"));
 
-            // ★ approve 'changed' (apply STILL can't execute it — PR2) → 409, and the plan STAYS pending.
-            Assert.Equal(409, StatusOf(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-changed", driftType = "changed" }), default)));
-            Assert.Equal("pending", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-changed'"));
+            // ★ the gate still holds — a genuinely non-executable type ('orphan') → 409, plan STAYS pending
+            //   (confirms no OTHER drift_type became executable by accident).
+            Assert.Equal(409, StatusOf(await fn.ApproveReconcilePlan(JsonRequest(new { sourceKey = "t-orphan", driftType = "orphan" }), default)));
+            Assert.Equal("pending", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-orphan'"));
 
             // ★ reject is ALWAYS allowed — you can reject a plan apply can't execute.
-            Assert.IsType<OkObjectResult>(await fn.RejectReconcilePlan(JsonRequest(new { sourceKey = "t-changed", driftType = "changed" }), default));
-            Assert.Equal("rejected", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-changed'"));
+            Assert.IsType<OkObjectResult>(await fn.RejectReconcilePlan(JsonRequest(new { sourceKey = "t-orphan", driftType = "orphan" }), default));
+            Assert.Equal("rejected", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-orphan'"));
         }
         finally
         {
-            await db.Database.ExecuteSqlRawAsync("DELETE FROM reconcile_apply_plan WHERE source_key IN ('t-new','t-changed','t-missing')");
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM reconcile_apply_plan WHERE source_key IN ('t-new','t-changed','t-missing','t-orphan')");
         }
     }
 
@@ -3455,6 +3459,128 @@ public class IntegrationTests
         {
             await db.Database.ExecuteSqlRawAsync(
                 "DELETE FROM reconcile_apply_plan WHERE source_key='t-miss-guard'; DELETE FROM checks WHERE source_key='t-miss-guard';");
+        }
+    }
+
+    // The runner-emitted 'changed' plan (PR2a): a scoped `UPDATE checks SET <setClause> WHERE source_key = $1`.
+    // $1 = src; extra values are $2.. (the drifted col values + spec_path). setClause is overridable for guards.
+    private static string ChangedPlan(string src, string setClause, params object?[] extraValues)
+    {
+        var values = new object?[] { src }.Concat(extraValues).ToArray();
+        var stmt = new { text = $"UPDATE checks SET {setClause} WHERE source_key = $1", values };
+        return System.Text.Json.JsonSerializer.Serialize(new { statements = new[] { stmt } });
+    }
+
+    // ★ 'changed' executor — reconverge the drifted NON-redaction git-auth field(s) to the manifest, executing
+    // the runner's scoped statement (PR2a). Proves it updates target_url + spec_path, ★ leaves redaction
+    // (sensitive/redact_patterns) UNTOUCHED, and preserves the row + runs + incident.
+    [SkippableFact]
+    public async Task Apply_changed_reconverges_non_redaction_fields_and_leaves_redaction_and_history_intact()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, source_key, enabled, sensitive, redact_patterns, spec_path)
+                VALUES ('chg-me','http','https://old.test','t-chg', true, true, '["secret"]'::jsonb, 'monitors/old.spec.ts') RETURNING id INTO cid;
+              INSERT INTO runs (check_id, status, started_at) VALUES (cid,'pass', now()-interval '1 hour');
+              INSERT INTO incidents (check_id, status, severity, opened_at, summary) VALUES (cid,'resolved','critical', now()-interval '2 hours', 'past outage');
+            END $$;
+            """);
+        // PR2a's scoped statement: target_url drifted → SET target_url + spec_path (redaction EXCLUDED).
+        var plan = ChangedPlan("t-chg", "target_url = $2, spec_path = $3", "https://new.test", "monitors/new.spec.ts");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-chg','changed','approved', {plan}::jsonb)");
+        try
+        {
+            var dto = Assert.IsType<ReconcileApplyResultDto>(
+                Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default)).Value);
+            Assert.Contains("t-chg", dto.Applied);
+            Assert.DoesNotContain("t-chg", dto.Failed);
+
+            var cid = (long)(await ScalarRaw(db, "SELECT id FROM checks WHERE source_key='t-chg'"))!;
+            // ★ non-redaction fields reconverged to the manifest
+            Assert.Equal("https://new.test", (string?)await ScalarRaw(db, "SELECT target_url FROM checks WHERE source_key='t-chg'"));
+            Assert.Equal("monitors/new.spec.ts", (string?)await ScalarRaw(db, "SELECT spec_path FROM checks WHERE source_key='t-chg'"));
+            // ★★ STRIP-SAFETY (positive): redaction UNTOUCHED — a 'changed' apply never writes sensitive/redact.
+            Assert.Equal(true, (bool?)await ScalarRaw(db, "SELECT sensitive FROM checks WHERE source_key='t-chg'"));
+            Assert.Equal("[\"secret\"]", (string?)await ScalarRaw(db, "SELECT redact_patterns::text FROM checks WHERE source_key='t-chg'"));
+            // ★ row + history intact
+            Assert.Equal(1L, (long)(await ScalarRaw(db, $"SELECT count(*) FROM runs WHERE check_id={cid}"))!);
+            Assert.Equal(1L, (long)(await ScalarRaw(db, $"SELECT count(*) FROM incidents WHERE check_id={cid}"))!);
+            Assert.Equal("applied", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-chg'"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE source_key='t-chg'); " +
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE source_key='t-chg'); " +
+                "DELETE FROM reconcile_apply_plan WHERE source_key='t-chg'; DELETE FROM checks WHERE source_key='t-chg';");
+        }
+    }
+
+    // ★★ STRIP-SAFETY (defense-in-depth): a 'changed' statement whose SET touches a redaction column is REFUSED
+    // by the executor's shape-guard → rollback → redaction UNTOUCHED. Proves the API can't be tricked into a
+    // strip bypass even if a bad statement reached it (belt-and-suspenders over PR2a's scoping).
+    [SkippableFact]
+    public async Task Apply_changed_refuses_a_statement_that_touches_redaction_and_rolls_back()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url, source_key, enabled, sensitive) VALUES ('guard-me','http','https://old.test','t-chg-guard', true, true)");
+        // hostile: would STRIP redaction (sets sensitive=false) alongside a legit field — the guard MUST refuse.
+        var badPlan = ChangedPlan("t-chg-guard", "target_url = $2, sensitive = false", "https://new.test");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-chg-guard','changed','approved', {badPlan}::jsonb)");
+        try
+        {
+            var dto = Assert.IsType<ReconcileApplyResultDto>(
+                Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default)).Value);
+            Assert.Contains("t-chg-guard", dto.Failed);            // refused → rolled back
+            Assert.DoesNotContain("t-chg-guard", dto.Applied);
+
+            // ★★ nothing applied: sensitive STILL true (NOT stripped), target_url unchanged, plan stays approved.
+            Assert.Equal(true, (bool?)await ScalarRaw(db, "SELECT sensitive FROM checks WHERE source_key='t-chg-guard'"));
+            Assert.Equal("https://old.test", (string?)await ScalarRaw(db, "SELECT target_url FROM checks WHERE source_key='t-chg-guard'"));
+            Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-chg-guard'"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM reconcile_apply_plan WHERE source_key='t-chg-guard'; DELETE FROM checks WHERE source_key='t-chg-guard';");
+        }
+    }
+
+    // ★ Rollback on a genuine mid-apply DB failure: a scoped statement that violates a constraint (kind='bogus')
+    // → the UPDATE throws mid-txn → rollback → check UNCHANGED, plan stays 'approved' (re-appliable).
+    [SkippableFact]
+    public async Task Apply_changed_rolls_back_a_failed_update_leaving_the_plan_approved()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url, source_key, enabled) VALUES ('fail-me','http','https://old.test','t-chg-fail', true)");
+        var plan = ChangedPlan("t-chg-fail", "kind = $2", "bogus-kind"); // violates checks_kind_check → mid-txn failure
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('t-chg-fail','changed','approved', {plan}::jsonb)");
+        try
+        {
+            var dto = Assert.IsType<ReconcileApplyResultDto>(
+                Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default)).Value);
+            Assert.Contains("t-chg-fail", dto.Failed);
+            Assert.DoesNotContain("t-chg-fail", dto.Applied);
+
+            // ★ ROLLBACK: kind unchanged (still 'http'), plan stays approved for retry.
+            Assert.Equal("http", (string?)await ScalarRaw(db, "SELECT kind FROM checks WHERE source_key='t-chg-fail'"));
+            Assert.Equal("approved", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='t-chg-fail'"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM reconcile_apply_plan WHERE source_key='t-chg-fail'; DELETE FROM checks WHERE source_key='t-chg-fail';");
         }
     }
 

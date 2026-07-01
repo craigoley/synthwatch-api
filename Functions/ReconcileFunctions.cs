@@ -110,10 +110,11 @@ public class ReconcileFunctions
 
     // ★ The drift_types ApplyReconcilePlans can actually EXECUTE — the SINGLE source of truth for BOTH the
     // apply WHERE filter (`drift_type = ANY(...)`) and the approve gate, so an operator can't approve a plan
-    // apply would silently ignore. 'new' = materialize; 'missing' = soft-disable. Widen ONLY when a per-type
-    // branch is wired in the loop below. ('changed' is deliberately NOT here yet — it carries the
-    // redaction-strip-bypass risk and lands as its own PR2, runner+API paired.)
-    private static readonly HashSet<string> ApplyExecutableDriftTypes = new(StringComparer.Ordinal) { "new", "missing" };
+    // apply would silently ignore. 'new' = materialize; 'missing' = soft-disable; 'changed' = reconverge the
+    // drifted NON-redaction git-auth fields (redaction stays on the redaction_mismatch path — the runner emits
+    // a redaction-EXCLUDED statement, PR2a, and ApplyChangedAsync's shape-guard refuses one that isn't). Widen
+    // ONLY when a per-type branch is wired in the loop below.
+    private static readonly HashSet<string> ApplyExecutableDriftTypes = new(StringComparer.Ordinal) { "new", "missing", "changed" };
 
     /// <summary>POST /api/reconcile/approve — pending → approved. ★ A 'blocked' plan (a redaction strip) can
     /// NEVER be approved (409); nor can a drift_type apply can't yet execute (changed/missing) — that would be
@@ -166,9 +167,10 @@ public class ReconcileFunctions
 
     /// <summary>POST /api/reconcile/apply — execute the APPROVED plans (cap 5). ★ Each plan in ONE transaction:
     /// 'new' materializes the check (sensitive INLINE, enabled=FALSE) + seeds check_locations; 'missing'
-    /// SOFT-DISABLES it (enabled=false, never delete — history preserved). The write + the plan→'applied' flip
-    /// commit together; ROLLBACK on any error (the plan stays 'approved', re-appliable). Executable types are
-    /// ApplyExecutableDriftTypes ('changed' is a separate PR — redaction-strip risk).</summary>
+    /// SOFT-DISABLES it (enabled=false, never delete — history preserved); 'changed' reconverges the drifted
+    /// non-redaction git-auth field(s) (redaction-EXCLUDED — the runner scopes it, PR2a). The write + the
+    /// plan→'applied' flip commit together; ROLLBACK on any error (the plan stays 'approved', re-appliable).
+    /// Executable types are ApplyExecutableDriftTypes.</summary>
     [Function("ApplyReconcilePlans")]
     public async Task<IActionResult> ApplyReconcilePlans(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "reconcile/apply")] HttpRequest req,
@@ -197,6 +199,13 @@ public class ReconcileFunctions
                     //   from the plan. NEVER a delete: the check row + its runs/incidents/history survive, so a
                     //   re-added spec can re-enable it later.
                     await ApplyMissingAsync(doc, tx, ct);
+                }
+                else if (p.DriftType == "changed")
+                {
+                    // ★ CHANGED — reconverge the drifted NON-redaction git-auth fields to the manifest, executed
+                    //   AS-EMITTED (PR2a's scoped, redaction-EXCLUDED UPDATE). Redaction (sensitive/redact_patterns)
+                    //   belongs to the redaction_mismatch path; the shape-guard REFUSES any statement touching it.
+                    await ApplyChangedAsync(doc, tx, ct);
                 }
                 else
                 {
@@ -284,6 +293,44 @@ public class ReconcileFunctions
         var pr = cmd.CreateParameter();
         pr.Value = vals[0].GetString() ?? (object)DBNull.Value;
         cmd.Parameters.Add(pr);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Apply a 'changed' plan: RECONVERGE the drifted non-redaction git-authoritative field(s) to the manifest
+    /// by executing the runner's scoped statement AS-EMITTED (plan-as-contract — PR2a emits a redaction-EXCLUDED
+    /// `UPDATE checks SET … WHERE source_key = $1`). ★ STRIP-SAFETY shape-guard (defense-in-depth over PR2a): the
+    /// statement MUST be a scoped update by source_key whose SET NEVER touches sensitive/redact_patterns (that's
+    /// the redaction_mismatch path's job, with the strip allowance) and is never a delete — else REFUSE (throw →
+    /// the caller rolls back). So even a strip-bypassing statement that somehow reached the API can't execute.
+    /// </summary>
+    private async Task ApplyChangedAsync(PlanDoc? doc, IDbContextTransaction tx, CancellationToken ct)
+    {
+        var stmt = doc?.Statements?.FirstOrDefault();
+        var text = stmt?.Text;
+        var normalized = text is null ? null : new string(text.Where(c => !char.IsWhiteSpace(c)).ToArray());
+        // ★ Contract + STRIP-SAFETY: a scoped `UPDATE checks SET … WHERE source_key = $1` that NEVER touches the
+        //   redaction columns and is never a delete. Anything else → refuse.
+        if (text is null || stmt!.Values is not { Count: > 0 } vals || normalized is null
+            || !normalized.StartsWith("UPDATEchecksSET", StringComparison.OrdinalIgnoreCase)
+            || !normalized.Contains("WHEREsource_key=$1", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("sensitive", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("redact_patterns", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("DELETE", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "changed plan is not the expected scoped, redaction-excluded UPDATE — refusing to apply.");
+
+        // Execute the runner-emitted statement verbatim ($1 = source_key, then the drifted values + spec_path).
+        var conn = _db.Database.GetDbConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = text;
+        cmd.Transaction = tx.GetDbTransaction();
+        foreach (var val in vals)
+        {
+            var pr = cmd.CreateParameter();
+            pr.Value = val.ValueKind == JsonValueKind.Null ? DBNull.Value : (object?)val.GetString() ?? DBNull.Value;
+            cmd.Parameters.Add(pr);
+        }
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
