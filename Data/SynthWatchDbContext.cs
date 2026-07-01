@@ -45,6 +45,9 @@ public class SynthWatchDbContext : DbContext
     public DbSet<LatencySeriesRow> LatencyReportSeries => Set<LatencySeriesRow>();
     public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
     public DbSet<IncidentBreakdownRow> IncidentBreakdown => Set<IncidentBreakdownRow>();
+    public DbSet<StatusCheckRow> StatusChecks => Set<StatusCheckRow>();
+    public DbSet<StatusSlaRow> StatusSla => Set<StatusSlaRow>();
+    public DbSet<StatusIncidentRow> StatusIncidents => Set<StatusIncidentRow>();
     public DbSet<ReconcileDriftRow> ReconcileDrift => Set<ReconcileDriftRow>();
     public DbSet<ReconcileApplyPlanRow> ReconcileApplyPlan => Set<ReconcileApplyPlanRow>();
     public DbSet<SpecCatalogRow> SpecCatalog => Set<SpecCatalogRow>();
@@ -434,6 +437,39 @@ public class SynthWatchDbContext : DbContext
             e.ToView(null);
             e.Property(x => x.Classification).HasColumnName("classification");
             e.Property(x => x.Count).HasColumnName("count");
+        });
+
+        // Keyless: GET /status — area-tagged checks' current signal / SLA / recent incidents, raw SQL only.
+        modelBuilder.Entity<StatusCheckRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Property).HasColumnName("property");
+            e.Property(x => x.Severity).HasColumnName("severity");
+            e.Property(x => x.Status).HasColumnName("status");
+            e.Property(x => x.HasOpenIncident).HasColumnName("has_open_incident");
+            e.Property(x => x.OpenSeverity).HasColumnName("open_severity");
+        });
+        modelBuilder.Entity<StatusSlaRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Property).HasColumnName("property");
+            e.Property(x => x.CompletedRuns).HasColumnName("completed_runs");
+            e.Property(x => x.UpRuns).HasColumnName("up_runs");
+            e.Property(x => x.DownRuns).HasColumnName("down_runs");
+        });
+        modelBuilder.Entity<StatusIncidentRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Property).HasColumnName("property");
+            e.Property(x => x.CheckName).HasColumnName("check_name");
+            e.Property(x => x.Summary).HasColumnName("summary");
+            e.Property(x => x.OpenedAt).HasColumnName("opened_at");
+            e.Property(x => x.ResolvedAt).HasColumnName("resolved_at");
+            e.Property(x => x.Status).HasColumnName("status");
+            e.Property(x => x.Severity).HasColumnName("severity");
         });
 
         // Keyless: read the inline availability-over-time bucketed query via raw SQL only.

@@ -2913,6 +2913,7 @@ public class IntegrationTests
             AssertEnvelope(await locations.GetCheckLocations(Request(), checkId, default), "locations");
             AssertEnvelope(await checks.GetAvailabilitySeries(Request(), checkId, default), "window", "bucket", "points");
             AssertEnvelope(await sla.GetSla(Request(), default), "window", "fleet", "items");
+            AssertEnvelope(await new StatusFunctions(db).GetStatus(Request(), default), "window", "properties", "recentIncidents");
             AssertEnvelope(await reports.GetSloReport(Request(), default), "window", "fleet", "items");
             AssertEnvelope(await reports.GetMttrReport(Request(), default), "window", "fleet", "items", "classification", "trend");
             AssertEnvelope(await routing.GetRouting(Request(), default), "severity", "perCheck", "tagRules");
@@ -3004,6 +3005,96 @@ public class IntegrationTests
         // A bad window is a 400, not a silent default scan.
         Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
             await fn.GetIncidentBreakdown(Request("?window=bogus"), default)).StatusCode);
+    }
+
+    // ★ GET /status — the internal/stakeholder status page. Proves: property rollup (down/degraded/up from the
+    // area tag); current-state DISTINCT from uptime% (a building-baseline property is "up" NOW yet has a null
+    // uptime); a critical fail rolls its property to DOWN; untagged/internal checks are EXCLUDED (no leak);
+    // recent incidents are property-scoped; and pins the (leak-free) wire shape.
+    [SkippableFact]
+    public async Task Status_page_rolls_properties_up_hides_internals_and_separates_state_from_uptime()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cc bigint; cp bigint; cw bigint; cu bigint; cthin bigint; cint bigint; i int;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-crit-fail','http','https://crit.ex','critical') RETURNING id INTO cc;
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-crit-ok','http','https://critok.ex','critical') RETURNING id INTO cp;
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-warn','http','https://warn.ex','warning') RETURNING id INTO cw;
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-up','http','https://up.ex','critical') RETURNING id INTO cu;
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-thin','http','https://thin.ex','critical') RETURNING id INTO cthin;
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-internal','http','https://internal.ex','critical') RETURNING id INTO cint;
+              INSERT INTO check_tags (check_id, key, value) VALUES
+                (cc,'area','st-crit'), (cp,'area','st-crit'), (cw,'area','st-warn'), (cu,'area','st-up'), (cthin,'area','st-thin');
+              -- cint (internal) is intentionally UNTAGGED → must never surface.
+              FOR i IN 1..25 LOOP INSERT INTO runs (check_id,status,started_at) VALUES (cc,'pass', now()-((i+10)||' minutes')::interval); END LOOP;
+              INSERT INTO runs (check_id,status,started_at) VALUES (cc,'fail', now());   -- latest → down
+              FOR i IN 1..25 LOOP INSERT INTO runs (check_id,status,started_at) VALUES (cp,'pass', now()-(i||' minutes')::interval); END LOOP;
+              FOR i IN 1..24 LOOP INSERT INTO runs (check_id,status,started_at) VALUES (cw,'pass', now()-((i+10)||' minutes')::interval); END LOOP;
+              INSERT INTO runs (check_id,status,started_at) VALUES (cw,'warn', now());   -- latest → degraded
+              FOR i IN 1..25 LOOP INSERT INTO runs (check_id,status,started_at) VALUES (cu,'pass', now()-(i||' minutes')::interval); END LOOP;
+              FOR i IN 1..5  LOOP INSERT INTO runs (check_id,status,started_at) VALUES (cthin,'pass', now()-(i||' minutes')::interval); END LOOP; -- <20 → building
+              INSERT INTO runs (check_id,status,started_at) VALUES (cint,'fail', now()); -- internal fail (excluded)
+              INSERT INTO incidents (check_id,status,severity,opened_at,summary) VALUES (cc,'open','critical', now()-interval '10 minutes', 'st-crit homepage down');
+            END $$;
+            """);
+        try
+        {
+            var dto = Assert.IsType<StatusPageDto>(Assert.IsType<OkObjectResult>(
+                await new StatusFunctions(db).GetStatus(Request(), default)).Value!);
+
+            var props = dto.Properties.ToDictionary(p => p.Name);
+            // internal/untagged check is NOT a property (no leak)
+            Assert.DoesNotContain(dto.Properties, p => p.Name.Contains("internal"));
+            Assert.Equal(new[] { "st-crit", "st-thin", "st-up", "st-warn" }, props.Keys.OrderBy(k => k).ToArray());
+
+            // ★ a critical fail rolls the property to DOWN
+            Assert.Equal("down", props["st-crit"].State);
+            Assert.Equal(2, props["st-crit"].CheckCount);
+            Assert.True(props["st-crit"].DownCount >= 1);
+            Assert.Equal("degraded", props["st-warn"].State);   // a warn latest run
+            Assert.Equal("up", props["st-up"].State);
+
+            // ★ current-state DISTINCT from uptime: st-thin is "up" NOW but its uptime is null (building baseline)
+            Assert.Equal("up", props["st-thin"].State);
+            Assert.True(props["st-thin"].BuildingBaseline);
+            Assert.Null(props["st-thin"].UptimePct);
+            // a well-populated property carries a real % (not null, not building)
+            Assert.False(props["st-up"].BuildingBaseline);
+            Assert.NotNull(props["st-up"].UptimePct);
+
+            // ordering: down → degraded → up (attention first)
+            Assert.Equal("st-crit", dto.Properties[0].Name);
+            Assert.Equal("down", dto.Properties[0].State);
+
+            // recent incidents are property-scoped (title = the summary; no id/url)
+            var inc = Assert.Single(dto.RecentIncidents, r => r.Property == "st-crit");
+            Assert.Equal("st-crit homepage down", inc.Title);
+            Assert.Equal("open", inc.Status);
+            Assert.Equal("critical", inc.Severity);
+
+            // ★ leak-free wire shape (#123): only property-level keys — NO checkId/targetUrl/url anywhere
+            var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+            var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(dto, web)).RootElement;
+            Assert.Equal(new[] { "properties", "recentIncidents", "window" },
+                root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(new[] { "buildingBaseline", "checkCount", "degradedCount", "downCount", "name", "state", "upCount", "uptimePct" },
+                root.GetProperty("properties")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(new[] { "openedAt", "property", "resolvedAt", "severity", "status", "title" },
+                root.GetProperty("recentIncidents")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            var blob = System.Text.Json.JsonSerializer.Serialize(dto, web);
+            Assert.DoesNotContain("targetUrl", blob);
+            Assert.DoesNotContain("checkId", blob);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'st-%'); " +
+                "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'st-%'); " +
+                "DELETE FROM checks WHERE name LIKE 'st-%';");
+        }
     }
 
     // Reconcile-apply Phase 1: the APPROVE endpoint, against the real schema (the test #127 was missing).
