@@ -103,3 +103,75 @@ public record PerformanceReportDto(
     [property: JsonPropertyName("window")] string Window,
     [property: JsonPropertyName("groupBy")] string? GroupBy,
     [property: JsonPropertyName("groups")] IReadOnlyList<PerformanceGroupDto> Groups);
+
+// ── §D1 Monitor-Trust Scorecard (the "every green shown with its proof" surface) ─────────────────────────
+// ★ THE LOAD-BEARING DESIGN RULE: there is NO synthesized 0-100 trust score anywhere in this shape. Every
+// field is a MEASURED FACT carrying its own sample size; `trust` is a CHIP derived from STATED, AUDITABLE
+// rules (see TrustReportProjection) — never a magic composite. A blended score would silently imply
+// red-test coverage that does not exist (Signal 1 is uncaptured), which is the exact false-confidence this
+// feature exists to kill. Honesty is the product: null sample → null (never a fake 0); never-green →
+// lastGreenAt null (a first-class state, not an error); redTest is an explicit "not captured" slot.
+
+/// <summary>The verdict-taxonomy breakdown for ONE monitor over the window. All six named buckets +
+/// unclassified RECONCILE to total (perf-regression is its own bucket so nothing counted in total goes
+/// unrepresented). ★ monitor-noise (the "cry wolf" signal) = flakyTransient + selectorDrift only —
+/// real-outage / perf-regression / environment-regional are reds the monitor correctly caught, NOT noise.</summary>
+public record TrustIncidentsDto(
+    [property: JsonPropertyName("total")] long Total,
+    [property: JsonPropertyName("realOutage")] long RealOutage,
+    [property: JsonPropertyName("flakyTransient")] long FlakyTransient,
+    [property: JsonPropertyName("selectorDrift")] long SelectorDrift,
+    [property: JsonPropertyName("environmentRegional")] long EnvironmentRegional,
+    [property: JsonPropertyName("perfRegression")] long PerfRegression,
+    [property: JsonPropertyName("unclassified")] long Unclassified);
+
+/// <summary>★ THE HONEST CONTRACT SLOT. Whether a must-go-red / "last red-tested" verification is recorded
+/// for this monitor. In v1 this is ALWAYS <c>false</c> — red-test status has NO backing data today (Signal 1
+/// is a v2 runner-side capture). The field exists NOW so the wire shape does not change when capture lands;
+/// the scorecard renders it as an explicit "not red-tested — not captured", never a fabricated status.</summary>
+public record TrustRedTestDto(
+    [property: JsonPropertyName("captured")] bool Captured);
+
+/// <summary>Spec-integrity provenance from the monitor's most recent run that carried it: the sha256 of the
+/// assertion code that ACTUALLY executed + its spec path. A real integrity-of-execution fact ("the monitor
+/// ran the committed, hash-pinned version") — NOT a red-test and NOT a headline score. Null when no run in
+/// history carried provenance.</summary>
+public record TrustProvenanceDto(
+    [property: JsonPropertyName("executedSha256")] string? ExecutedSha256,
+    [property: JsonPropertyName("specPath")] string? SpecPath);
+
+/// <summary>One monitor's trust row: measured facts + the derived chip. <c>lastGreenAt</c> null = NEVER
+/// verified green (a first-class state). <c>retryRate</c> = retryCount/runCount, null when runCount = 0
+/// (honest empty, not 0). <c>trust</c> ∈ {proven-live, flaky, unverified, nominal} — see TrustReportProjection
+/// for the exact rules the chip legend renders.</summary>
+public record TrustMonitorDto(
+    [property: JsonPropertyName("checkId")] long CheckId,
+    [property: JsonPropertyName("checkName")] string CheckName,
+    [property: JsonPropertyName("sensitive")] bool Sensitive,
+    [property: JsonPropertyName("lastGreenAt")] DateTimeOffset? LastGreenAt,
+    [property: JsonPropertyName("lastRunAt")] DateTimeOffset? LastRunAt,
+    [property: JsonPropertyName("runCount")] long RunCount,
+    [property: JsonPropertyName("retryCount")] long RetryCount,
+    [property: JsonPropertyName("retryRate")] decimal? RetryRate,
+    [property: JsonPropertyName("incidents")] TrustIncidentsDto Incidents,
+    [property: JsonPropertyName("redTest")] TrustRedTestDto RedTest,
+    [property: JsonPropertyName("specProvenance")] TrustProvenanceDto SpecProvenance,
+    [property: JsonPropertyName("trust")] string Trust);
+
+/// <summary>GET /reports/trust — the fleet scorecard: one row per ENABLED check over the window.</summary>
+public record TrustReportDto(
+    [property: JsonPropertyName("window")] string Window,
+    [property: JsonPropertyName("monitors")] IReadOnlyList<TrustMonitorDto> Monitors);
+
+/// <summary>One day of the retry-rate trend for the detail sparkline. retryRate null when the day had no runs.</summary>
+public record TrustRetryPointDto(
+    [property: JsonPropertyName("day")] DateOnly Day,
+    [property: JsonPropertyName("runCount")] long RunCount,
+    [property: JsonPropertyName("retryCount")] long RetryCount,
+    [property: JsonPropertyName("retryRate")] decimal? RetryRate);
+
+/// <summary>GET /reports/trust/{checkId} — one monitor's trust row + its daily retry-rate series.</summary>
+public record TrustMonitorDetailDto(
+    [property: JsonPropertyName("window")] string Window,
+    [property: JsonPropertyName("monitor")] TrustMonitorDto Monitor,
+    [property: JsonPropertyName("retrySeries")] IReadOnlyList<TrustRetryPointDto> RetrySeries);

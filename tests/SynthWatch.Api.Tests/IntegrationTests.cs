@@ -376,6 +376,181 @@ public class IntegrationTests
         }
     }
 
+    // ── §D1 Monitor-Trust Scorecard ────────────────────────────────────────────────────────────────────
+    // ★ The chip rules are the contract. This pure test locks them (no Docker) — including the exact
+    // boundaries (retryRate 0.10 / 0.50; green at 2×interval) the dashboard legend renders.
+    [Fact]
+    public void Trust_chip_derives_from_stated_auditable_rules_including_boundaries()
+    {
+        var asOf = new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero);
+        static TrustMonitorRow Row(long run, long retry, DateTimeOffset? green,
+            long flaky = 0, long selector = 0, int interval = 300) => new()
+        {
+            CheckId = 1, CheckName = "x", IntervalSeconds = interval,
+            RunCount = run, RetryCount = retry, LastGreenAt = green,
+            FlakyTransient = flaky, SelectorDrift = selector,
+        };
+        static string Chip(TrustMonitorRow r, DateTimeOffset a) => TrustReportProjection.DeriveChip(r, a);
+
+        // 1. unverified — never green OR no runs (checked first; dominates).
+        Assert.Equal("unverified", Chip(Row(10, 0, null), asOf));                       // never green
+        Assert.Equal("unverified", Chip(Row(0, 0, asOf.AddSeconds(-30)), asOf));        // no runs in window
+
+        // 2. flaky — retryRate ≥ 0.50 (boundary: exactly 0.50) OR any monitor-noise incident.
+        Assert.Equal("flaky", Chip(Row(10, 5, asOf.AddSeconds(-30)), asOf));            // 0.50 exactly → flaky
+        Assert.Equal("flaky", Chip(Row(100, 1, asOf.AddSeconds(-30), selector: 1), asOf)); // low retry, but noise
+
+        // 3. proven-live — green within 2 intervals AND retryRate < 0.10 AND zero monitor-noise.
+        Assert.Equal("proven-live", Chip(Row(100, 9, asOf.AddSeconds(-30)), asOf));     // 0.09 < 0.10
+        Assert.Equal("proven-live", Chip(Row(100, 0, asOf.AddSeconds(-600)), asOf));    // green EXACTLY at 2×interval → still fresh
+
+        // 4. nominal — in between: retryRate exactly 0.10 (not <), or green just past 2 intervals.
+        Assert.Equal("nominal", Chip(Row(100, 10, asOf.AddSeconds(-30)), asOf));        // 0.10 → not proven-live, not flaky
+        Assert.Equal("nominal", Chip(Row(100, 0, asOf.AddSeconds(-601)), asOf));        // green 1s past 2×interval → stale
+    }
+
+    [SkippableFact]
+    public async Task Trust_scorecard_derives_chips_and_is_honest_about_gaps()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // Seven monitors, one per trust profile. All facts are measured; the chip is derived server-side.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE clean bigint; flaky bigint; noise bigint; verdicts bigint; nominal bigint; unver bigint; empty bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url)            VALUES ('trust-clean','http','https://c.ex')       RETURNING id INTO clean;
+              INSERT INTO checks (name, kind, target_url, sensitive) VALUES ('trust-flaky','http','https://f.ex', true) RETURNING id INTO flaky;
+              INSERT INTO checks (name, kind, target_url)            VALUES ('trust-noise','http','https://n.ex')       RETURNING id INTO noise;
+              INSERT INTO checks (name, kind, target_url)            VALUES ('trust-verdicts','http','https://v.ex')    RETURNING id INTO verdicts;
+              INSERT INTO checks (name, kind, target_url)            VALUES ('trust-nominal','http','https://o.ex')     RETURNING id INTO nominal;
+              INSERT INTO checks (name, kind, target_url)            VALUES ('trust-unverified','http','https://u.ex')  RETURNING id INTO unver;
+              INSERT INTO checks (name, kind, target_url)            VALUES ('trust-empty','http','https://e.ex')       RETURNING id INTO empty;
+
+              -- clean: 20 recent pass, 0 retry; latest run carries spec provenance → proven-live
+              FOR i IN 1..20 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (clean, 'pass', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+              UPDATE runs SET spec_provenance = jsonb_build_object('executed_sha256','abc123','spec_path','monitors/clean/home.spec.ts')
+                WHERE check_id = clean AND started_at = (SELECT max(started_at) FROM runs WHERE check_id = clean);
+
+              -- flaky: 10 recent pass, 6 retried (retryRate 0.60) → flaky (via retry). Sensitive flows through.
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (flaky, 'pass', now() - (i*10 || ' seconds')::interval, CASE WHEN i <= 6 THEN 1 ELSE 0 END); END LOOP;
+
+              -- noise: 10 recent pass, 0 retry, but a selector-drift incident → flaky (via monitor-noise)
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (noise, 'pass', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+              INSERT INTO incidents (check_id, status, severity, opened_at, rca) VALUES (noise, 'open','critical', now()-interval '1 day', jsonb_build_object('classification','selector-drift'));
+
+              -- verdicts: recent green, low retry, full verdict spread (NO monitor-noise) → proven-live; buckets reconcile
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (verdicts, 'pass', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+              INSERT INTO incidents (check_id, status, severity, opened_at, rca) VALUES
+                (verdicts,'resolved','critical', now()-interval '2 days', jsonb_build_object('classification','real-outage')),
+                (verdicts,'resolved','warning',  now()-interval '2 days', jsonb_build_object('classification','perf-regression')),
+                (verdicts,'resolved','critical', now()-interval '2 days', jsonb_build_object('classification','environment-regional')),
+                (verdicts,'resolved','critical', now()-interval '2 days', NULL);
+
+              -- nominal: green exists but STALE (2 days), recent fails, low retry → nominal
+              FOR i IN 1..5  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'pass', now() - interval '2 days' - (i || ' minutes')::interval, 0); END LOOP;
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'fail', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+
+              -- unverified: recent runs, all fail, never green → unverified
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (unver, 'fail', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+
+              -- empty: no runs at all → unverified + retryRate NULL (honest empty)
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var all = Assert.IsType<TrustReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetTrustReport(Request("?window=30d"), default)).Value!);
+            Assert.Equal("30d", all.Window);
+            var m = all.Monitors.Where(x => x.CheckName.StartsWith("trust-")).ToDictionary(x => x.CheckName);
+            Assert.Equal(7, m.Count);
+
+            // ── proven-live: recent green, clean retries, no noise; spec provenance surfaced ──
+            var clean = m["trust-clean"];
+            Assert.Equal("proven-live", clean.Trust);
+            Assert.Equal(20, clean.RunCount);
+            Assert.Equal(0m, clean.RetryRate);
+            Assert.NotNull(clean.LastGreenAt);
+            Assert.Equal("abc123", clean.SpecProvenance.ExecutedSha256);
+            Assert.Equal("monitors/clean/home.spec.ts", clean.SpecProvenance.SpecPath);
+            Assert.False(clean.Sensitive);
+
+            // ── flaky via retry (0.60) — a monitor limping over the line; sensitive flag flows through ──
+            var flaky = m["trust-flaky"];
+            Assert.Equal("flaky", flaky.Trust);
+            Assert.Equal(6, flaky.RetryCount);
+            Assert.Equal(0.6m, flaky.RetryRate);
+            Assert.True(flaky.Sensitive);
+            Assert.Null(flaky.SpecProvenance.ExecutedSha256);   // no provenance seeded → honest null
+
+            // ── flaky via monitor-noise (a selector-drift incident) despite ZERO retry pressure ──
+            var noise = m["trust-noise"];
+            Assert.Equal("flaky", noise.Trust);
+            Assert.Equal(0m, noise.RetryRate);
+            Assert.Equal(1, noise.Incidents.SelectorDrift);
+
+            // ── proven-live WITH a full verdict breakdown: real-outage/perf/env/unclassified are NOT noise ──
+            var v = m["trust-verdicts"];
+            Assert.Equal("proven-live", v.Trust);
+            Assert.Equal(4, v.Incidents.Total);
+            Assert.Equal(1, v.Incidents.RealOutage);
+            Assert.Equal(1, v.Incidents.PerfRegression);
+            Assert.Equal(1, v.Incidents.EnvironmentRegional);
+            Assert.Equal(1, v.Incidents.Unclassified);          // ★ its OWN bucket, never folded into realOutage
+            Assert.Equal(0, v.Incidents.FlakyTransient);
+            Assert.Equal(0, v.Incidents.SelectorDrift);
+            // ★ every bucket reconciles to total — nothing counted goes unrepresented (perf-regression included)
+            Assert.Equal(v.Incidents.Total,
+                v.Incidents.RealOutage + v.Incidents.FlakyTransient + v.Incidents.SelectorDrift
+                + v.Incidents.EnvironmentRegional + v.Incidents.PerfRegression + v.Incidents.Unclassified);
+
+            // ── nominal: has green but it's stale (older than 2 intervals) ──
+            var nominal = m["trust-nominal"];
+            Assert.Equal("nominal", nominal.Trust);
+            Assert.NotNull(nominal.LastGreenAt);
+
+            // ── unverified: never passed → lastGreenAt null (a first-class state, not an error) ──
+            var unver = m["trust-unverified"];
+            Assert.Equal("unverified", unver.Trust);
+            Assert.Null(unver.LastGreenAt);
+            Assert.Equal(10, unver.RunCount);
+
+            // ── ★ HONEST-EMPTY: no runs → retryRate NULL (never a fake 0), unverified ──
+            var empty = m["trust-empty"];
+            Assert.Equal("unverified", empty.Trust);
+            Assert.Equal(0, empty.RunCount);
+            Assert.Null(empty.RetryRate);
+            Assert.Null(empty.LastGreenAt);
+
+            // ── ★ redTest.captured is ALWAYS false in v1 — the honest contract slot, never fabricated ──
+            Assert.All(m.Values, x => Assert.False(x.RedTest.Captured));
+
+            // ── detail endpoint: same row + a daily retry-rate series (null on run-less days) ──
+            var detail = Assert.IsType<TrustMonitorDetailDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetTrustMonitorDetail(Request("?window=7d"), clean.CheckId, default)).Value!);
+            Assert.Equal("7d", detail.Window);
+            Assert.Equal("trust-clean", detail.Monitor.CheckName);
+            Assert.Equal("proven-live", detail.Monitor.Trust);
+            Assert.Equal(7, detail.RetrySeries.Count);                  // 7d → 7 daily points
+            Assert.Equal(20, detail.RetrySeries[^1].RunCount);         // today: the 20 runs
+            Assert.Equal(0m, detail.RetrySeries[^1].RetryRate);
+            Assert.Equal(0, detail.RetrySeries[0].RunCount);           // 6 days ago: no runs
+            Assert.Null(detail.RetrySeries[0].RetryRate);              // ★ null, not 0
+
+            // ── 404 for an unknown monitor; 400 for a bad window ──
+            Assert.IsType<NotFoundObjectResult>(await reports.GetTrustMonitorDetail(Request(), 999999999, default));
+            Assert.IsType<BadRequestObjectResult>(await reports.GetTrustReport(Request("?window=1y"), default));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'trust-%'); " +
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'trust-%'); " +
+                "DELETE FROM checks WHERE name LIKE 'trust-%';");
+        }
+    }
+
     [SkippableFact]
     public async Task Check_detail_does_not_500_when_slo_target_is_1_0()
     {

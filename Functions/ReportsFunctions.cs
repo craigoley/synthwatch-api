@@ -260,6 +260,169 @@ public class ReportsFunctions
             normWindow, total, classified, unclassified, realOutages, precision, buckets));
     }
 
+    /// <summary>
+    /// §D1 GET /api/reports/trust?window=7d|30d|90d — the monitor-trust scorecard ("every green shown with
+    /// its proof"): one row per ENABLED check. ★ NO synthesized 0-100 score — each field is a measured fact
+    /// with a sample size, and <c>trust</c> is a chip derived from STATED, AUDITABLE rules (TrustReportProjection).
+    /// One SQL statement joining runs (retry + last-green aggregates), incidents (RCA verdict counts), and the
+    /// latest run's spec provenance. ★ redTest.captured is a hard false — a visible v2 contract slot, never faked.
+    /// Read-only.
+    /// </summary>
+    [Function("GetTrustReport")]
+    public async Task<IActionResult> GetTrustReport(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/trust")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var window = req.Query["window"].ToString();
+        if (WindowDays(window) is not int days) return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
+        var normWindow = string.IsNullOrEmpty(window) ? "30d" : window;
+
+        var rows = await _db.TrustMonitors.FromSql(TrustFleetSql(days)).AsNoTracking().ToListAsync(ct);
+
+        var asOf = DateTimeOffset.UtcNow;
+        var monitors = rows.Select(r => TrustReportProjection.ToDto(r, asOf)).ToList();
+
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(new TrustReportDto(normWindow, monitors));
+    }
+
+    /// <summary>
+    /// §D1 GET /api/reports/trust/{checkId}?window=7d|30d|90d — one monitor's trust row (same shape as the
+    /// fleet) plus its daily retry-rate series for the detail sparkline. 404 when the check does not exist.
+    /// Read-only.
+    /// </summary>
+    [Function("GetTrustMonitorDetail")]
+    public async Task<IActionResult> GetTrustMonitorDetail(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/trust/{checkId:long}")] HttpRequest req,
+        long checkId,
+        CancellationToken ct)
+    {
+        var window = req.Query["window"].ToString();
+        if (WindowDays(window) is not int days) return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
+        var normWindow = string.IsNullOrEmpty(window) ? "30d" : window;
+
+        var row = (await _db.TrustMonitors.FromSql(TrustDetailSql(days, checkId)).AsNoTracking().ToListAsync(ct))
+            .FirstOrDefault();
+        if (row is null) return ApiResults.NotFound($"Monitor {checkId} not found.");
+
+        var series = await _db.TrustRetryDays.FromSql(
+            $@"SELECT d.day::date AS day,
+                      coalesce(rc.run_count, 0) AS run_count,
+                      coalesce(rc.retry_count, 0) AS retry_count
+               FROM generate_series((CURRENT_DATE - ({days} - 1))::date, CURRENT_DATE, INTERVAL '1 day') d(day)
+               LEFT JOIN LATERAL (
+                   SELECT count(*)::bigint AS run_count,
+                          count(*) FILTER (WHERE r.retry_count > 0)::bigint AS retry_count
+                   FROM runs r
+                   WHERE r.check_id = {checkId} AND r.started_at::date = d.day::date
+               ) rc ON true
+               ORDER BY d.day").AsNoTracking().ToListAsync(ct);
+
+        var asOf = DateTimeOffset.UtcNow;
+        var monitor = TrustReportProjection.ToDto(row, asOf);
+        var points = series
+            .Select(s => new TrustRetryPointDto(s.Day, s.RunCount, s.RetryCount,
+                TrustReportProjection.RetryRate(s.RetryCount, s.RunCount)))
+            .ToList();
+
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(new TrustMonitorDetailDto(normWindow, monitor, points));
+    }
+
+    // The trust-row SQL, shared by the fleet + detail endpoints. Per-check aggregates via LEFT JOIN LATERAL so
+    // a check with zero runs / zero incidents still yields a row (coalesced to 0 — never dropped). last_green_at
+    // stays NULL when the check never passed in the window (a first-class "never verified" state). The RCA
+    // buckets ALL reconcile to incident_total (perf-regression is its own bucket; nothing counted goes unshown).
+    // The taxonomy strings are the fixed runner enum (reconcile.ts), not user input — safe as SQL literals.
+    private static FormattableString TrustFleetSql(int days) =>
+        $@"SELECT c.id AS check_id, c.name AS check_name, c.sensitive AS sensitive,
+                  c.interval_seconds AS interval_seconds, c.last_run_at AS last_run_at,
+                  rc.last_green_at AS last_green_at,
+                  coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
+                  coalesce(ic.total, 0) AS incident_total,
+                  coalesce(ic.real_outage, 0) AS real_outage,
+                  coalesce(ic.flaky_transient, 0) AS flaky_transient,
+                  coalesce(ic.selector_drift, 0) AS selector_drift,
+                  coalesce(ic.environment_regional, 0) AS environment_regional,
+                  coalesce(ic.perf_regression, 0) AS perf_regression,
+                  coalesce(ic.unclassified, 0) AS unclassified,
+                  sp.executed_sha256 AS executed_sha256, sp.spec_path AS spec_path
+           FROM checks c
+           LEFT JOIN LATERAL (
+               SELECT count(*)::bigint AS run_count,
+                      count(*) FILTER (WHERE r.retry_count > 0)::bigint AS retry_count,
+                      max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
+               FROM runs r
+               WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')
+           ) rc ON true
+           LEFT JOIN LATERAL (
+               SELECT count(*)::bigint AS total,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'real-outage')::bigint AS real_outage,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'flaky-transient')::bigint AS flaky_transient,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'selector-drift')::bigint AS selector_drift,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'environment-regional')::bigint AS environment_regional,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'perf-regression')::bigint AS perf_regression,
+                      count(*) FILTER (WHERE i.rca->>'classification' IS NULL)::bigint AS unclassified
+               FROM incidents i
+               WHERE i.check_id = c.id AND i.opened_at >= now() - ({days} * INTERVAL '1 day')
+           ) ic ON true
+           LEFT JOIN LATERAL (
+               SELECT r.spec_provenance->>'executed_sha256' AS executed_sha256,
+                      r.spec_provenance->>'spec_path' AS spec_path
+               FROM runs r
+               WHERE r.check_id = c.id AND r.spec_provenance->>'executed_sha256' IS NOT NULL
+               ORDER BY r.started_at DESC
+               LIMIT 1
+           ) sp ON true
+           WHERE c.enabled = true
+           ORDER BY c.name";
+
+    // Same row shape as the fleet SQL, scoped to one check (enabled or not — a detail view resolves disabled
+    // monitors too). Returns 0 or 1 row.
+    private static FormattableString TrustDetailSql(int days, long checkId) =>
+        $@"SELECT c.id AS check_id, c.name AS check_name, c.sensitive AS sensitive,
+                  c.interval_seconds AS interval_seconds, c.last_run_at AS last_run_at,
+                  rc.last_green_at AS last_green_at,
+                  coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
+                  coalesce(ic.total, 0) AS incident_total,
+                  coalesce(ic.real_outage, 0) AS real_outage,
+                  coalesce(ic.flaky_transient, 0) AS flaky_transient,
+                  coalesce(ic.selector_drift, 0) AS selector_drift,
+                  coalesce(ic.environment_regional, 0) AS environment_regional,
+                  coalesce(ic.perf_regression, 0) AS perf_regression,
+                  coalesce(ic.unclassified, 0) AS unclassified,
+                  sp.executed_sha256 AS executed_sha256, sp.spec_path AS spec_path
+           FROM checks c
+           LEFT JOIN LATERAL (
+               SELECT count(*)::bigint AS run_count,
+                      count(*) FILTER (WHERE r.retry_count > 0)::bigint AS retry_count,
+                      max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
+               FROM runs r
+               WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')
+           ) rc ON true
+           LEFT JOIN LATERAL (
+               SELECT count(*)::bigint AS total,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'real-outage')::bigint AS real_outage,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'flaky-transient')::bigint AS flaky_transient,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'selector-drift')::bigint AS selector_drift,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'environment-regional')::bigint AS environment_regional,
+                      count(*) FILTER (WHERE i.rca->>'classification' = 'perf-regression')::bigint AS perf_regression,
+                      count(*) FILTER (WHERE i.rca->>'classification' IS NULL)::bigint AS unclassified
+               FROM incidents i
+               WHERE i.check_id = c.id AND i.opened_at >= now() - ({days} * INTERVAL '1 day')
+           ) ic ON true
+           LEFT JOIN LATERAL (
+               SELECT r.spec_provenance->>'executed_sha256' AS executed_sha256,
+                      r.spec_provenance->>'spec_path' AS spec_path
+               FROM runs r
+               WHERE r.check_id = c.id AND r.spec_provenance->>'executed_sha256' IS NOT NULL
+               ORDER BY r.started_at DESC
+               LIMIT 1
+           ) sp ON true
+           WHERE c.id = {checkId}";
+
     /// <summary>GET /api/reports/availability?window=&amp;groupBy=&lt;tagKey&gt;&amp;tag=key:value (repeatable, AND-filter) — availability by group (from the rollup).</summary>
     [Function("GetAvailabilityReport")]
     public async Task<IActionResult> GetAvailabilityReport(
