@@ -2916,6 +2916,7 @@ public class IntegrationTests
             AssertEnvelope(await new StatusFunctions(db).GetStatus(Request(), default), "window", "properties", "recentIncidents");
             AssertEnvelope(await reports.GetSloReport(Request(), default), "window", "fleet", "items");
             AssertEnvelope(await reports.GetDeploysReport(Request("?host=shape.example"), default), "host", "window", "deploys");
+            AssertEnvelope(await reports.GetEgressReport(Request(), default), "window", "regions");
             AssertEnvelope(await reports.GetMttrReport(Request(), default), "window", "fleet", "items", "classification", "trend");
             AssertEnvelope(await routing.GetRouting(Request(), default), "severity", "perCheck", "tagRules");
             AssertEnvelope(await reports.GetAvailabilityReport(Request(), default), "window", "groupBy", "groups");
@@ -3149,6 +3150,94 @@ public class IntegrationTests
         finally
         {
             await db.Database.ExecuteSqlRawAsync("DELETE FROM deploys WHERE target_host IN ('www.meals2go.com','other.example');");
+        }
+    }
+
+    // ★ GET /reports/egress — per-region egress-IP stability. Proves: NULL egress_ip excluded (correctness);
+    // a stable region → distinctCount=1; ★ a ROTATION (2 IPs) → distinctCount=2 with BOTH ips surfaced (not
+    // deduped); window=24h excludes older rows that window=all includes.
+    [SkippableFact]
+    public async Task Egress_report_rolls_per_region_surfaces_rotations_and_excludes_null_ips()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url) VALUES ('egress-test','http','https://eg.test') RETURNING id INTO cid;
+              -- r-central: 3 runs on 10.0.0.1 + 1 NULL (the NULL MUST be excluded → runCount stays 3)
+              INSERT INTO runs (check_id, status, started_at, location, egress_ip) VALUES
+                (cid,'pass', now()-interval '3 hours',   'r-central', '10.0.0.1'),
+                (cid,'pass', now()-interval '2 hours',   'r-central', '10.0.0.1'),
+                (cid,'pass', now()-interval '1 hour',    'r-central', '10.0.0.1'),
+                (cid,'pass', now()-interval '90 minutes','r-central', NULL);
+              -- r-east: 2 runs on 10.0.0.2 (stable)
+              INSERT INTO runs (check_id, status, started_at, location, egress_ip) VALUES
+                (cid,'pass', now()-interval '4 hours', 'r-east', '10.0.0.2'),
+                (cid,'pass', now()-interval '2 hours', 'r-east', '10.0.0.2');
+              -- ★ r-west: a ROTATION — 10.0.0.3 (older ×2) then 10.0.0.4 (newer ×1)
+              INSERT INTO runs (check_id, status, started_at, location, egress_ip) VALUES
+                (cid,'pass', now()-interval '6 hours',    'r-west', '10.0.0.3'),
+                (cid,'pass', now()-interval '5 hours',    'r-west', '10.0.0.3'),
+                (cid,'pass', now()-interval '30 minutes', 'r-west', '10.0.0.4');
+              -- r-old: a run 2 days ago (only window=all includes it)
+              INSERT INTO runs (check_id, status, started_at, location, egress_ip) VALUES
+                (cid,'pass', now()-interval '2 days', 'r-old', '10.0.0.9');
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var all = Assert.IsType<EgressReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetEgressReport(Request("?window=all"), default)).Value!);
+            var byLoc = all.Regions.ToDictionary(r => r.Location);
+
+            // stable region: distinctCount=1, the IP, runCount=3 (★ the NULL run is NOT counted)
+            Assert.Equal(1, byLoc["r-central"].DistinctCount);
+            Assert.Equal(new[] { "10.0.0.1" }, byLoc["r-central"].CurrentIps.ToArray());
+            Assert.Equal(3L, byLoc["r-central"].Ips.Single().RunCount);
+            Assert.Equal(1, byLoc["r-east"].DistinctCount);
+            Assert.Equal(2L, byLoc["r-east"].Ips.Single().RunCount);
+
+            // ★★ ROTATION: distinctCount=2, BOTH ips surfaced (not collapsed), ordered oldest-first-seen first.
+            var west = byLoc["r-west"];
+            Assert.Equal(2, west.DistinctCount);
+            Assert.Equal(new[] { "10.0.0.3", "10.0.0.4" }, west.Ips.Select(i => i.Ip).ToArray()); // 2nd IP present
+            Assert.Equal(new[] { "10.0.0.3", "10.0.0.4" }, west.CurrentIps.ToArray());
+            Assert.True(west.Ips[0].FirstSeen < west.Ips[1].FirstSeen); // rotation timeline visible
+            Assert.Equal(2L, west.Ips[0].RunCount);
+            Assert.Equal(1L, west.Ips[1].RunCount);
+
+            // window=all includes the 2-day-old region
+            Assert.True(byLoc.ContainsKey("r-old"));
+
+            // ★ window=24h EXCLUDES the older-than-a-day region, keeps the recent ones
+            var day = Assert.IsType<EgressReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetEgressReport(Request("?window=24h"), default)).Value!);
+            var dayLoc = day.Regions.Select(r => r.Location).ToHashSet();
+            Assert.DoesNotContain("r-old", dayLoc);
+            Assert.Contains("r-west", dayLoc);
+
+            // bad window → 400
+            Assert.Equal(400, StatusOf(await reports.GetEgressReport(Request("?window=bogus"), default)));
+
+            // ★ wire-shape pin (#123): top-level + region + ip key sets
+            var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+            var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(all, web)).RootElement;
+            Assert.Equal(new[] { "regions", "window" },
+                root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            var region = root.GetProperty("regions").EnumerateArray().First(r => r.GetProperty("location").GetString() == "r-west");
+            Assert.Equal(new[] { "currentIps", "distinctCount", "ips", "location" },
+                region.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(new[] { "firstSeen", "ip", "lastSeen", "runCount" },
+                region.GetProperty("ips")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name='egress-test'); " +
+                "DELETE FROM checks WHERE name='egress-test';");
         }
     }
 
