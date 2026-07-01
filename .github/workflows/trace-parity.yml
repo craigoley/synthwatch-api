@@ -1,0 +1,51 @@
+name: Trace-signals parity
+
+# ──────────────────────────────────────────────────────────────────────────────────────────
+# The API half of the trace-signals cross-repo parity guard. TraceExtractor.cs (here) and the RUNNER's
+# traceSignals.ts are a hand-ported pair whose output MUST stay byte-identical (the persisted
+# runs.trace_signals JSON is read as the C# TraceSignalsDto shape). They already drifted once (the
+# `mutations` signal, reconciled in the runner's #169). The structural fix: a SHARED golden fixture that
+# lives in the RUNNER repo (it owns the logic); this job checks that repo out and asserts C#
+# TraceExtractor.FromZip reproduces the SAME expected.json — mirroring how pg-grant-coverage checks out the
+# runner as the source of truth. A failure fails ci-gate, which holds the merge.
+#
+# Runs ONLY the golden-parity test (--filter) with the runner golden checked out; the normal Test job SKIPS
+# it (SkippableFact, no RUNNER_GOLDEN_DIR). No DB/Testcontainers needed for this test.
+# ──────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trace-signals-parity:
+    name: Trace-signals golden parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (synthwatch-api)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The golden fixtures live in the RUNNER repo (it owns the extraction logic). Both repos are public, so
+      # the default token reads it. persist-credentials:false — we only read files.
+      - name: Checkout runner repo (the golden fixtures = source of truth)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: craigoley/synthwatch
+          path: runner-repo
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Assert C# TraceExtractor matches the runner golden
+        env:
+          RUNNER_GOLDEN_DIR: ${{ github.workspace }}/runner-repo/runner/test-fixtures/trace-signals-golden
+        run: dotnet test tests/SynthWatch.Api.Tests/ -c Release --filter "FullyQualifiedName~TraceSignalsGoldenParity"
