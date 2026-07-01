@@ -257,7 +257,7 @@ public class IntegrationTests
             Assert.Equal(new[] { "budget", "consumed", "downRuns", "insufficientData", "remaining", "remainingPct", "totalRuns" },
                 root.GetProperty("fleet").EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
             Assert.Equal(
-                new[] { "budget", "burnRate", "checkId", "checkName", "consumed", "downRuns", "insufficientData", "kind", "remaining", "remainingPct", "target", "totalRuns" },
+                new[] { "budget", "burnRate", "burnState", "checkId", "checkName", "consumed", "downRuns", "insufficientData", "kind", "remaining", "remainingPct", "reportedBurn", "target", "totalRuns" },
                 root.GetProperty("items")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
         }
         finally

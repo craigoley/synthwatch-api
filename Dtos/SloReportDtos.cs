@@ -3,9 +3,9 @@ namespace SynthWatch.Api.Dtos;
 /// <summary>
 /// GET /api/reports/slo — fleet + per-check error-BUDGET over the window (P5 v1). Only checks WITH an
 /// slo_target appear (opt-in). Mirrors the /sla response shape {window, fleet, items}.
-/// ★ burnRate is INFORMATIONAL — the pooled (all-location) 30d rate slo_status computes. There are
-/// deliberately NO fast/slow-burn boolean pills here: pooled burn false-pages (a single distant region
-/// trips a fleet page), so the location-aware fast/slow-burn decision is a SEPARATE follow-up PR.
+/// burnRate stays as the INFORMATIONAL pooled (all-location) window rate. ★ P5 PR2 adds the real
+/// location-aware pill: burnState ('fast'|'slow'|'none') + reportedBurn, from slo_burn_status — the SAME
+/// verdict the runner PAGES on (read == page). The dashboard pill reads burnState, not the pooled burnRate.
 /// </summary>
 public record SloReportResponseDto(
     string Window,
@@ -25,7 +25,10 @@ public record SloReportItemDto(
     long Consumed,
     decimal Remaining,
     decimal? RemainingPct,
-    decimal BurnRate,          // informational only — see the response-DTO note (no burn pills in v1)
+    decimal BurnRate,          // informational: pooled window burn (not the page verdict)
+    // ★ P5 PR2 — the page-worthy, location-aware burn STATE (read == page). burnState ∈ fast|slow|none.
+    string BurnState,
+    double ReportedBurn,
     bool InsufficientData);
 
 /// <summary>Run-weighted ADDITIVE fleet rollup: budget/consumed/remaining are SUMMED across the scoped

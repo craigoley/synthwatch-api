@@ -72,9 +72,13 @@ public class ReportsFunctions
         // tag clause ANDs across selected tags (no-op when none) — the same idiom as the other reports.
         var rows = await _db.SloReport.FromSql(
             $@"SELECT c.id AS check_id, c.name AS check_name, c.kind AS kind,
-                      s.slo_target, s.total_runs, s.down_runs, s.budget, s.consumed, s.remaining, s.remaining_pct, s.burn_rate
+                      s.slo_target, s.total_runs, s.down_runs, s.budget, s.consumed, s.remaining, s.remaining_pct, s.burn_rate,
+                      b.burn_state, b.reported_burn
                FROM checks c
                CROSS JOIN LATERAL slo_status(c.id, {from}, {to}) s
+               -- ★ P5 PR2: the LOCATION-AWARE burn STATE — the SAME slo_burn_status the runner pages on
+               -- (read == page). Its own fixed 1h/6h/30m windows (NOT the report window), so no from/to args.
+               CROSS JOIN LATERAL slo_burn_status(c.id) b
                WHERE c.slo_target IS NOT NULL
                  AND (cardinality({tags}) = 0 OR c.id IN (
                        SELECT ft.check_id FROM check_tags ft
