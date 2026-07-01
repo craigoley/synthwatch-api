@@ -72,6 +72,42 @@ public class ReportsFunctions
     }
 
     /// <summary>
+    /// GET /api/reports/egress?window=all|24h (default all) — per-region egress-IP stability from runs.egress_ip
+    /// (0054), for the status-page egress panel (the Wegmans allowlist artifact + a live SNAT-rotation warning).
+    /// Read-only, Anonymous GET. ★ The NULL filter (egress_ip IS NOT NULL) is the correctness point; a region's
+    /// 2nd+ IP is SURFACED, never deduped (distinctCount &gt; 1 = a rotation, the reason the panel exists).
+    /// </summary>
+    [Function("GetEgressReport")]
+    public async Task<IActionResult> GetEgressReport(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/egress")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var window = req.Query["window"].ToString() switch
+        {
+            "" or "all" => "all",
+            "24h" => "24h",
+            _ => null,
+        };
+        if (window is null) return ApiResults.BadRequest("window must be one of: all, 24h.");
+
+        // {window} is parameterized by FromSql (not interpolated) — `{window} = 'all'` short-circuits the time
+        // filter; otherwise only runs from the last day count. NULL egress_ip is excluded (the correctness point).
+        var rows = await _db.EgressRuns.FromSql(
+            $@"SELECT location, egress_ip AS ip, count(*) AS run_count,
+                      min(started_at) AS first_seen, max(started_at) AS last_seen
+               FROM runs
+               WHERE egress_ip IS NOT NULL
+                 AND ({window} = 'all' OR started_at > now() - interval '1 day')
+               GROUP BY location, egress_ip
+               ORDER BY location, first_seen").AsNoTracking().ToListAsync(ct);
+
+        var dto = EgressReportProjection.Build(window, rows);
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=60";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(dto);
+    }
+
+    /// <summary>
     /// Parse the repeatable <c>?tag=key:value</c> filter into a normalized "key:value"[] (distinct, trimmed).
     /// Empty array = no filter. The query clause below ANDs across all selected tags (a check must carry EVERY
     /// one) — mirrors the dashboard's multi-select-AND tag filter. Passed as a single text[] param so the same

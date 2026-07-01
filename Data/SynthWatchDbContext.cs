@@ -46,6 +46,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
     public DbSet<IncidentBreakdownRow> IncidentBreakdown => Set<IncidentBreakdownRow>();
     public DbSet<StatusCheckRow> StatusChecks => Set<StatusCheckRow>();
+    public DbSet<EgressRunRow> EgressRuns => Set<EgressRunRow>();
     public DbSet<StatusSlaRow> StatusSla => Set<StatusSlaRow>();
     public DbSet<StatusIncidentRow> StatusIncidents => Set<StatusIncidentRow>();
     public DbSet<DeployRow> Deploys => Set<DeployRow>();
@@ -484,6 +485,18 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.IsSha).HasColumnName("is_sha");
             e.Property(x => x.Source).HasColumnName("source");
             e.Property(x => x.DeployedAt).HasColumnName("deployed_at");
+        });
+
+        // Keyless: GET /reports/egress — per-(location, egress_ip) roll-up from runs (0054), raw SQL only.
+        modelBuilder.Entity<EgressRunRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Location).HasColumnName("location");
+            e.Property(x => x.Ip).HasColumnName("ip");
+            e.Property(x => x.RunCount).HasColumnName("run_count");
+            e.Property(x => x.FirstSeen).HasColumnName("first_seen");
+            e.Property(x => x.LastSeen).HasColumnName("last_seen");
         });
 
         // Keyless: read the inline availability-over-time bucketed query via raw SQL only.
