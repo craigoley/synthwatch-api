@@ -348,7 +348,8 @@ public class ReportsFunctions
                   coalesce(ic.environment_regional, 0) AS environment_regional,
                   coalesce(ic.perf_regression, 0) AS perf_regression,
                   coalesce(ic.unclassified, 0) AS unclassified,
-                  sp.executed_sha256 AS executed_sha256, sp.spec_path AS spec_path
+                  sp.executed_sha256 AS executed_sha256, sp.spec_path AS spec_path,
+                  rt.red_tested_at AS red_tested_at, rt.red_test_method AS red_test_method
            FROM checks c
            LEFT JOIN LATERAL (
                SELECT count(*)::bigint AS run_count,
@@ -376,6 +377,15 @@ public class ReportsFunctions
                ORDER BY r.started_at DESC
                LIMIT 1
            ) sp ON true
+           -- §D1 v2 (0057): the latest HARNESS-CONFIRMED red-test (outcome='red') for this monitor — flips
+           -- redTest.captured=true. NOT windowed: a red-test is a durable capability proof, not a window metric.
+           LEFT JOIN LATERAL (
+               SELECT rt0.tested_at AS red_tested_at, rt0.method AS red_test_method
+               FROM red_tests rt0
+               WHERE rt0.check_id = c.id AND rt0.outcome = 'red'
+               ORDER BY rt0.tested_at DESC
+               LIMIT 1
+           ) rt ON true
            WHERE c.enabled = true
            ORDER BY c.name";
 
@@ -393,7 +403,8 @@ public class ReportsFunctions
                   coalesce(ic.environment_regional, 0) AS environment_regional,
                   coalesce(ic.perf_regression, 0) AS perf_regression,
                   coalesce(ic.unclassified, 0) AS unclassified,
-                  sp.executed_sha256 AS executed_sha256, sp.spec_path AS spec_path
+                  sp.executed_sha256 AS executed_sha256, sp.spec_path AS spec_path,
+                  rt.red_tested_at AS red_tested_at, rt.red_test_method AS red_test_method
            FROM checks c
            LEFT JOIN LATERAL (
                SELECT count(*)::bigint AS run_count,
@@ -421,6 +432,15 @@ public class ReportsFunctions
                ORDER BY r.started_at DESC
                LIMIT 1
            ) sp ON true
+           -- §D1 v2 (0057): the latest HARNESS-CONFIRMED red-test (outcome='red') for this monitor — flips
+           -- redTest.captured=true. NOT windowed: a red-test is a durable capability proof, not a window metric.
+           LEFT JOIN LATERAL (
+               SELECT rt0.tested_at AS red_tested_at, rt0.method AS red_test_method
+               FROM red_tests rt0
+               WHERE rt0.check_id = c.id AND rt0.outcome = 'red'
+               ORDER BY rt0.tested_at DESC
+               LIMIT 1
+           ) rt ON true
            WHERE c.id = {checkId}";
 
     /// <summary>GET /api/reports/availability?window=&amp;groupBy=&lt;tagKey&gt;&amp;tag=key:value (repeatable, AND-filter) — availability by group (from the rollup).</summary>

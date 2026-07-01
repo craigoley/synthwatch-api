@@ -96,6 +96,9 @@ public class TrustMonitorRow
     public long Unclassified { get; set; }
     public string? ExecutedSha256 { get; set; }
     public string? SpecPath { get; set; }
+    // §D1 v2 (0057): the latest HARNESS-CONFIRMED red-test for this monitor. Null = none recorded → captured=false.
+    public DateTimeOffset? RedTestedAt { get; set; }
+    public string? RedTestMethod { get; set; }
 }
 
 /// <summary>§D1 trust detail — one day of the retry-rate trend for a single check (the detail sparkline).

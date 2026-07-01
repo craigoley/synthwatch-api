@@ -125,12 +125,17 @@ public record TrustIncidentsDto(
     [property: JsonPropertyName("perfRegression")] long PerfRegression,
     [property: JsonPropertyName("unclassified")] long Unclassified);
 
-/// <summary>★ THE HONEST CONTRACT SLOT. Whether a must-go-red / "last red-tested" verification is recorded
-/// for this monitor. In v1 this is ALWAYS <c>false</c> — red-test status has NO backing data today (Signal 1
-/// is a v2 runner-side capture). The field exists NOW so the wire shape does not change when capture lands;
-/// the scorecard renders it as an explicit "not red-tested — not captured", never a fabricated status.</summary>
+/// <summary>★ THE HONEST CONTRACT SLOT. Whether a HARNESS-CONFIRMED red-test (or an attested-manual record) is
+/// recorded for this monitor (§D1 v2, runner migration 0057). captured=true ONLY when a red_tests row exists —
+/// NEVER inferred from a fail run or RCA. When captured, testedAt + method are populated; when not, both are
+/// null (the honest "not red-tested — not captured" slot, never a fabricated status). ADDITIVE: v1 shipped this
+/// as {captured:false}; testedAt/method default null so the wire shape is unchanged for a not-captured monitor.</summary>
 public record TrustRedTestDto(
-    [property: JsonPropertyName("captured")] bool Captured);
+    [property: JsonPropertyName("captured")] bool Captured,
+    // method ∈ 'executed-red-fixture' | 'attested-manual' — rendered DISTINCTLY on the scorecard (executed =
+    // an automated proof; attested = a human-recorded proof — the method distinction IS the honesty).
+    [property: JsonPropertyName("testedAt")] DateTimeOffset? TestedAt = null,
+    [property: JsonPropertyName("method")] string? Method = null);
 
 /// <summary>Spec-integrity provenance from the monitor's most recent run that carried it: the sha256 of the
 /// assertion code that ACTUALLY executed + its spec path. A real integrity-of-execution fact ("the monitor

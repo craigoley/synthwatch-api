@@ -89,8 +89,12 @@ public static class TrustReportProjection
             EnvironmentRegional: r.EnvironmentRegional,
             PerfRegression: r.PerfRegression,
             Unclassified: r.Unclassified),
-        // ★ Signal 1 has no data in v1 — a hard false, never a fabricated red-test status.
-        RedTest: new TrustRedTestDto(Captured: false),
+        // ★ Signal 1 (§D1 v2, 0057): captured=true ONLY when a harness-confirmed red_tests row exists (the SQL
+        // takes the latest outcome='red' per check). No row → the honest {captured:false, testedAt:null,
+        // method:null}. NEVER inferred from a fail run / RCA — a red_tests row is the only backing.
+        RedTest: r.RedTestedAt is DateTimeOffset testedAt
+            ? new TrustRedTestDto(Captured: true, TestedAt: testedAt, Method: r.RedTestMethod)
+            : new TrustRedTestDto(Captured: false),
         SpecProvenance: new TrustProvenanceDto(r.ExecutedSha256, r.SpecPath),
         Trust: DeriveChip(r, asOf));
 }
