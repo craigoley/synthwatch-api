@@ -558,6 +558,9 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.FcpP75Ms).HasColumnName("fcp_p75_ms");
             e.Property(x => x.TtfbP75Ms).HasColumnName("ttfb_p75_ms");
             e.Property(x => x.ClsP75).HasColumnName("cls_p75");
+            e.Property(x => x.InpP75Ms).HasColumnName("inp_p75_ms");
+            e.Property(x => x.InpCount).HasColumnName("inp_count");
+            e.Property(x => x.ResourceCount).HasColumnName("resource_count");
         });
 
         modelBuilder.Entity<LatencySeriesRow>(e =>

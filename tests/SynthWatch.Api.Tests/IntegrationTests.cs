@@ -903,6 +903,66 @@ public class IntegrationTests
         }
     }
 
+    // ★ P9: the raw vitals report now surfaces INP + resource_count. INP is captured only on INTERACTION runs
+    // (~half; load-only runs have NULL inp_ms — correct), so its sample differs from vitals_count. Proves INP
+    // HONESTY: inp_p75 is over the non-null subset, inp_count is that SMALLER sample (not vitals_count), and a
+    // zero-INP check → inp_p75 null + inp_count 0 (never a fabricated 0ms INP). resource_count = avg.
+    [SkippableFact]
+    public async Task Vitals_report_surfaces_inp_and_resource_count_over_the_non_null_inp_subset_honestly()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // vit-inp (browser): 10 runs, ALL with resource_count=50; only 5 carry inp_ms (200/220/240/260/280),
+        // the other 5 are load-only (NULL inp). vit-noinp: 4 runs, all load-only (NULL inp), resource_count=30.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE w1 bigint; w2 bigint; rid bigint; i int;
+            BEGIN
+              INSERT INTO checks (name,kind,target_url,flow_name) VALUES ('vit-inp','browser','https://vi.example','f1') RETURNING id INTO w1;
+              INSERT INTO checks (name,kind,target_url,flow_name) VALUES ('vit-noinp','browser','https://vn.example','f2') RETURNING id INTO w2;
+              INSERT INTO check_tags (check_id,key,value) VALUES (w1,'team','vit'), (w2,'team','vit');
+              FOR i IN 1..5 LOOP
+                INSERT INTO runs (check_id,status,started_at,duration_ms) VALUES (w1,'pass',(CURRENT_DATE-1)::timestamptz+interval '6 hours',200) RETURNING id INTO rid;
+                INSERT INTO run_metrics (run_id,lcp_ms,fcp_ms,ttfb_ms,cls,inp_ms,resource_count) VALUES (rid,1000,700,120,0.02, 200 + (i-1)*20, 50);
+              END LOOP;
+              FOR i IN 1..5 LOOP
+                INSERT INTO runs (check_id,status,started_at,duration_ms) VALUES (w1,'pass',(CURRENT_DATE-1)::timestamptz+interval '6 hours',200) RETURNING id INTO rid;
+                INSERT INTO run_metrics (run_id,lcp_ms,fcp_ms,ttfb_ms,cls,inp_ms,resource_count) VALUES (rid,1000,700,120,0.02, NULL, 50);
+              END LOOP;
+              FOR i IN 1..4 LOOP
+                INSERT INTO runs (check_id,status,started_at,duration_ms) VALUES (w2,'pass',(CURRENT_DATE-1)::timestamptz+interval '6 hours',200) RETURNING id INTO rid;
+                INSERT INTO run_metrics (run_id,lcp_ms,fcp_ms,ttfb_ms,cls,inp_ms,resource_count) VALUES (rid,1000,700,120,0.02, NULL, 30);
+              END LOOP;
+            END $$;
+            """);
+        try
+        {
+            var perf = Assert.IsType<PerformanceReportDto>(Assert.IsType<OkObjectResult>(
+                await new ReportsFunctions(db).GetPerformanceReport(Request("?window=30d&groupBy=team&tag=team:vit"), default)).Value!);
+            var grp = perf.Groups.Single(g => g.Group == "vit");
+            var inp = grp.Checks.Single(c => c.CheckName == "vit-inp").WebVitals!;
+            var noinp = grp.Checks.Single(c => c.CheckName == "vit-noinp").WebVitals!;
+
+            // ★ INP HONESTY: sampleCount counts ALL 10 vitals rows, but inpCount counts only the 5 with INP.
+            Assert.Equal(10, inp.SampleCount);
+            Assert.Equal(5, inp.InpCount);                        // ★ SMALLER than sampleCount — the half-null case
+            Assert.NotEqual(inp.SampleCount, inp.InpCount);
+            // p75 over the non-null subset [200,220,240,260,280] = 260 (NULLs ignored, not counted as 0)
+            Assert.Equal(260, inp.InpP75Ms);
+            Assert.Equal(50, inp.ResourceCount);                  // avg resources/page over all 10 rows
+
+            // ★ ZERO INP (all load-only) → inp_p75 NULL + inp_count 0 (never a fabricated 0ms INP); resource_count still present.
+            Assert.Equal(4, noinp.SampleCount);
+            Assert.Equal(0, noinp.InpCount);
+            Assert.Null(noinp.InpP75Ms);
+            Assert.Equal(30, noinp.ResourceCount);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name IN ('vit-inp','vit-noinp');"); // cascades runs/run_metrics/tags
+        }
+    }
+
     // ★ The repeatable ?tag=key:value filter scopes EVERY report aggregate to the tagged subset (multi-select
     // AND), so a tag-filtered reports surface shows tag-scoped CWV / trend / verdict-breakdown — not the fleet
     // numbers. Empty filter = whole fleet (no-op). A tag with no matching checks = honest empty, never a lie.
