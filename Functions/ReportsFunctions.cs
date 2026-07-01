@@ -96,6 +96,47 @@ public class ReportsFunctions
     }
 
     /// <summary>
+    /// GET /api/reports/mttr?window=7d|30d|90d&amp;tag=key:value (repeatable, AND) — fleet + per-check incident
+    /// analytics: MTTR (mean + median time-to-resolve over RESOLVED incidents), the rca.classification
+    /// breakdown (unclassified shown), a detection-lag PROXY (consecutive_failures × interval), and an MTTR
+    /// trend. ★ Open incidents are EXCLUDED from the durations but COUNTED; too-few-resolved → null, never a
+    /// fabricated time. Pure math in <see cref="MttrReportProjection"/>. Read-only (stays open per the GET default).
+    /// </summary>
+    [Function("GetMttrReport")]
+    public async Task<IActionResult> GetMttrReport(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/mttr")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var window = req.Query["window"].ToString();
+        if (WindowDays(window) is not int days)
+            return ApiResults.BadRequest("window must be one of: 7d, 30d, 90d.");
+        var tags = TagFilter(req);
+
+        // One row per incident opened in the window (+ its check), resolved OR open. The tag clause ANDs
+        // across selected tags via the incident's check_id — the same idiom as the other reports.
+        var rows = await _db.MttrIncidents.FromSql(
+            $@"SELECT i.check_id, c.name AS check_name, c.kind AS kind, i.status,
+                      i.opened_at, i.resolved_at,
+                      coalesce(i.rca->>'classification', {Unclassified}) AS classification,
+                      i.consecutive_failures, c.interval_seconds
+               FROM incidents i
+               JOIN checks c ON c.id = i.check_id
+               WHERE i.opened_at >= now() - ({days} * INTERVAL '1 day')
+                 AND (cardinality({tags}) = 0 OR i.check_id IN (
+                       SELECT ft.check_id FROM check_tags ft
+                       WHERE ft.key || ':' || ft.value = ANY({tags})
+                       GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
+               ORDER BY i.opened_at").AsNoTracking().ToListAsync(ct);
+
+        var p = MttrReportProjection.Build(rows, days);
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(new MttrReportResponseDto(
+            Window: string.IsNullOrEmpty(window) ? "30d" : window,
+            Fleet: p.Fleet, Items: p.Items, Classification: p.Classification, Trend: p.Trend));
+    }
+
+    /// <summary>
     /// GET /api/reports/incident-breakdown?window=7d|30d|90d&tag=key:value (repeatable, AND) — the verdict-taxonomy breakdown over the window:
     /// count per rca.classification (real-outage | flaky-transient | selector-drift | environment-regional |
     /// perf-regression), an explicit <c>unclassified</c> bucket (incidents with no RCA yet — never dropped),

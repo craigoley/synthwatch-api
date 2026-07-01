@@ -267,6 +267,115 @@ public class IntegrationTests
         }
     }
 
+    // ★ GET /reports/mttr — fleet incident analytics. Proves: MTTR excludes OPEN incidents (counts them);
+    // mean≠median both present (skewed durations); the fleet mean/median are over the FULL resolved set,
+    // NOT mean-of-means / median-of-medians; insufficientData → null (never 0); classification unclassified
+    // shown last; tag scoping; scoped-empty honesty; and pins the response wire shape.
+    [SkippableFact]
+    public async Task Mttr_report_excludes_open_reports_median_and_mean_and_is_honest()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // A: 3 resolved (60/120/1200s — skewed → mean 460 ≠ median 120) + 1 OPEN; 2 real-outage + 2 unclassified;
+        //    consecutive_failures 2 everywhere (MTTD proxy = 2×300 = 600). B: 1 resolved (300s) → thin.
+        //    C: a resolved incident but NOT tagged team:mttr → excluded by tag scope.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE a bigint; b bigint; c bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, interval_seconds) VALUES ('mttr-a','http','https://a.ex',300) RETURNING id INTO a;
+              INSERT INTO checks (name, kind, target_url, interval_seconds) VALUES ('mttr-b','http','https://b.ex',300) RETURNING id INTO b;
+              INSERT INTO checks (name, kind, target_url, interval_seconds) VALUES ('mttr-c','http','https://c.ex',300) RETURNING id INTO c;
+              INSERT INTO check_tags (check_id, key, value) VALUES (a,'team','mttr'), (b,'team','mttr');
+              INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures, rca) VALUES
+                (a,'resolved','critical', now()-interval '5 days', now()-interval '5 days'+interval '60 seconds',   2, jsonb_build_object('classification','real-outage')),
+                (a,'resolved','critical', now()-interval '4 days', now()-interval '4 days'+interval '120 seconds',  2, jsonb_build_object('classification','real-outage')),
+                (a,'resolved','warning',  now()-interval '3 days', now()-interval '3 days'+interval '1200 seconds', 2, NULL),
+                (a,'open','critical',     now()-interval '1 day',  NULL,                                            2, NULL),
+                (b,'resolved','critical', now()-interval '2 days', now()-interval '2 days'+interval '300 seconds',  1, jsonb_build_object('classification','real-outage')),
+                (c,'resolved','critical', now()-interval '2 days', now()-interval '2 days'+interval '999 seconds',  1, jsonb_build_object('classification','selector-drift'));
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var scoped = Assert.IsType<MttrReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetMttrReport(Request("?window=30d&tag=team:mttr"), default)).Value!);
+
+            // scope → A + B (C excluded: not tagged team:mttr)
+            Assert.Equal(new[] { "mttr-a", "mttr-b" }, scoped.Items.Select(i => i.CheckName).OrderBy(n => n).ToArray());
+
+            // ── A: open EXCLUDED from durations but COUNTED; mean 460 ≠ median 120 (both present) ──
+            var a = scoped.Items.First(i => i.CheckName == "mttr-a");
+            Assert.Equal(3, a.ResolvedCount);
+            Assert.Equal(1, a.OpenCount);                       // ★ open counted, not in the mean
+            Assert.Equal(460d, a.MeanSeconds);
+            Assert.Equal(120d, a.MedianSeconds);
+            Assert.NotEqual(a.MeanSeconds, a.MedianSeconds);    // ★ skew visible — both reported
+            Assert.False(a.InsufficientData);
+            Assert.Equal(600d, a.MttdProxySeconds);             // 2 failures × 300s interval
+
+            // ── B: 1 resolved (< MinResolved) → insufficientData + NULL mttr (never a fake number) ──
+            var b = scoped.Items.First(i => i.CheckName == "mttr-b");
+            Assert.Equal(1, b.ResolvedCount);
+            Assert.True(b.InsufficientData);
+            Assert.Null(b.MeanSeconds);
+            Assert.Null(b.MedianSeconds);
+
+            // ── ★ fleet over the FULL resolved set [60,120,300,1200]: mean 420, median 210 — NOT the
+            //     mean-of-means (460,300 → 380) or median-of-medians (120). This is the teeth. ──
+            Assert.Equal(4, scoped.Fleet.ResolvedCount);
+            Assert.Equal(1, scoped.Fleet.OpenCount);
+            Assert.Equal(5, scoped.Fleet.TotalIncidents);
+            Assert.Equal(420d, scoped.Fleet.MeanSeconds!.Value);
+            Assert.NotEqual(380d, scoped.Fleet.MeanSeconds!.Value);     // ≠ average of per-check means
+            Assert.Equal(210d, scoped.Fleet.MedianSeconds!.Value);
+            Assert.NotEqual(120d, scoped.Fleet.MedianSeconds!.Value);   // ≠ median of per-check medians
+            Assert.False(scoped.Fleet.InsufficientData);
+
+            // ── classification: real-outage(3) first, unclassified(2) LAST (never dropped) ──
+            Assert.Equal("real-outage", scoped.Classification[0].Classification);
+            Assert.Equal(3, scoped.Classification[0].Count);
+            Assert.Equal("unclassified", scoped.Classification[^1].Classification);
+            Assert.Equal(2, scoped.Classification[^1].Count);
+
+            // ── trend: resolved incidents bucketed; totals reconcile to the fleet resolved count ──
+            Assert.NotEmpty(scoped.Trend);
+            Assert.Equal(4, scoped.Trend.Sum(t => t.ResolvedCount));
+
+            // ── scoped-empty honesty: a tag matching nothing → empty everywhere + insufficient fleet, no fake % ──
+            var empty = Assert.IsType<MttrReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetMttrReport(Request("?tag=team:none"), default)).Value!);
+            Assert.Empty(empty.Items);
+            Assert.Empty(empty.Classification);
+            Assert.Empty(empty.Trend);
+            Assert.Equal(0, empty.Fleet.ResolvedCount);
+            Assert.True(empty.Fleet.InsufficientData);
+            Assert.Null(empty.Fleet.MeanSeconds);
+            Assert.Null(empty.Fleet.MedianSeconds);
+
+            // ── window validation ──
+            Assert.IsType<BadRequestObjectResult>(await reports.GetMttrReport(Request("?window=1y"), default));
+
+            // ── ★ wire-shape pin (#123): top-level + fleet + per-item key sets ──
+            var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+            var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(scoped, web)).RootElement;
+            Assert.Equal(new[] { "classification", "fleet", "items", "trend", "window" },
+                root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(new[] { "insufficientData", "meanSeconds", "medianSeconds", "mttdProxySeconds", "openCount", "resolvedCount", "totalIncidents" },
+                root.GetProperty("fleet").EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(new[] { "checkId", "checkName", "insufficientData", "kind", "meanSeconds", "medianSeconds", "mttdProxySeconds", "openCount", "resolvedCount" },
+                root.GetProperty("items")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'mttr-%'); " +
+                "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'mttr-%'); " +
+                "DELETE FROM checks WHERE name LIKE 'mttr-%';");
+        }
+    }
+
     [SkippableFact]
     public async Task Check_detail_does_not_500_when_slo_target_is_1_0()
     {
@@ -2805,6 +2914,7 @@ public class IntegrationTests
             AssertEnvelope(await checks.GetAvailabilitySeries(Request(), checkId, default), "window", "bucket", "points");
             AssertEnvelope(await sla.GetSla(Request(), default), "window", "fleet", "items");
             AssertEnvelope(await reports.GetSloReport(Request(), default), "window", "fleet", "items");
+            AssertEnvelope(await reports.GetMttrReport(Request(), default), "window", "fleet", "items", "classification", "trend");
             AssertEnvelope(await routing.GetRouting(Request(), default), "severity", "perCheck", "tagRules");
             AssertEnvelope(await reports.GetAvailabilityReport(Request(), default), "window", "groupBy", "groups");
             AssertEnvelope(await reports.GetPerformanceReport(Request(), default), "window", "groupBy", "groups");
