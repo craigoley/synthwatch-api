@@ -319,6 +319,7 @@ CREATE TABLE public.runs (
     location text DEFAULT 'default'::text,
     retry_count integer,
     egress_ip text,
+    spec_provenance jsonb,
     CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text, 'error'::text, 'running'::text])))
 );
 

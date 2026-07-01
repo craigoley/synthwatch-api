@@ -45,6 +45,8 @@ public class SynthWatchDbContext : DbContext
     public DbSet<LatencySeriesRow> LatencyReportSeries => Set<LatencySeriesRow>();
     public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
     public DbSet<IncidentBreakdownRow> IncidentBreakdown => Set<IncidentBreakdownRow>();
+    public DbSet<TrustMonitorRow> TrustMonitors => Set<TrustMonitorRow>();
+    public DbSet<TrustRetryDayRow> TrustRetryDays => Set<TrustRetryDayRow>();
     public DbSet<StatusCheckRow> StatusChecks => Set<StatusCheckRow>();
     public DbSet<EgressRunRow> EgressRuns => Set<EgressRunRow>();
     public DbSet<StatusSlaRow> StatusSla => Set<StatusSlaRow>();
@@ -439,6 +441,41 @@ public class SynthWatchDbContext : DbContext
             e.ToView(null);
             e.Property(x => x.Classification).HasColumnName("classification");
             e.Property(x => x.Count).HasColumnName("count");
+        });
+
+        // Keyless: §D1 trust scorecard — one row per enabled check (run/retry/last-green + RCA counts +
+        // latest spec provenance). The chip + retryRate are derived in TrustReportProjection. Raw SQL only.
+        modelBuilder.Entity<TrustMonitorRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.CheckName).HasColumnName("check_name");
+            e.Property(x => x.Sensitive).HasColumnName("sensitive");
+            e.Property(x => x.IntervalSeconds).HasColumnName("interval_seconds");
+            e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
+            e.Property(x => x.LastGreenAt).HasColumnName("last_green_at");
+            e.Property(x => x.RunCount).HasColumnName("run_count");
+            e.Property(x => x.RetryCount).HasColumnName("retry_count");
+            e.Property(x => x.IncidentTotal).HasColumnName("incident_total");
+            e.Property(x => x.RealOutage).HasColumnName("real_outage");
+            e.Property(x => x.FlakyTransient).HasColumnName("flaky_transient");
+            e.Property(x => x.SelectorDrift).HasColumnName("selector_drift");
+            e.Property(x => x.EnvironmentRegional).HasColumnName("environment_regional");
+            e.Property(x => x.PerfRegression).HasColumnName("perf_regression");
+            e.Property(x => x.Unclassified).HasColumnName("unclassified");
+            e.Property(x => x.ExecutedSha256).HasColumnName("executed_sha256");
+            e.Property(x => x.SpecPath).HasColumnName("spec_path");
+        });
+
+        // Keyless: §D1 trust detail — daily retry-rate trend for one check (the detail sparkline). Raw SQL only.
+        modelBuilder.Entity<TrustRetryDayRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Day).HasColumnName("day");
+            e.Property(x => x.RunCount).HasColumnName("run_count");
+            e.Property(x => x.RetryCount).HasColumnName("retry_count");
         });
 
         // Keyless: GET /status — area-tagged checks' current signal / SLA / recent incidents, raw SQL only.
