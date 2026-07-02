@@ -457,6 +457,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.LastGreenAt).HasColumnName("last_green_at");
             e.Property(x => x.RunCount).HasColumnName("run_count");
             e.Property(x => x.RetryCount).HasColumnName("retry_count");
+            e.Property(x => x.RetriedPasses).HasColumnName("retried_passes");
             e.Property(x => x.IncidentTotal).HasColumnName("incident_total");
             e.Property(x => x.RealOutage).HasColumnName("real_outage");
             e.Property(x => x.FlakyTransient).HasColumnName("flaky_transient");

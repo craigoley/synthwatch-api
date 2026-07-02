@@ -81,6 +81,8 @@ public static class TrustReportProjection
         RunCount: r.RunCount,
         RetryCount: r.RetryCount,
         RetryRate: RetryRate(r.RetryCount, r.RunCount),
+        // ★ Display-only annotation — carried straight from the row, NEVER routed through DeriveChip.
+        RetriedPasses: r.RetriedPasses,
         Incidents: new TrustIncidentsDto(
             Total: r.IncidentTotal,
             RealOutage: r.RealOutage,

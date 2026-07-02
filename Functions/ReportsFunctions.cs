@@ -341,6 +341,7 @@ public class ReportsFunctions
                   c.interval_seconds AS interval_seconds, c.last_run_at AS last_run_at,
                   rc.last_green_at AS last_green_at,
                   coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
+                  coalesce(rc.retried_passes, 0) AS retried_passes,
                   coalesce(ic.total, 0) AS incident_total,
                   coalesce(ic.real_outage, 0) AS real_outage,
                   coalesce(ic.flaky_transient, 0) AS flaky_transient,
@@ -354,6 +355,10 @@ public class ReportsFunctions
            LEFT JOIN LATERAL (
                SELECT count(*)::bigint AS run_count,
                       count(*) FILTER (WHERE r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retry_count,
+                      -- ★ degrading-but-green early warning: a PASS/WARN run that STILL needed a real retry. A
+                      -- DISPLAY-ONLY annotation — NEVER an input to DeriveChip (the #152 class must not recur).
+                      -- Counted over the SAME window as retry_count.
+                      count(*) FILTER (WHERE r.status IN ('pass','warn') AND r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retried_passes,
                       max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
                FROM runs r
                WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')
@@ -396,6 +401,7 @@ public class ReportsFunctions
                   c.interval_seconds AS interval_seconds, c.last_run_at AS last_run_at,
                   rc.last_green_at AS last_green_at,
                   coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
+                  coalesce(rc.retried_passes, 0) AS retried_passes,
                   coalesce(ic.total, 0) AS incident_total,
                   coalesce(ic.real_outage, 0) AS real_outage,
                   coalesce(ic.flaky_transient, 0) AS flaky_transient,
@@ -409,6 +415,10 @@ public class ReportsFunctions
            LEFT JOIN LATERAL (
                SELECT count(*)::bigint AS run_count,
                       count(*) FILTER (WHERE r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retry_count,
+                      -- ★ degrading-but-green early warning: a PASS/WARN run that STILL needed a real retry. A
+                      -- DISPLAY-ONLY annotation — NEVER an input to DeriveChip (the #152 class must not recur).
+                      -- Counted over the SAME window as retry_count.
+                      count(*) FILTER (WHERE r.status IN ('pass','warn') AND r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retried_passes,
                       max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
                FROM runs r
                WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')

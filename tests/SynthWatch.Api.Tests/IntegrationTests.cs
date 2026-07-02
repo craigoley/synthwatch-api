@@ -409,6 +409,84 @@ public class IntegrationTests
         Assert.Equal("nominal", Chip(Row(100, 0, asOf.AddSeconds(-601)), asOf));        // green 1s past 2×interval → stale
     }
 
+    // ★ MUST-GO-RED (the #152 class must not recur): retriedPasses is a DISPLAY-ONLY annotation and must NEVER
+    // feed DeriveChip. Two rows identical except for RetriedPasses (0 vs a huge value) derive the SAME chip.
+    // If anyone wires retriedPasses into the chip as a demotion input, the second assert flips and this fails.
+    [Fact]
+    public void Trust_retriedPasses_is_display_only_and_never_feeds_the_chip()
+    {
+        var asOf = new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero);
+        // A proven-live row: retryRate 0.05 (< 0.10), fresh green, no noise.
+        TrustMonitorRow ProvenLive(long retriedPasses) => new()
+        {
+            CheckId = 1, CheckName = "x", IntervalSeconds = 300,
+            RunCount = 100, RetryCount = 5, LastGreenAt = asOf.AddSeconds(-30),
+            RetriedPasses = retriedPasses,
+        };
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(ProvenLive(0), asOf));
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(ProvenLive(99), asOf)); // ★ 99 retried passes → STILL proven-live
+    }
+
+    // ★ THE COEXISTENCE PROOF (end-to-end) + must-go-red: a monitor with retried PASSES at a retry RATE below
+    // ProvenLiveMaxRetryRate stays proven-live AND surfaces retriedPasses > 0 — the "degrading-but-green" early
+    // warning is an ANNOTATION on a healthy monitor, never a demotion (the #152 class must not recur). Also
+    // proves retriedPasses counts ONLY pass/warn retries (a failed run's retry is in retryCount, NOT here).
+    [SkippableFact]
+    public async Task Trust_retriedPasses_coexists_with_proven_live_and_excludes_fail_retries()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE degrading bigint; solid bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url) VALUES ('trust-degrading','http','https://d.ex') RETURNING id INTO degrading;
+              INSERT INTO checks (name, kind, target_url) VALUES ('trust-solid','http','https://s.ex')     RETURNING id INTO solid;
+
+              -- degrading: 100 recent runs, retryRate 0.06 (< 0.10 → PROVEN-LIVE), but 5 PASS/WARN runs needed a
+              -- real retry (retry_count = 2) → retriedPasses = 5 (the annotation). One FAILED run also retried
+              -- (retry_count = 3): it lifts retryCount to 6 but is EXCLUDED from retriedPasses (pass/warn only).
+              FOR i IN 1..4  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (degrading, 'pass', now() - (i*10 || ' seconds')::interval, 2); END LOOP;
+              INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (degrading, 'warn', now() - interval '50 seconds', 2);   -- warn counts as a pass for the annotation
+              FOR i IN 1..94 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (degrading, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
+              INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (degrading, 'fail', now() - interval '60 seconds', 3);   -- retried FAIL → in retryCount, NOT retriedPasses
+
+              -- solid: 20 clean first-try passes → proven-live with ZERO retried passes (the annotation is absent).
+              FOR i IN 1..20 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (solid, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var all = Assert.IsType<TrustReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetTrustReport(Request("?window=30d"), default)).Value!);
+            var m = all.Monitors.Where(x => x.CheckName.StartsWith("trust-")).ToDictionary(x => x.CheckName);
+
+            var degrading = m["trust-degrading"];
+            Assert.Equal("proven-live", degrading.Trust);       // ★ coexistence: healthy chip...
+            Assert.Equal(5, degrading.RetriedPasses);           // ★ ...AND the annotation fires (> 0)
+            Assert.Equal(6, degrading.RetryCount);              // the failed run's retry IS counted here...
+            Assert.NotEqual(degrading.RetriedPasses, degrading.RetryCount); // ...but NOT in retriedPasses
+            Assert.Equal(0.06m, degrading.RetryRate);
+
+            var solid = m["trust-solid"];
+            Assert.Equal("proven-live", solid.Trust);
+            Assert.Equal(0, solid.RetriedPasses);               // zero retried passes → annotation absent
+
+            // the detail endpoint carries the same field (its Monitor is a TrustMonitorDto)
+            var detail = Assert.IsType<TrustMonitorDetailDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetTrustMonitorDetail(Request("?window=30d"), degrading.CheckId, default)).Value!);
+            Assert.Equal("proven-live", detail.Monitor.Trust);
+            Assert.Equal(5, detail.Monitor.RetriedPasses);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name IN ('trust-degrading','trust-solid')); " +
+                "DELETE FROM checks WHERE name IN ('trust-degrading','trust-solid');");
+        }
+    }
+
     [SkippableFact]
     public async Task Trust_scorecard_derives_chips_and_is_honest_about_gaps()
     {
