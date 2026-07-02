@@ -377,3 +377,56 @@ Verdict (report-only): `latest-all` is not worth adopting wholesale; the two CA2
 
 - `dotnet list package --outdated`: **API — only `Microsoft.ApplicationInsights.WorkerService 2.23.0 → 3.1.2`, which is the deliberate hard pin** (csproj comment documents the 3.x `TypeLoadException` worker crash and the 2026-06-22 outage; guarded by a dependabot ignore rule — do not bump). Tests — `Microsoft.NET.Test.Sdk 18.6.0 → 18.7.0` only.
 - `dotnet list package --vulnerable --include-transitive`: **no vulnerable packages** in either project (OBSERVED, nuget.org source).
+
+---
+
+## 6. BOUNDARY CONTRACTS
+
+### 6.1 EXPOSES — evidenced response shapes
+
+Method: shapes taken from the DTO types actually passed to results (not from names). The 2026-06-28 catalog (`FINDINGS-REPORT.md` §C2) remains accurate for every endpoint that existed then, **except the deltas listed below** — per the diff-don't-rediscover rule this section documents (a) those deltas and (b) the endpoints added since (#139–#150). Serialization: default web camelCase everywhere; explicit `[JsonPropertyName]` where present matches camelCase (checked — no new snake_case anywhere; the only snake_case on the wire remains `rca.generated_at`).
+
+**Deltas to the C2 catalog (OBSERVED in DTO source):**
+
+1. **`GET /api/checks/{id}/runs`** no longer returns bare `CursorPage<RunDto>` — it returns **`RunsPage`** (`Dtos/RunDtos.cs:234`): same keys plus **`latestRunId: number|null`** (additive; newest run id ignoring window/cursor; null = no runs).
+2. **`PerformanceReportDto.webVitals`** gained **three** fields in #147 (`Dtos/ReportDtos.cs:71-83`): `inpP75Ms: number|null`, `inpCount: number`, `resourceCount: number|null`. (The doc comment "No INP." at :70 is stale — code is authoritative.)
+3. `GET /api/tags/suggested` (bare `string[]`) exists and is absent from C2.
+
+**Endpoints added since C2 (full evidenced shapes; `s` = ISO-8601 string, `d` = "yyyy-MM-dd" string):**
+
+| Endpoint | DTO (cite) | Wire shape |
+|---|---|---|
+| GET /reports/slo | `SloReportResponseDto` (SloReportDtos.cs:10,17,37) | `{window, fleet:{totalRuns,downRuns,budget,consumed,remaining,remainingPct?,insufficientData}, items:[{checkId,checkName,kind,target,totalRuns,downRuns,budget,consumed,remaining,remainingPct?,burnRate,burnState:"fast"\|"slow"\|"none",reportedBurn,insufficientData}]}` |
+| GET /reports/mttr | `MttrReportResponseDto` (MttrReportDtos.cs:11-52) | `{window, fleet:{resolvedCount,openCount,totalIncidents,meanSeconds?,medianSeconds?,mttdProxySeconds?,insufficientData}, items:[…same per check…], classification:[{classification,count,pctOfTotal}], trend:[{bucketStart:s,resolvedCount,meanSeconds?}]}` |
+| GET /reports/incident-breakdown | `IncidentBreakdownDto` (ReportDtos.cs:53,42) | `{window,total,classified,unclassified,realOutages,precision?,buckets:[{classification,count,pctOfTotal}]}` |
+| GET /reports/trust | `TrustReportDto` (ReportDtos.cs:167,152,119,133,144) | `{window, monitors:[{checkId,checkName,sensitive,lastGreenAt:s?,lastRunAt:s?,runCount,retryCount,retryRate?,incidents:{total,realOutage,flakyTransient,selectorDrift,environmentRegional,perfRegression,unclassified},redTest:{captured,testedAt:s?,method:"executed-red-fixture"\|"attested-manual"\|null},specProvenance:{executedSha256?,specPath?},trust:"proven-live"\|"flaky"\|"unverified"\|"nominal"}]}` |
+| GET /reports/trust/{checkId} | `TrustMonitorDetailDto` (ReportDtos.cs:179,172) | `{window, monitor:TrustMonitorDto, retrySeries:[{day:d,runCount,retryCount,retryRate?}]}` |
+| GET /status | `StatusPageDto` (StatusPageDtos.cs:11,19,31) | `{window, properties:[{name,state:"up"\|"degraded"\|"down"\|"unknown",checkCount,upCount,degradedCount,downCount,uptimePct?,buildingBaseline}], recentIncidents:[{property,title,openedAt:s,resolvedAt:s?,status,severity}]}` |
+| GET /reports/egress | `EgressReportDto` (EgressReportDtos.cs:8,15,22) | `{window:"all"\|"24h", regions:[{location,currentIps:[string],distinctCount,ips:[{ip,runCount,firstSeen:s,lastSeen:s}]}]}` |
+| GET /reports/deploys | `DeploysReportDto` (DeploysReportDtos.cs:8,15) | `{host,window,deploys:[{sha?,isSha,source,deployedAt:s}]}` |
+| POST /checks/parse-intent | `ParseIntentDto` (ParseIntentDto.cs:9) | `{configured,note?,retryable,redirect?,reason?,valid,fields:CreateCheckRequest?,fieldErrors:{[field]:string},notes?}` |
+| GET /reconcile/plan | `ReconcileApplyPlanDto` (ReconcileDto.cs:27,19) | `{items:[{sourceKey,driftType,status:"pending"\|"auto"\|"blocked"\|"noop",plan:<runner jsonb verbatim>,computedAt:s}],computedAt:s?}` |
+| POST /reconcile/apply | `ReconcileApplyResultDto` (ReconcileDto.cs:37) | `{applied:[string],failed:[string],cap}` |
+| POST /reconcile/trigger | `ReconcileTriggeredDto` (ReconcileDto.cs:62) | `{triggered:boolean}` |
+| POST /channels/{id}/test | `ChannelTestAcceptedDto` (AlertingDtos.cs:21) | `{requestId}` |
+| GET /channels/{id}/test/status | `ChannelTestStatusDto` (AlertingDtos.cs:28) | `{status:"pending"\|"sending"\|"delivered"\|"failed",detail?,requestedAt:s,completedAt:s?}` |
+
+Non-DTO exposures (unchanged): the shared problem+json error envelope (§1.4); `Health`'s anonymous `{status,db}`; reconcile approve/reject's anonymous `{sourceKey,driftType,status}`; file streams for trace/screenshot proxies. `plan` and `detail` (reconcile) are `JsonElement` pass-throughs — their inner shape is runner-owned, not API-typed.
+
+### 6.2 CONSUMES — tables/columns/functions read, with assumed shapes
+
+The verb-level inventory is §3.1; the shape assumptions live in `Data/SynthWatchDbContext.cs` as explicit `HasColumnName` mappings (the API's entire belief about the runner's schema, since this repo has no migrations):
+
+- **Entities (CRUD):** `checks` (Check + jsonb columns `assertions/request_headers/auth/net_config/steps/redact_patterns`, camelCase-keyed — DbContext :261-281), `channels` (`config` jsonb :95-97), `incidents` (`rca` jsonb :361-363 — keys camelCase **except `generated_at`**), `runs` (incl. `trace_signals` jsonb-as-string :299, `spec_provenance`, `egress_ip`, `retry_count`), `run_steps`, `run_metrics`, `check_tags`, `check_locations`, `locations`, `flow_manifest`, `editors`, `sessions`, `otp_codes`, `access_requests`, `audit_log` (write-only), `alert_routes`, `tag_routes`, `test_send_requests`, `run_requests`, `maintenance_windows`, `red_tests`, `daily_check_rollup`, `deploys`, `spec_catalog`, `report_narratives`, `reconcile_drift`, `reconcile_apply_plan`.
+- **Keyless row shapes over raw SQL (23 boundaries, §2a):** each row type's `HasColumnName` set is a column-name contract with SQL this repo writes — except the **`SELECT *` sites**, where the column set is a contract with objects the *runner* owns: `slo_status(...)` → `SloStatusRow` (DbContext :384-399) and `sla_availability_{24h,7d,30d,90d}` views → `SlaAvailabilityRow` (:368-381).
+- **Postgres functions:** `slo_status(check_id, from, to)` (RETURNS TABLE consumed positionally-by-name via `SELECT *`), `slo_burn_status(check_id)` (aliased columns `burn_state`, `reported_burn`).
+- **Runner-written jsonb the API deserializes (shape contracts with runner writers):** `incidents.rca`, `runs.trace_signals` (golden-guarded), `reconcile_drift.detail` + `reconcile_apply_plan.plan` (passed through verbatim, but the **apply executor** additionally assumes `plan.statements[].values` positional semantics — `v[5]`=sensitive, `v[9]`=spec_path, `ReconcileFunctions.cs:213-223`), `checks.*` config jsonb, `channels.config`, `spec_catalog.tags`, `report_narratives.highlights/fact_pack`.
+
+### 6.3 Internal disagreements (flagged)
+
+1. **`rca.generated_at`** — the one snake_case key in an otherwise camelCase API (dual-use jsonb entity; fix requires a response-DTO split, prior A2).
+2. **Near-duplicate series-point vocabularies persist** — `AvailabilityPointDto {ts,availabilityPct?,upRuns,downRuns}` (checks series) vs `AvailabilityPointDtoR {day,availabilityPct?,upCount,downCount}` (reports series) vs `LatencyPointDto {day,avgMs?}` vs `TrustRetryPointDto {day,…,retryRate?}` — four "point" shapes with three different day/ts keys and two up/down namings. This is the exact vocabulary split behind the historical `{date,value}` drift; consumers must special-case per endpoint. (OBSERVED in Dtos; not a bug today, a standing trap.)
+3. **Flat vs nested latency stats** — `CheckSummaryDto.p50Ms/p95Ms` flat vs `PerformanceReportDto…latency{p50Ms,p95Ms,p99Ms,avgMs,sampleCount}` nested (prior C2 flag, still true).
+4. **`spark` mini-series** `{t,d,s}` single-letter keys exist only as `[JsonPropertyName]` strings 3 hops from the SQL (`json_agg` aliases at `ChecksFunctions.cs:58` → JSON keys → `SparkPoint` attributes) — key-level pinning is absent (IT asserts non-empty only, §2 row 2).
+5. **`WebVitalsDto` doc comment says "No INP."** while the type carries `inpP75Ms`/`inpCount` (`ReportDtos.cs:70-83`) — stale comment on a contract type.
+6. **`latestRunId` envelope asymmetry** — `RunsPage` is `CursorPage<RunDto>` + one field, but incidents still return plain `CursorPage<IncidentDto>`; consumers paging both must branch. (Additive, deliberate — noting for the contract catalog.)
