@@ -12,18 +12,46 @@ namespace SynthWatch.Api.Functions;
 /// screenshots, and the server-side trace-signals extraction. All read blobs from the artifacts account
 /// through the API's managed identity (the account blocks public access), via the shared <see cref="IArtifactReader"/>
 /// (one blob-host allowlist + download + 404/non-404 classification, previously duplicated 3×). Split out of
-/// RunsFunctions so that file holds only non-artifact run responsibilities. Routes + Function names + auth
-/// posture are unchanged from when these lived in RunsFunctions.
+/// RunsFunctions so that file holds only non-artifact run responsibilities.
+///
+/// ★ SECURITY — these four endpoints serve RAW FORENSIC DATA (trace zips with request/response bodies +
+/// console text, failure screenshots, extracted signals) and BYPASS the B10 redaction apparatus that protects
+/// sensitive=true monitors. Run/check ids are sequential bigints, so left open they let the whole fleet's
+/// forensic history be anonymously enumerated. Unlike the status/read-open endpoints (correct for aggregate
+/// status data), the forensic-artifact CLASS requires a valid authenticated session — see
+/// <see cref="RequireSessionAsync"/>. Flag-gated on AUTH_ENFORCEMENT_ENABLED (like the write-gate): inert when
+/// off (deploy-safe), enforces in prod where it's true. The paired dashboard trace-proxy PR must forward the
+/// session bearer or the viewer 401s for logged-in users.
 /// </summary>
 public class ArtifactsFunctions
 {
     private readonly SynthWatchDbContext _db;
     private readonly IArtifactReader _artifacts;
+    private readonly IAuthPrincipal _auth;
 
-    public ArtifactsFunctions(SynthWatchDbContext db, IArtifactReader artifacts)
+    public ArtifactsFunctions(SynthWatchDbContext db, IArtifactReader artifacts, IAuthPrincipal auth)
     {
         _db = db;
         _artifacts = artifacts;
+        _auth = auth;
+    }
+
+    /// <summary>
+    /// Forensic-artifact auth gate. Requires a valid authenticated session (any logged-in editor/admin — NOT
+    /// admin-only; logged-in users legitimately need traces to debug). Returns 401 problem+json when there is
+    /// no valid session, else null (proceed). ★ Flag-gated on AUTH_ENFORCEMENT_ENABLED — the SAME switch the
+    /// write-gate uses — so it's deploy-safe (inert when off, today's behavior) and actually rejects in prod
+    /// (where enforcement is true). The middleware's verb-gate can't cover this: a GET is always Allow there
+    /// (reads are open by default), so these forensic reads must self-guard. Resolves the caller from the
+    /// bearer via the same <see cref="IAuthPrincipal"/> the middleware uses — role derived from DB/env, never
+    /// trusted from a header.
+    /// </summary>
+    private async Task<IActionResult?> RequireSessionAsync(HttpRequest req, CancellationToken ct)
+    {
+        if (!AuthorizationMiddleware.EnforcementEnabled())
+            return null; // flag OFF → inert (deploy-safe; matches the rest of the security model)
+        var principal = await _auth.FromBearerAsync(req.Headers.Authorization, ct);
+        return principal is null ? ApiResults.Unauthorized("Authentication required.") : null;
     }
 
     /// <summary>
@@ -37,6 +65,7 @@ public class ArtifactsFunctions
         long id,
         CancellationToken ct)
     {
+        if (await RequireSessionAsync(req, ct) is { } denied) return denied;
         var url = await _db.Runs.AsNoTracking()
             .Where(r => r.Id == id).Select(r => r.TraceUrl).FirstOrDefaultAsync(ct);
         return await ProxyAsync(req, id, $"run {id}", url, "trace", "application/zip",
@@ -56,6 +85,7 @@ public class ArtifactsFunctions
         long id,
         CancellationToken ct)
     {
+        if (await RequireSessionAsync(req, ct) is { } denied) return denied;
         var url = await _db.Checks.AsNoTracking()
             .Where(c => c.Id == id).Select(c => c.SuccessTraceUrl).FirstOrDefaultAsync(ct);
         return await ProxyAsync(req, id, $"monitor {id}", url, "success trace", "application/zip",
@@ -73,6 +103,7 @@ public class ArtifactsFunctions
         long id,
         CancellationToken ct)
     {
+        if (await RequireSessionAsync(req, ct) is { } denied) return denied;
         var url = await _db.Runs.AsNoTracking()
             .Where(r => r.Id == id).Select(r => r.ScreenshotUrl).FirstOrDefaultAsync(ct);
         return await ProxyAsync(req, id, $"run {id}", url, "screenshot", "image/png",
@@ -91,6 +122,7 @@ public class ArtifactsFunctions
         long id,
         CancellationToken ct)
     {
+        if (await RequireSessionAsync(req, ct) is { } denied) return denied;
         var row = await _db.Runs.AsNoTracking()
             .Where(r => r.Id == id)
             .Select(r => new { r.TraceUrl, Target = r.Check!.TargetUrl })

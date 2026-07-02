@@ -1894,7 +1894,7 @@ public class IntegrationTests
     {
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        var fn = new ArtifactsFunctions(db, new ArtifactReader(new DefaultAzureCredential(), NullLogger<ArtifactReader>.Instance));
+        var fn = new ArtifactsFunctions(db, new ArtifactReader(new DefaultAzureCredential(), NullLogger<ArtifactReader>.Instance), new AuthPrincipalService(db));
         var runId = await db.Runs.Where(r => r.TraceUrl == null).Select(r => r.Id).FirstAsync();
         var result = await fn.GetRunTrace(Request(), runId, default);
         Assert.IsType<NotFoundObjectResult>(result); // no trace_url -> 404 before any blob call
@@ -2878,13 +2878,86 @@ public class IntegrationTests
         try
         {
             var runId = await db.Runs.Where(r => r.Check!.Name == "sig-unavail").Select(r => r.Id).FirstAsync();
-            var fn = new ArtifactsFunctions(db, new FakeArtifactReader(ArtifactBlob.Unavailable));
+            var fn = new ArtifactsFunctions(db, new FakeArtifactReader(ArtifactBlob.Unavailable), new AuthPrincipalService(db));
             var result = await fn.GetTraceSignals(Request(), runId, default);
             Assert.Equal(503, Assert.IsType<ObjectResult>(result).StatusCode); // clean 503, NOT an unhandled 500
         }
         finally
         {
             await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'sig-unavail';");
+        }
+    }
+
+    // ★ SECURITY: the four forensic-artifact endpoints must require a valid session — they serve raw traces /
+    // screenshots / extracted signals that BYPASS B10 redaction, and run/check ids are sequential bigints
+    // (anonymously enumerable). The gate is flag-gated on AUTH_ENFORCEMENT_ENABLED (like the write-gate):
+    // inert when off, rejects in prod where it's true. This is the red-test — anonymous → 401 with the flag ON.
+    [SkippableFact]
+    public async Task Forensic_artifact_endpoints_require_a_session_when_enforcement_is_on()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        const string tok = "swt_artifact_editor";
+        // A SENSITIVE monitor (the exact class B10 protects) with a success-trace baseline, plus a run
+        // carrying a trace + screenshot — one seed exercises all four endpoints.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url,sensitive,success_trace_url)
+                VALUES ('art-sensitive','http','https://s.example', true,
+                        'https://x.blob.core.windows.net/c/success-latest/check.zip') RETURNING id INTO cid;
+              INSERT INTO runs (check_id,status,started_at,trace_url,screenshot_url)
+                VALUES (cid,'fail',now(),
+                        'https://x.blob.core.windows.net/c/traces/trace.zip',
+                        'https://x.blob.core.windows.net/c/shots/shot.png');
+              INSERT INTO editors (email, added_by) VALUES ('user@art.test','system');  -- a logged-in EDITOR (not admin)
+            END $$;
+            """);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(tok)}, 'user@art.test', now() + interval '1 hour')");
+
+        var cid = await db.Checks.Where(c => c.Name == "art-sensitive").Select(c => c.Id).FirstAsync();
+        var rid = await db.Runs.Where(r => r.Check!.Name == "art-sensitive").Select(r => r.Id).FirstAsync();
+        Assert.True(await db.Checks.Where(c => c.Id == cid).Select(c => c.Sensitive).FirstAsync()); // it IS sensitive
+
+        // Fresh blob stream per call (keyed by url substring), so both auth states + all four endpoints serve.
+        var zip = TraceZipBytes("", "");
+        var png = new byte[] { 0x89, 0x50, 0x4E, 0x47 };
+        var fn = new ArtifactsFunctions(
+            db,
+            new FakeZipReader(("traces/trace.zip", zip), ("shots/shot.png", png), ("success-latest", zip)),
+            new AuthPrincipalService(db));
+
+        var prior = Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED");
+        try
+        {
+            // ── MUST-GO-RED baseline: with enforcement OFF the endpoints are OPEN (the pre-fix behavior). An
+            //    anonymous GET reaches the handler and streams the artifact — proving the gate is what closes it. ──
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "false");
+            Assert.IsType<FileStreamResult>(await fn.GetRunTrace(AuthReq(), rid, default));
+
+            // ── ENFORCEMENT ON → every anonymous forensic GET is 401 (the fix). ★ The sensitive monitor's
+            //    trace is NOT anonymously retrievable — the specific data B10 exists to protect. ──
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "true");
+            Assert.IsType<UnauthorizedObjectResult>(await fn.GetRunTrace(AuthReq(), rid, default));
+            Assert.IsType<UnauthorizedObjectResult>(await fn.GetCheckSuccessTrace(AuthReq(), cid, default));
+            Assert.IsType<UnauthorizedObjectResult>(await fn.GetRunScreenshot(AuthReq(), rid, default));
+            Assert.IsType<UnauthorizedObjectResult>(await fn.GetTraceSignals(AuthReq(), rid, default));
+
+            // ── authenticated (a logged-in EDITOR, NOT admin — the gate is not admin-only) → passes the gate,
+            //    serves the artifact: traces/screenshot stream (FileStreamResult), signals are 200 JSON. ──
+            Assert.IsType<FileStreamResult>(await fn.GetRunTrace(AuthReq(tok), rid, default));
+            Assert.IsType<FileStreamResult>(await fn.GetCheckSuccessTrace(AuthReq(tok), cid, default));
+            Assert.IsType<FileStreamResult>(await fn.GetRunScreenshot(AuthReq(tok), rid, default));
+            Assert.IsType<OkObjectResult>(await fn.GetTraceSignals(AuthReq(tok), rid, default));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", prior);
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email = 'user@art.test'; " +
+                "DELETE FROM editors WHERE email = 'user@art.test'; " +
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name = 'art-sensitive'); " +
+                "DELETE FROM checks WHERE name = 'art-sensitive';");
         }
     }
 
