@@ -430,3 +430,58 @@ The verb-level inventory is §3.1; the shape assumptions live in `Data/SynthWatc
 4. **`spark` mini-series** `{t,d,s}` single-letter keys exist only as `[JsonPropertyName]` strings 3 hops from the SQL (`json_agg` aliases at `ChecksFunctions.cs:58` → JSON keys → `SparkPoint` attributes) — key-level pinning is absent (IT asserts non-empty only, §2 row 2).
 5. **`WebVitalsDto` doc comment says "No INP."** while the type carries `inpP75Ms`/`inpCount` (`ReportDtos.cs:70-83`) — stale comment on a contract type.
 6. **`latestRunId` envelope asymmetry** — `RunsPage` is `CursorPage<RunDto>` + one field, but incidents still return plain `CursorPage<IncidentDto>`; consumers paging both must branch. (Additive, deliberate — noting for the contract catalog.)
+
+---
+
+## 7. TECH DEBT REGISTER, IMPROVEMENTS + FEATURE IDEAS, OPEN QUESTIONS
+
+### 7.1 Tech debt register (ranked; severity × evidence)
+
+| # | Item | Sev | Evidence | Fix size |
+|---|---|---|---|---|
+| 1 | **`check_tags` UPDATE required by the upsert, absent from `postgres.writes`, structurally invisible to the CI gate** (scanner neutralizes `DO UPDATE SET`; tests run as superuser) | MAJOR (CONFIRMED gate blindness; prod impact contingent on the actual grant — OQ1) | §3.3-1; TagsFunctions.cs:80-84; required-grants.json:95; script line 96 | 1 word in the manifest + OQ1 verification |
+| 2 | **Non-JSON `Content-Type` → 500 on all 10 body endpoints** (`ReadFromJsonAsync` throws `InvalidOperationException`, only `JsonException` caught) | MODERATE (CONFIRMED vs docs) | §4.3-1 | small shared helper (`HasJsonContentType()` → 415) |
+| 3 | **`fixtures/schema.sql` is hand-maintained and already drifted** (`run_requests` missing) — the root enabler of the mapper-drift class | MODERATE | §2b-1; row 44 | CI schema-parity job (§7.2-1) |
+| 4 | **6 untested endpoints**: RunCheckNow, UpdateCheck, DeleteCheck, GetCheckSuccessTrace, GetRunScreenshot, GetReconcilePlan (0 handler lines hit; zero test references) | MODERATE | §5.2 | 1 IT each; RunCheckNow blocked on #3 |
+| 5 | Residual prior-A1: transient blob error → 404 when no persisted signals exist (narrowed by the zip-first fallback, not closed) | LOW-MED | recon table; LocationDiffFunctions.cs:64-66,127-149 | ~5 lines (status-aware null) |
+| 6 | `ApiResults.Created` drops its `location` arg — no `Location` header on any 201 | LOW-MED | §1.5-1; ApiResults.cs:40-41 | 1 line (or drop the param to stop implying it works) |
+| 7 | Error-contract stragglers: `DeleteChannel` legacy 409 body; channel dup-name 400 vs check dup 409 | LOW | §1.5-3,5 | ~5 lines |
+| 8 | `rca.generated_at` snake_case (jsonb dual-use; needs response-DTO split) | LOW (unchanged prior A2) | §6.3-1 | MEDIUM |
+| 9 | Reconcile apply: unlogged bare `catch` (also swallows OCE; rollback-with-cancelled-token can throw) | LOW | §4.3-2; ReconcileFunctions.cs:260-264 | ~4 lines |
+| 10 | Two `SELECT *` reads of runner-owned objects (`slo_status`, `sla_availability_*`) — renames bind silently | LOW (guarded by ITs once #3 lands) | §2a rows 4, 8 | name the columns |
+| 11 | 20-alias trust SELECT duplicated verbatim fleet/detail; grouped/ungrouped report SQL duplicated ×5 | LOW | §2a rows 20, 23-27 | consolidation refactor |
+| 12 | Four series-point vocabularies (`ts` vs `day`; `upRuns` vs `upCount`) — the historical drift's vocabulary split, still standing | LOW (trap, not bug) | §6.3-2 | converge on next major dashboard change |
+| 13 | Auth logic duplicated in AuthFunctions (prior D1, unchanged) | LOW | recon table | ~10 lines |
+| 14 | Cold-start stack: no compiled EF model, no warm-up, second `DefaultAzureCredential`, per-call `JsonSerializerOptions` in reconcile | LOW | §4.5 | small, independent levers |
+| 15 | No AOAI rate limiting; surface grew to 3 endpoints (prior B1) | carried risk | recon table | MEDIUM |
+| 16 | Stale comments that misdescribe contracts: `WebVitalsDto` "No INP." (ReportDtos.cs:70), "~1h token lifetime" (PostgresDataSourceFactory.cs:11), "API reads audit_log" (SynthWatchDbContext.cs:207) | DOC | §6.3-5, §4.1-3, §3.1 | 3 comment edits |
+
+### 7.2 Improvements + feature ideas (grounded, ranked value/effort)
+
+| # | Idea | Value | Effort | Grounding |
+|---|---|---|---|---|
+| 1 | **Schema-parity CI job**: apply runner migrations to postgres:16, `pg_dump --schema-only`, diff vs `fixtures/schema.sql` | HIGH — kills the enabler of the repo's #1 bug class; catches `run_requests`-type gaps on merge day | LOW — the workflow already checks out the runner repo (grant-coverage.yml); ~50-line script | §2b recommendation step 1 |
+| 2 | **Grant-gate verb comparison + `check_tags` fix**: make `check-pg-grant-coverage.mjs` model `ON CONFLICT DO UPDATE` as INSERT+UPDATE and compare verbs, not just table membership | HIGH — closes §3.3 gaps 1 (and detects future upserts) | LOW — regex change + manifest edit | §3.3 |
+| 3 | **Deep-shape pin**: extend the #123 envelope test to full-depth key structure vs checked-in golden shape files (`JsonNode.DeepEquals`, values stripped) | HIGH — catches flat-vs-nested and series-point drift API-side | MEDIUM — one test + ~25 golden files; seed data exists | §2b step 2 |
+| 4 | **415 guard helper** for the 10 body endpoints | MEDIUM — converts a 500 class into a correct client error | LOW | §4.3-1 |
+| 5 | **ITs for the 6 untested endpoints** (after #1 unblocks run_requests) | MEDIUM — DELETE/PATCH/run-now are prod-mutating paths with zero regression net | LOW-MED | §5.2 |
+| 6 | **SELECT-grant assertion**: a CI (or startup, gated) probe that runs `has_table_privilege('synthwatch-api', t, 'SELECT')` for the §3.1 read set against a migration-built DB | MEDIUM — closes §3.3 gap 6 without touching prod | MEDIUM | §3.3-6 |
+| 7 | **Cold-start pass**: EF compiled model + share the DI `TokenCredential` with the DB factory + hoist the reconcile `JsonSerializerOptions` | MEDIUM on Flex scale-from-zero | LOW | §4.5 |
+| 8 | **AOAI cooldown** (per-check 1/min across the 3 spending endpoints) | MEDIUM — cost-abuse ceiling; carried from prior B1 | MEDIUM | recon; FINDINGS-REPORT B1 |
+| 9 | **Publish the §1 inventory as OpenAPI**: the endpoint table + §6 shapes are 90% of a spec; generating one (even hand-written YAML checked against the deep-shape pin) gives the dashboard a typed client and makes drift a build error there | MEDIUM-HIGH long-term | MEDIUM | §1.2, §6.1 |
+| 10 | Reconcile plan-executor: replace positional `values[0..9]` with named keys in the plan jsonb (coordinated runner change) — the #131 class | MEDIUM | MEDIUM (cross-repo) | §2a row 34 |
+
+### 7.3 Open questions
+
+1. **Does the prod `synthwatch-api` role actually have UPDATE on `check_tags`?** (Runner migrations/live DB are out of this session's scope-rails.) If yes: the manifest is merely incomplete. If no: `PUT /checks/{id}/tags` 500s the first time it re-values an existing key — check App Insights for `42501 permission denied for table check_tags`. Either way the manifest+scanner fix (§7.2-2) applies.
+2. **Are the id columns `serial` or `GENERATED AS IDENTITY` in the runner's migrations?** Serial ⇒ 10 sequences need `USAGE` grants that no CI layer models (§3.1 sequences note).
+3. **Is the ops-side `ALTER DEFAULT PRIVILEGES` SELECT claim real and role-correct**, and does it predate all current tables? (Default privileges only apply to objects created after they're set, by that creating role.)
+4. **Is `AUTH_ENFORCEMENT_ENABLED` set in prod?** Carried from prior B4; everything in §1's auth model is inert without it.
+5. **Flex Consumption scale-out × `MaxPoolSize=20`** vs the Postgres SKU's `max_connections` — what's the realistic instance ceiling? (Not verifiable locally.)
+6. **Does the isolated worker's invocation `CancellationToken` fire on client disconnect** (vs only on host shutdown/timeout)? Determines whether §4.4's token discipline actually sheds abandoned requests.
+7. **Is the dashboard consuming `latestRunId`** (the freshness field added for the stale-rows misread)? If not, the `RunsPage` envelope asymmetry (§6.3-6) is cost without benefit yet.
+8. **`ChannelTestStatusDto.status` state machine** — the API serves `pending|sending|delivered|failed` (AlertingDtos.cs:28) but the runner owns the transitions; is `sending` ever observable, or dead vocabulary?
+
+---
+
+*Report generated 2026-07-02 on branch `claude/deep-analysis-2026-07-4yo4vq`. All sections committed incrementally; diff is `docs/analysis/**` only.*
