@@ -152,7 +152,26 @@ public record IncidentDetailDto(
     IncidentRca? Rca,
     IReadOnlyList<LocationStatusDto> PerLocation,
     IReadOnlyList<TimelineEntryDto> Timeline,
-    IReadOnlyList<RecurrenceDto> Recurrence);
+    IReadOnlyList<RecurrenceDto> Recurrence,
+    // ★ Deploys DETECTED near this incident on the same host — possible correlation, NEVER causation. Empty
+    // when none (honest-empty; the UI renders absence, never a fabricated row). Detail endpoint only.
+    IReadOnlyList<NearbyDeployDto> NearbyDeploys);
+
+/// <summary>
+/// A deploy DETECTED near an incident (same host, inside the proximity window). ★ CORRELATION, NOT CAUSATION:
+/// <c>DetectedAt</c> is DETECTION time — the marker is captured passively by browser-check runs, so it carries
+/// poll latency and is NOT authoritative deploy time. <c>OffsetMinutes</c> is signed relative to the incident's
+/// opened_at (negative = detected BEFORE the incident opened; a small positive offset can still precede the
+/// incident because detection lags reality). <c>Sha</c> is empty unless <c>IsSha</c>; otherwise
+/// <c>Fingerprint</c> is the human label. (Plain record → camelCase JSON, matching this file's convention.)
+/// </summary>
+public record NearbyDeployDto(
+    DateTimeOffset DetectedAt,
+    string Source,
+    bool IsSha,
+    string Sha,
+    string Fingerprint,
+    int OffsetMinutes);
 
 public record SlaDto(
     long CheckId,

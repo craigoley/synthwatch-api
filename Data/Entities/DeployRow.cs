@@ -11,3 +11,16 @@ public class DeployRow
     public string Source { get; set; } = "";
     public DateTimeOffset DeployedAt { get; set; }
 }
+
+/// <summary>Keyless projection for the incident-detail deploy-proximity annotation: a deploy DETECTED near an
+/// incident (same host, inside the window), plus its signed minute offset from the incident's opened_at. Read
+/// via raw SQL only. detected_at is DETECTION time (poll latency) — correlation, never causation.</summary>
+public class NearbyDeployRow
+{
+    public DateTimeOffset DetectedAt { get; set; }
+    public string Source { get; set; } = "";
+    public bool IsSha { get; set; }
+    public string? Sha { get; set; }
+    public string Fingerprint { get; set; } = "";
+    public int OffsetMinutes { get; set; }
+}

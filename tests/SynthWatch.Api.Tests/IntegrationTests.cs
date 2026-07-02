@@ -1792,6 +1792,76 @@ public class IntegrationTests
         }
     }
 
+    // Deploy-proximity annotation on the incident detail. ALL rows are synthetic (no live examples exist —
+    // capture started 2026-07-01 and every real incident predates it). Proves: inside-window deploys are
+    // returned with the correct SIGNED offset; outside-window excluded; a www deploy matches an APEX-host check
+    // (the query-side normalization); and ★ the honest-empty case renders as an EMPTY list — never a fabricated
+    // row (the must-go-red: if someone invents a placeholder on empty, the Assert.Empty flips and this fails).
+    [SkippableFact]
+    public async Task Incident_detail_nearby_deploys_windowed_normalized_and_honest_empty()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // dp-apex: check host is the APEX wegmans.com; deploys are on www.wegmans.com (+ apex) to prove the
+        // normalization. dp-empty: an incident on a host with NO deploys → the honest-empty case.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE apex bigint; empty bigint; op timestamptz;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url) VALUES ('dp-apex','http','https://wegmans.com') RETURNING id INTO apex;
+              INSERT INTO checks (name, kind, target_url) VALUES ('dp-empty','http','https://nodeploys.example') RETURNING id INTO empty;
+              INSERT INTO incidents (check_id, status, severity, opened_at, consecutive_failures)
+                VALUES (apex, 'open', 'critical', now() - interval '30 min', 1) RETURNING opened_at INTO op;
+              INSERT INTO incidents (check_id, status, severity, opened_at, consecutive_failures)
+                VALUES (empty, 'open', 'critical', now() - interval '30 min', 1);
+              -- detected_at is relative to the incident's opened_at (op):
+              INSERT INTO deploys (target_host, sha, fingerprint, is_sha, source, deployed_at, detected_at) VALUES
+                ('www.wegmans.com', 'abcdef1234567890', 'fp-sha-in', true,  'run-capture', op - interval '10 min', op - interval '10 min'), -- INSIDE (before), www↔apex, SHA
+                ('wegmans.com',     NULL,               'etag-xyz',  false, 'run-capture', op + interval '5 min',  op + interval '5 min'),  -- INSIDE (after), fingerprint
+                ('wegmans.com',     NULL,               'fp-early',  false, 'run-capture', op - interval '90 min', op - interval '90 min'), -- OUTSIDE (too early)
+                ('wegmans.com',     NULL,               'fp-late',   false, 'run-capture', op + interval '30 min', op + interval '30 min'), -- OUTSIDE (too late)
+                ('other.com',       NULL,               'fp-other',  false, 'run-capture', op,                     op);                     -- INSIDE time, WRONG host
+            END $$;
+            """);
+        try
+        {
+            var apexInc = await db.Incidents.Where(i => i.Check!.Name == "dp-apex").Select(i => i.Id).FirstAsync();
+            var emptyInc = await db.Incidents.Where(i => i.Check!.Name == "dp-empty").Select(i => i.Id).FirstAsync();
+            var fn = new IncidentsFunctions(db);
+
+            var d = Assert.IsType<IncidentDetailDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetIncident(Request(), apexInc, default)).Value!);
+
+            // Two in-window deploys, ordered by detectedAt: the -10min www one, then the +5min apex one.
+            Assert.Equal(2, d.NearbyDeploys.Count);
+            Assert.DoesNotContain(d.NearbyDeploys, x => x.Fingerprint is "fp-early" or "fp-late" or "fp-other");
+
+            var before = d.NearbyDeploys[0];
+            Assert.Equal(-10, before.OffsetMinutes);          // ★ signed: detected BEFORE the incident opened
+            Assert.True(before.IsSha);
+            Assert.Equal("abcdef1234567890", before.Sha);     // ★ www.wegmans.com matched the APEX check (normalization)
+            Assert.Equal("run-capture", before.Source);
+
+            var after = d.NearbyDeploys[1];
+            Assert.Equal(5, after.OffsetMinutes);             // detected after open, but detection lags → still in the window
+            Assert.False(after.IsSha);
+            Assert.Equal("", after.Sha);                      // ★ sha EMPTY when not a SHA
+            Assert.Equal("etag-xyz", after.Fingerprint);
+
+            // ★ MUST-GO-RED: no matching deploys → an EMPTY list, never null, never a fabricated placeholder row.
+            var e = Assert.IsType<IncidentDetailDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetIncident(Request(), emptyInc, default)).Value!);
+            Assert.NotNull(e.NearbyDeploys);
+            Assert.Empty(e.NearbyDeploys);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM deploys WHERE fingerprint IN ('fp-sha-in','etag-xyz','fp-early','fp-late','fp-other'); " +
+                "DELETE FROM checks WHERE name IN ('dp-apex','dp-empty');"); // cascades incidents
+        }
+    }
+
     [SkippableFact]
     public async Task Incident_detail_perlocation_is_window_scoped_and_null_safe()
     {
