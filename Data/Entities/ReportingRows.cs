@@ -87,6 +87,9 @@ public class TrustMonitorRow
     public DateTimeOffset? LastGreenAt { get; set; }
     public long RunCount { get; set; }
     public long RetryCount { get; set; }
+    // ★ degrading-but-green early warning: PASS/WARN runs that still needed a real retry (display-only —
+    // NEVER an input to the chip). Same window + retry_count>1 semantics as RetryCount.
+    public long RetriedPasses { get; set; }
     public long IncidentTotal { get; set; }
     public long RealOutage { get; set; }
     public long FlakyTransient { get; set; }

@@ -158,6 +158,10 @@ public record TrustMonitorDto(
     [property: JsonPropertyName("runCount")] long RunCount,
     [property: JsonPropertyName("retryCount")] long RetryCount,
     [property: JsonPropertyName("retryRate")] decimal? RetryRate,
+    // ★ "degrading-but-green" early warning: PASS/WARN runs that STILL needed a real retry over the window. A
+    // DISPLAY-ONLY annotation — NOT an input to `trust` (DeriveChip). A proven-live monitor with retried passes
+    // STAYS proven-live; this only flags "watch it, it's working harder to stay green".
+    [property: JsonPropertyName("retriedPasses")] long RetriedPasses,
     [property: JsonPropertyName("incidents")] TrustIncidentsDto Incidents,
     [property: JsonPropertyName("redTest")] TrustRedTestDto RedTest,
     [property: JsonPropertyName("specProvenance")] TrustProvenanceDto SpecProvenance,
