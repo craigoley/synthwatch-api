@@ -1397,6 +1397,94 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Runs_outcome_filter_maps_status_sets_and_composes_with_the_cursor()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // A known mix, all within the default 7d window, statuses INTERLEAVED in time so a client-side
+        // filter on a single small page would show a false count — the exact bug the server-side filter kills.
+        // 5 pass, 2 warn, 3 fail, 1 error, 1 infra_error, 1 running = 13 runs.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('runs-outcome','http','https://o.example') RETURNING id INTO cid;
+              INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms) VALUES
+                (cid,'pass',       now()-interval '1 minutes',  now()-interval '1 minutes',  40),
+                (cid,'fail',       now()-interval '2 minutes',  now()-interval '2 minutes',  40),
+                (cid,'warn',       now()-interval '3 minutes',  now()-interval '3 minutes',  40),
+                (cid,'pass',       now()-interval '4 minutes',  now()-interval '4 minutes',  40),
+                (cid,'error',      now()-interval '5 minutes',  now()-interval '5 minutes',  40),
+                (cid,'pass',       now()-interval '6 minutes',  now()-interval '6 minutes',  40),
+                (cid,'infra_error',now()-interval '7 minutes',  now()-interval '7 minutes',  40),
+                (cid,'fail',       now()-interval '8 minutes',  now()-interval '8 minutes',  40),
+                (cid,'warn',       now()-interval '9 minutes',  now()-interval '9 minutes',  40),
+                (cid,'pass',       now()-interval '10 minutes', now()-interval '10 minutes', 40),
+                (cid,'running',    now()-interval '11 minutes', NULL,                        NULL),
+                (cid,'fail',       now()-interval '12 minutes', now()-interval '12 minutes', 40),
+                (cid,'pass',       now()-interval '13 minutes', now()-interval '13 minutes', 40);
+            END $$;
+            """);
+        var cid = await db.Checks.Where(c => c.Name == "runs-outcome").Select(c => c.Id).FirstAsync();
+        try
+        {
+            var fn = new ChecksFunctions(db);
+            static RunsPage Page(IActionResult r) =>
+                Assert.IsType<RunsPage>(Assert.IsType<OkObjectResult>(r).Value!);
+            async Task<RunsPage> Get(string? outcome) => Page(await fn.ListCheckRuns(
+                Request(outcome is null ? "?pageSize=200" : $"?pageSize=200&outcome={outcome}"), cid, default));
+
+            // ── status-set mappings (one page each; 13 < 200) ──
+            Assert.Equal(13, (await Get(null)).Items.Count);       // omitted → all (incl. running)
+            Assert.Equal(13, (await Get("all")).Items.Count);      // explicit all → same
+            Assert.Equal(7,  (await Get("passed")).Items.Count);   // pass(5) + warn(2) — warn is a success
+            Assert.Equal(4,  (await Get("failed")).Items.Count);   // fail(3) + error(1) — NOT infra_error
+            Assert.Single((await Get("errored")).Items);           // infra_error ONLY (its own bucket)
+
+            // ── the buckets are DISJOINT and running is in NEITHER passed nor failed: 7 + 4 + 1 + 1(running) = 13 ──
+            var passed  = (await Get("passed")).Items.Select(i => i.Status).Distinct().OrderBy(s => s).ToArray();
+            var failed  = (await Get("failed")).Items.Select(i => i.Status).Distinct().OrderBy(s => s).ToArray();
+            var errored = (await Get("errored")).Items.Select(i => i.Status).ToArray();
+            Assert.Equal(new[] { "pass", "warn" }, passed);
+            Assert.Equal(new[] { "error", "fail" }, failed);       // ★ infra_error is NOT here
+            Assert.Equal(new[] { "infra_error" }, errored);        // ★ its own bucket
+            Assert.DoesNotContain("running", (await Get("passed")).Items.Select(i => i.Status));
+            Assert.DoesNotContain("running", (await Get("failed")).Items.Select(i => i.Status));
+
+            // ── unknown value → 400 (never a silent ignore — the silent-ignore IS the false-count bug) ──
+            Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(
+                await fn.ListCheckRuns(Request("?outcome=banana"), cid, default)).StatusCode);
+
+            // ── ★ THE POINT: the cursor pages through the FILTERED set. With pageSize=2 + outcome=failed we
+            //    get ONLY the 4 failed runs across multiple fetches (not "3 failures in the first page of 50"),
+            //    in the same DESC (started_at, id) order, each once, next-cursor null at the end. ──
+            var expectedFailed = await db.Runs.AsNoTracking()
+                .Where(r => r.CheckId == cid && r.StartedAt >= DateTimeOffset.UtcNow.AddDays(-7)
+                            && (r.Status == "fail" || r.Status == "error"))
+                .OrderByDescending(r => r.StartedAt).ThenByDescending(r => r.Id)
+                .Select(r => r.Id).ToListAsync();
+            Assert.Equal(4, expectedFailed.Count);
+
+            var walked = new List<long>();
+            string? cursor = null;
+            var guard = 0;
+            do
+            {
+                var q = "?pageSize=2&outcome=failed" + (cursor is null ? "" : $"&cursor={Uri.EscapeDataString(cursor)}");
+                var pg = Page(await fn.ListCheckRuns(Request(q), cid, default));
+                Assert.True(pg.Items.Count <= 2);
+                Assert.All(pg.Items, i => Assert.Contains(i.Status, new[] { "fail", "error" }));  // never a passer leaks in
+                walked.AddRange(pg.Items.Select(i => i.Id));
+                cursor = pg.NextCursor;
+            } while (cursor is not null && ++guard < 20);
+            Assert.Null(cursor);                       // exhausted → null next-cursor
+            Assert.Equal(expectedFailed, walked);      // exactly the 4 failed, DESC order, no dupes/skips
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'runs-outcome';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Incidents_are_cursor_paginated_with_open_exempt_from_the_window()
     {
         RequireDocker();

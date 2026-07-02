@@ -328,8 +328,10 @@ public class ChecksFunctions
     /// re-scans the prefix and double-counts as new runs insert at the head. Params:
     /// <c>?from=&amp;to=</c> (ISO-8601; DEFAULT the last 7d so the query NEVER loads all-time),
     /// <c>?cursor=</c> (the opaque next-cursor from the prior page), <c>?pageSize=</c> (default 50,
-    /// max 200). Returns the page + a nextCursor (null when the window is exhausted). The
-    /// (check_id, started_at DESC) index makes the windowed + keyset query an index range scan.
+    /// max 200), <c>?outcome=</c> passed|failed|errored (server-side status filter — see
+    /// <see cref="TryParseOutcome"/> for the contract; unknown value → 400). Returns the page + a
+    /// nextCursor (null when the window is exhausted). The (check_id, started_at DESC) index makes the
+    /// windowed + keyset query an index range scan.
     /// </summary>
     [Function("ListCheckRuns")]
     public async Task<IActionResult> ListCheckRuns(
@@ -344,10 +346,22 @@ public class ChecksFunctions
         if (!range.IsValid)
             return ApiResults.BadRequest(range.Error!);
 
+        // Outcome filter — SERVER-SIDE so it composes with the keyset cursor (a client-side filter on a
+        // cursor page shows a FALSE count: "Failed: 2" when more failed runs are unloaded). Unknown value
+        // → 400 (never silently ignored — that silent-ignore IS the bug this avoids).
+        if (!TryParseOutcome(req.Query["outcome"].ToString(), out var outcomeStatuses))
+            return ApiResults.BadRequest("outcome must be one of: passed, failed, errored (or omitted for all).");
+
         // Bounded to the date-range window (default last 7d) — never an all-time scan, and no
         // COUNT over the whole partition (the unbounded cost the cursor design removes).
         var query = _db.Runs.AsNoTracking()
             .Where(r => r.CheckId == id && r.StartedAt >= range.From && r.StartedAt < range.To);
+
+        // Apply the outcome status set BEFORE the cursor + Take, so the cursor pages through the FILTERED
+        // set (the whole point vs client-side). EF translates Contains → status = ANY(@set), ANDed with the
+        // window + keyset predicates, all served by the (check_id, started_at DESC) index range scan.
+        if (outcomeStatuses is { } statuses)
+            query = query.Where(r => statuses.Contains(r.Status));
 
         // Keyset: continue strictly after the cursor's (started_at, id) under the DESC ordering.
         // The id tie-break keeps runs that share a started_at from being skipped or repeated.
@@ -381,6 +395,36 @@ public class ChecksFunctions
             .FirstOrDefaultAsync(ct);
 
         return ApiResults.Ok(new RunsPage(runs, nextCursor, range.PageSize, latestRunId));
+    }
+
+    /// <summary>
+    /// Parse the <c>?outcome=</c> run-history filter into the runs.status SET it maps to. THE CONTRACT
+    /// (dashboard #173): <c>passed</c> = pass|warn (a warn run SUCCEEDED — it's up for availability);
+    /// <c>failed</c> = fail|error; <c>errored</c> = infra_error ONLY (the SLA-excluded "didn't run" bucket —
+    /// its OWN bucket, NEVER folded into failed). <c>running</c> is in-flight (neither passed nor failed) and
+    /// appears ONLY under all. Omitted/empty = all (no status filter — the pre-existing behavior).
+    /// Returns false for any other value so the caller 400s (a silent ignore is the false-count bug this fixes).
+    /// </summary>
+    private static bool TryParseOutcome(string? outcome, out string[]? statuses)
+    {
+        switch (outcome)
+        {
+            case null or "" or "all":
+                statuses = null;                                 // no filter — all runs (default)
+                return true;
+            case "passed":
+                statuses = new[] { "pass", "warn" };
+                return true;
+            case "failed":
+                statuses = new[] { "fail", "error" };
+                return true;
+            case "errored":
+                statuses = new[] { "infra_error" };              // SLA-excluded; never a real failure
+                return true;
+            default:
+                statuses = null;
+                return false;                                    // unknown → 400
+        }
     }
 
     /// <summary>GET /api/checks/{id}/metrics — run_metrics time series for this check.</summary>
