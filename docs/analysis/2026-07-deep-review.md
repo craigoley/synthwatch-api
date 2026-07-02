@@ -286,3 +286,94 @@ Plus `SELECT 1` (no table) — HealthFunctions.cs:34.
 7. **Scanner regex blind spots (latent, none currently triggered):** schema-qualified/quoted table names, concatenated SQL, `MERGE`, and files outside `Functions/`, `Infrastructure/`, `Data/`.
 
 **Inverse check (gate entries the code no longer uses): none.** Every `postgres.writes` row matched live code in §3.1. The manifest is allowlist-accurate except the missing `check_tags: UPDATE`.
+
+---
+
+## 4. RUNTIME CORRECTNESS AUDIT
+
+### 4.1 Npgsql connection pooling under Managed Identity token expiry
+
+**OBSERVED configuration** (`Infrastructure/PostgresDataSourceFactory.cs`): one singleton `NpgsqlDataSource` (`Program.cs:26`); connection string carries host/db/username only — deliberately no password (comment :32-33) — `SslMode=Require`, `MaxPoolSize=20` (:34-43); `UsePeriodicPasswordProvider` fetching a `DefaultAzureCredential` token for scope `https://ossrdbms-aad.database.windows.net/.default`, `successRefreshInterval: 50min`, `failureRefreshInterval: 5s` (:45-57).
+
+**Docs-verified semantics** (sandbox note: npgsql.org/learn.microsoft.com fetches blocked by egress policy; verified via search-indexed excerpts of those pages + directly-fetched GitHub issues):
+
+- The password/token is checked **only when a physical connection is opened**; established pooled connections are unaffected by later token expiry (Azure PG Entra concepts — a deleted Entra user "can still sign in until the token expires": auth happens at connection time — [learn.microsoft.com security-entra-concepts](https://learn.microsoft.com/en-us/azure/postgresql/security/security-entra-concepts); corroborated by [npgsql/npgsql#5163](https://github.com/npgsql/npgsql/issues/5163), where failures manifest on new opens with stale credentials, not on live connections).
+- `UsePeriodicPasswordProvider` caches the password and re-invokes the callback on a timer; it is the pattern the Npgsql docs recommend for rotating cloud tokens, with a failure interval "much lower than the success interval" ([npgsql.org/doc/security.html](https://www.npgsql.org/doc/security.html); the canonical Azure example uses 55min/5s — this repo's 50min/5s matches).
+- Entra token lifetimes: ~24h for service principals/managed identities, 1–4h for user tokens ([Aaron Powell / MS techcommunity walkthrough](https://techcommunity.microsoft.com/blog/appsonazureblog/azure-postgresql-entra-id-authentication-and-net/4158132)). 50min ≪ every lifetime class.
+- The classic "silent hours-later failure" ([npgsql/npgsql#5163](https://github.com/npgsql/npgsql/issues/5163): works at boot, PAM/auth failures start appearing half a day later) is caused by a token captured once (static password, or pre-7.x `ProvidePasswordCallback` semantics) being reused for new physical opens after expiry. **This codebase is on the correct side of that failure: the periodic provider re-fetches long before any token class expires.** (OBSERVED config + docs-verified mechanism.)
+
+**Residual risks (INFERRED, none observed failing):**
+
+1. `failureRefreshInterval` only applies when the **callback throws**. If `DefaultAzureCredential` returns a cached token that the server then rejects at open (clock skew, revocation), Npgsql would keep offering it for up to 50 min of failed opens — there is no rejected-password fast path. Azure.Identity's proactive refresh (tokens re-fetched well inside their lifetime) makes this a narrow window; noting for completeness.
+2. Pool math under scale-out: `MaxPoolSize=20` is per worker instance; Flex Consumption can run N instances → up to 20·N server connections against the Postgres SKU's `max_connections`. Not verifiable locally (rails) — §7 open question.
+3. The file-header comment says the token has a "~1h lifetime" (`PostgresDataSourceFactory.cs:11-12`) — MI tokens are typically ~24h; the comment is conservative rather than wrong, but worth correcting to avoid future "why 50min?" confusion.
+4. Two `DefaultAzureCredential` instances exist (DB-private at `PostgresDataSourceFactory.cs:45`; DI singleton at `Program.cs:30` for blob/ARM/AOAI/ACS) — two independent token caches. Cosmetic (one extra IMDS chain probe), see §4.5.
+
+### 4.2 Async-over-sync / blocking
+
+**Clean — zero findings (OBSERVED).** Full sweep of `Functions/`, `Infrastructure/`, `Data/`, `Program.cs` for `.Result`, `.Wait()`, `.GetAwaiter().GetResult()`, `Task.Run`, `Thread.Sleep`, `async void`, `lock`, sync file IO: zero product-code hits (the only `File.ReadAll*` are test fixtures, `TraceSignalsGoldenParityTests.cs:54,63`). The synchronous zip/NDJSON parsing in `TraceExtractor.cs:44-63` operates on an already-buffered `MemoryStream` (`ArtifactReader.cs:54-61` awaits `DownloadToAsync` first) — CPU-bound, not blocking IO.
+
+### 4.3 Exception → HTTP status consistency
+
+Shared machinery: all unhandled exceptions → RFC 9457 500 via `ExceptionHandlingMiddleware.cs:42-50`; handler 4xx/503 via `ApiResults` (§1.4). Every numeric/date query parse is `TryParse`-guarded → 400 (`Paging.cs:14-18`, `CursorPaging.cs:104-126`; zero `int.Parse`/`Convert.To*` in product code, OBSERVED); route ids use `{id:long}` constraints (non-numeric → routing 404). All 10 JSON-body endpoints catch `JsonException` → 400 "not valid JSON".
+
+**Findings (ranked):**
+
+1. **[MODERATE, CONFIRMED] Non-JSON `Content-Type` on any of the 10 body-reading endpoints → 500 instead of 400/415.** All body reads use `HttpRequest.ReadFromJsonAsync<T>` (`TagsFunctions.cs:52`, `ChecksFunctions.cs:193,262`, `LocationsFunctions.cs:66`, `ChannelsFunctions.cs:150`, `RoutingFunctions.cs:56`, `ReconcileFunctions.cs:136`, `EditorsFunctions.cs:87`, `ParseIntentFunctions.cs:33`, `AuthFunctions.cs:240`), which throws **`InvalidOperationException`** — not `JsonException` — when the content type is not JSON ("Unable to read the request as JSON because the request content type … is not a known JSON content type", documented `HttpRequestJsonExtensions` behavior — [learn.microsoft.com](https://learn.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.http.httprequestjsonextensions.readfromjsonasync)). Only `JsonException` is caught → shielded 500. Falsification: no middleware validates content type (`Program.cs:69-71`); the test suite always sets `application/json` (`IntegrationTests.cs:46,3001`) so it never exercises the miss. `curl -X POST -d 'x'` (curl's default `application/x-www-form-urlencoded`) reproduces it on any of the 10. Fix shape: `req.HasJsonContentType()` → 415, or widen the catch. Related prior prod signal: the ARM 415 lesson in CLAUDE.md shows plain-text POSTs do occur in this ecosystem's tooling.
+2. **[MINOR] Silent swallow in reconcile apply:** `ReconcileFunctions.cs:260-264` bare `catch` rolls back and appends to `failed[]` with **no logging** — a persistently failing plan is undiagnosable server-side. It also catches `OperationCanceledException`, and `RollbackAsync(ct)` with a cancelled token can throw out of the catch. (OBSERVED)
+3. **[MINOR] Duplicate-name status inconsistency:** channel duplicate → 400 (`ChannelsFunctions.cs:68-71`), check duplicate → 409 (`ChecksFunctions.cs:230-235`). Plus the off-envelope `DeleteChannel` 409 (§1.5). (OBSERVED)
+4. **[INFO]** `ExceptionHandlingMiddleware.cs:27` has no `OperationCanceledException` filter — client aborts log as `Error "Unhandled exception"` (noise, not a bug). Deliberate degradations (uniform auth 202s, 42P01→empty deploys, malformed-jsonb→empty) are consistent and documented in code. (OBSERVED)
+
+### 4.4 Cancellation token propagation
+
+**Near-perfect (OBSERVED, mechanical sweep):** 65/66 endpoints accept `CancellationToken` (the exception, `GetSuggestedTagKeys`, is a synchronous constant — benign). Zero occurrences of `CancellationToken.None`/`default` in product code. All ~123 EF/SQL async call sites pass `ct`, including the middleware audit path (`AuthorizationMiddleware.cs:59,109,125`). `AoaiClient` is exemplary (linked CTS with 30s cap, timeout-vs-caller-cancel distinction, `AoaiClient.cs:105-159`); `ArtifactReader` passes `ct` to both blob paths (:58, :66); `ArmRunnerJobTrigger` passes `ct` plus a hard 15s `HttpClient.Timeout` (:41-56).
+
+Gaps: `AuthFunctions.cs:240` `ReadBodyAsync<T>` calls `ReadFromJsonAsync<T>()` without `ct` (3 auth endpoints) — minor; middleware error-path `WriteAsJsonAsync` without `ct` — benign terminal writes. (OBSERVED) Nuance (INFERRED): handlers use the worker invocation token, not `HttpContext.RequestAborted`; whether a client disconnect cancels the invocation token depends on host plumbing.
+
+### 4.5 Cold-start weight
+
+Startup does registrations only — no warm-up, no eager IO, no heavy static init (only source-generated regexes + static `JsonSerializerOptions`; OBSERVED `Program.cs`, grep of static ctors). First request therefore pays, stacked: `DefaultAzureCredential` chain probe → ossrdbms token fetch → TCP+TLS to Postgres (`NpgsqlDataSource.Build()` does not pre-open connections — OBSERVED no `OpenConnection` anywhere) → EF model build over ~45 `DbSet`s (no compiled model — OBSERVED absence). On Flex Consumption every scale-from-zero instance repeats this. (Composition INFERRED from lazy wiring.)
+
+Levers (report-only): EF compiled model; a warm-up that resolves `NpgsqlDataSource`; share the DI `TokenCredential` with `PostgresDataSourceFactory` (kills the second credential chain); `PublishReadyToRun` (unset in csproj). Per-request nits: `ReconcileFunctions.cs:187` allocates `JsonSerializerOptions` per call (its five siblings are `static readonly`); `AdminEmails()` re-parses env per call (cheap, arguably deliberate live-reconfig).
+
+---
+
+## 5. CODE HEALTH
+
+### 5.1 Build & analyzers
+
+- **Current gate** (`SynthWatch.Api.csproj:10-11`): `EnableNETAnalyzers` + `AnalysisLevel=latest-recommended`, CI builds `-warnaserror`. **OBSERVED: `dotnet build -warnaserror` → `0 Warning(s), 0 Error(s)`.** The fleet zero-warning bar holds.
+- **Delta at `latest-all`** (OBSERVED: `dotnet build --no-incremental -p:AnalysisLevel=latest-all -p:TreatWarningsAsErrors=false`, warnings deduplicated by unique file:line): **719 additional warnings**:
+
+| Rule | Count | Reading |
+|---|---:|---|
+| CA1515 (make types internal) | 249 | app-assembly noise for a Functions app; mass-churn, low value |
+| CA2007 (ConfigureAwait) | 245 | no SynchronizationContext in the isolated worker → near-pure noise here |
+| CA1062 (validate public args) | 82 | mostly DTO/helper publics; would dilute real validation |
+| CA2227 (read-only collections) | 28 | DTO setters used by serializers — churn risk with jsonb converters |
+| CA3001 (SQL injection) | 20 | **all on EF `FromSql`/`FromSqlInterpolated` `FormattableString` sites — parameter-bound, same false-positive class as the CodeQL lesson in CLAUDE.md** |
+| CA1056/CA1054/CA1055 (URI strings) | 35 | contract-level string URLs (blob/proxy paths) — intentional |
+| CA1002 (List<T> exposure) | 18 | DTOs |
+| CA1308 (ToLowerInvariant) | 10 | normalization helpers — lowercase is the contract (emails, tags) |
+| CA1812/CA1034/CA1031/CA1724/CA1307/CA1508/CA2000 | 22 | mixed; CA1031×7 are the deliberate degradation catches (§4.3) |
+| CA2100 (DbCommand text) | 2 | **real by design**: the reconcile plan-text executor (`ApplyMissingAsync`/`ApplyChangedAsync`) — the §3.3 gap-2 sites, guarded by shape-guards |
+
+Verdict (report-only): `latest-all` is not worth adopting wholesale; the two CA2100 hits are already the §3 finding, and CA3001 would need 20 suppressions for parameterized SQL. If anything, cherry-pick single rules (e.g. CA2016 forward-ct, already clean) via `.editorconfig`.
+
+### 5.2 Tests & coverage
+
+- Suite: **328 passed, 1 skipped (cross-repo golden, by design), 0 failed** with Docker; without Docker the 78 Testcontainers integration tests skip gracefully (`PostgresFixture.Available`, OBSERVED both runs).
+- Coverage (OBSERVED, `dotnet-coverage` cobertura over the full suite): **69.4%** line coverage of the `SynthWatch.Api` assembly (4,771/6,871); **84.8% excluding the source-generated worker glue** (`GeneratedFunctionMetadataProvider`, `DirectFunctionExecutor` etc., 1,244 lines structurally never executed under test).
+- **Untested endpoints (0 lines hit in their handler bodies; cross-checked — zero test-source references):**
+  - `RunCheckNow` (`ChecksRunFunctions.cs`) — also blocked from integration testing because `run_requests` is missing from `fixtures/schema.sql` (§2, row 44)
+  - `UpdateCheck` (PATCH /checks/{id}) — `CheckValidation.ApplyPatch` is unit-tested, the handler transaction/404/audit path is not
+  - `DeleteCheck` (DELETE /checks/{id}, incl. `?hard=true`)
+  - `GetCheckSuccessTrace`, `GetRunScreenshot` (artifact proxies; `GetRunTrace` + shared `ProxyAsync` are covered)
+  - `GetReconcilePlan` (GET /reconcile/plan; the same SELECT is covered indirectly via approve/apply)
+- Also 0%: the three middlewares (`AuthorizationMiddleware`, `ExceptionHandlingMiddleware`, `RequestLoggingMiddleware` — their decision logic lives in `AuthGate`/`ProblemResults`, which are at 92-100%, but the middleware glue itself, incl. the audit calls, is never executed under test), `AcsEmailSender`, `PostgresDataSourceFactory`.
+- Weakest covered areas: `CheckValidation` 59% (unhit branches = patch/validation combinations), `ParseIntentFunctions` handler 87% but class-level 6.7% artifact of logger scaffolding, `ResolveSignalsAsync` 44% (the §recon A1 fallback path is only half-exercised).
+
+### 5.3 Packages (report-only)
+
+- `dotnet list package --outdated`: **API — only `Microsoft.ApplicationInsights.WorkerService 2.23.0 → 3.1.2`, which is the deliberate hard pin** (csproj comment documents the 3.x `TypeLoadException` worker crash and the 2026-06-22 outage; guarded by a dependabot ignore rule — do not bump). Tests — `Microsoft.NET.Test.Sdk 18.6.0 → 18.7.0` only.
+- `dotnet list package --vulnerable --include-transitive`: **no vulnerable packages** in either project (OBSERVED, nuget.org source).
