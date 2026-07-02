@@ -83,9 +83,8 @@ public class EditorsFunctions
         var admin = await RequireAdminAsync(req, d => deny = d, ct);
         if (admin is null) return deny!;
 
-        AddEditorRequest? body;
-        try { body = await req.ReadFromJsonAsync<AddEditorRequest>(ct); }
-        catch (JsonException) { return ApiResults.BadRequest("Request body is not valid JSON."); }
+        var (body, bodyError) = await RequestJson.ReadAsync<AddEditorRequest>(req, ct);
+        if (bodyError is not null) return bodyError;
 
         if (!TryReadEmail(body?.Email, out var email))
             return ApiResults.BadRequest("A valid email is required.");

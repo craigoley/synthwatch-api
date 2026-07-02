@@ -144,15 +144,8 @@ public class ChannelsFunctions
 
     private static async Task<(ChannelWriteRequest?, IActionResult?)> ReadBodyAsync(HttpRequest req, CancellationToken ct)
     {
-        ChannelWriteRequest? body;
-        try
-        {
-            body = await req.ReadFromJsonAsync<ChannelWriteRequest>(ct);
-        }
-        catch (JsonException)
-        {
-            return (null, ApiResults.BadRequest("Request body is not valid JSON."));
-        }
+        var (body, error) = await RequestJson.ReadAsync<ChannelWriteRequest>(req, ct);
+        if (error is not null) return (null, error);
         return body is null
             ? (null, ApiResults.BadRequest("Request body is required."))
             : (body, null);

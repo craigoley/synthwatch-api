@@ -50,15 +50,8 @@ public class RoutingFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "routing")] HttpRequest req,
         CancellationToken ct)
     {
-        RoutingDto? body;
-        try
-        {
-            body = await req.ReadFromJsonAsync<RoutingDto>(ct);
-        }
-        catch (JsonException)
-        {
-            return ApiResults.BadRequest("Request body is not valid JSON.");
-        }
+        var (body, bodyError) = await RequestJson.ReadAsync<RoutingDto>(req, ct);
+        if (bodyError is not null) return bodyError;
         if (body is null) return ApiResults.BadRequest("Request body is required.");
 
         // GUARD (#66, extended to 3 dimensions): unrecognized keys deserialize to null, so all-three-null

@@ -29,9 +29,8 @@ public class ParseIntentFunctions
         if (!_aoai.IsConfigured)
             return ApiResults.Ok(ParseIntentDto.NotConfigured()); // inert until the deploy prereq — clean, not a 500
 
-        ParseIntentRequest? body;
-        try { body = await req.ReadFromJsonAsync<ParseIntentRequest>(ct); }
-        catch (System.Text.Json.JsonException) { return ApiResults.BadRequest("Request body is not valid JSON."); }
+        var (body, bodyError) = await RequestJson.ReadAsync<ParseIntentRequest>(req, ct);
+        if (bodyError is not null) return bodyError;
         if (string.IsNullOrWhiteSpace(body?.Text))
             return ApiResults.BadRequest("text is required.");
 

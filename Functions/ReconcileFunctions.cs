@@ -132,9 +132,8 @@ public class ReconcileFunctions
 
     private async Task<IActionResult> DecideAsync(HttpRequest req, string decision, CancellationToken ct)
     {
-        ReconcileDecisionRequest? body;
-        try { body = await req.ReadFromJsonAsync<ReconcileDecisionRequest>(ct); }
-        catch (JsonException) { return ApiResults.BadRequest("Request body is not valid JSON."); }
+        var (body, bodyError) = await RequestJson.ReadAsync<ReconcileDecisionRequest>(req, ct);
+        if (bodyError is not null) return bodyError;
         if (body?.SourceKey is null || body.DriftType is null)
             return ApiResults.BadRequest("sourceKey and driftType are required.");
 
