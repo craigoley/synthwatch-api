@@ -2897,7 +2897,7 @@ public class IntegrationTests
     {
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        const string tok = "swt_artifact_editor";
+        const string tok = "swt_artifact_editor", ghostTok = "swt_artifact_ghost";
         // A SENSITIVE monitor (the exact class B10 protects) with a success-trace baseline, plus a run
         // carrying a trace + screenshot — one seed exercises all four endpoints.
         await db.Database.ExecuteSqlRawAsync("""
@@ -2914,6 +2914,10 @@ public class IntegrationTests
             """);
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(tok)}, 'user@art.test', now() + interval '1 hour')");
+        // A still-valid session whose email is NEITHER an editor nor an admin — models a REVOKED editor
+        // (session live, but role now resolves to anonymous). It must NOT get forensic access → 403.
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(ghostTok)}, 'ghost@art.test', now() + interval '1 hour')");
 
         var cid = await db.Checks.Where(c => c.Name == "art-sensitive").Select(c => c.Id).FirstAsync();
         var rid = await db.Runs.Where(r => r.Check!.Name == "art-sensitive").Select(r => r.Id).FirstAsync();
@@ -2943,6 +2947,12 @@ public class IntegrationTests
             Assert.IsType<UnauthorizedObjectResult>(await fn.GetRunScreenshot(AuthReq(), rid, default));
             Assert.IsType<UnauthorizedObjectResult>(await fn.GetTraceSignals(AuthReq(), rid, default));
 
+            // ── ★ ROLE FLOOR: a still-valid session whose role has been REVOKED (now anonymous) is 403 —
+            //    a removed editor loses forensic access at the same instant they lose write access (mirrors the
+            //    write-gate), never "can't write but can still pull sensitive traces". ──
+            Assert.Equal(403, StatusOf(await fn.GetRunTrace(AuthReq(ghostTok), rid, default)));
+            Assert.Equal(403, StatusOf(await fn.GetTraceSignals(AuthReq(ghostTok), rid, default)));
+
             // ── authenticated (a logged-in EDITOR, NOT admin — the gate is not admin-only) → passes the gate,
             //    serves the artifact: traces/screenshot stream (FileStreamResult), signals are 200 JSON. ──
             Assert.IsType<FileStreamResult>(await fn.GetRunTrace(AuthReq(tok), rid, default));
@@ -2954,7 +2964,7 @@ public class IntegrationTests
         {
             Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", prior);
             await db.Database.ExecuteSqlRawAsync(
-                "DELETE FROM sessions WHERE email = 'user@art.test'; " +
+                "DELETE FROM sessions WHERE email IN ('user@art.test','ghost@art.test'); " +
                 "DELETE FROM editors WHERE email = 'user@art.test'; " +
                 "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name = 'art-sensitive'); " +
                 "DELETE FROM checks WHERE name = 'art-sensitive';");

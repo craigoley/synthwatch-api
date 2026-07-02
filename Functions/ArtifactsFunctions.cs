@@ -18,7 +18,7 @@ namespace SynthWatch.Api.Functions;
 /// console text, failure screenshots, extracted signals) and BYPASS the B10 redaction apparatus that protects
 /// sensitive=true monitors. Run/check ids are sequential bigints, so left open they let the whole fleet's
 /// forensic history be anonymously enumerated. Unlike the status/read-open endpoints (correct for aggregate
-/// status data), the forensic-artifact CLASS requires a valid authenticated session — see
+/// status data), the forensic-artifact CLASS requires a valid EDITOR/ADMIN session — see
 /// <see cref="RequireSessionAsync"/>. Flag-gated on AUTH_ENFORCEMENT_ENABLED (like the write-gate): inert when
 /// off (deploy-safe), enforces in prod where it's true. The paired dashboard trace-proxy PR must forward the
 /// session bearer or the viewer 401s for logged-in users.
@@ -37,21 +37,31 @@ public class ArtifactsFunctions
     }
 
     /// <summary>
-    /// Forensic-artifact auth gate. Requires a valid authenticated session (any logged-in editor/admin — NOT
-    /// admin-only; logged-in users legitimately need traces to debug). Returns 401 problem+json when there is
-    /// no valid session, else null (proceed). ★ Flag-gated on AUTH_ENFORCEMENT_ENABLED — the SAME switch the
-    /// write-gate uses — so it's deploy-safe (inert when off, today's behavior) and actually rejects in prod
-    /// (where enforcement is true). The middleware's verb-gate can't cover this: a GET is always Allow there
-    /// (reads are open by default), so these forensic reads must self-guard. Resolves the caller from the
-    /// bearer via the same <see cref="IAuthPrincipal"/> the middleware uses — role derived from DB/env, never
-    /// trusted from a header.
+    /// Forensic-artifact auth gate. Requires a valid EDITOR or ADMIN session (NOT admin-only; logged-in users
+    /// legitimately need traces to debug). 401 problem+json when there is no valid session; 403 when the
+    /// session is valid but its LIVE role is neither editor nor admin — i.e. a REVOKED editor whose session
+    /// hasn't expired. That role floor mirrors the write-gate (<see cref="AuthGate.Decide"/>: a removed editor
+    /// resolves to <see cref="Roles.Anonymous"/> and is denied), so a removed editor loses forensic access at
+    /// the same instant they lose write access — never "can't write but can still pull sensitive traces".
+    /// (The login flow only ever mints a session for an editor/admin — <c>AuthFunctions.Verify</c> rejects an
+    /// anonymous role — so this floor bites ONLY the post-mint revocation case; defense in depth.)
+    ///
+    /// ★ Flag-gated on AUTH_ENFORCEMENT_ENABLED — the SAME switch the write-gate uses — so it's deploy-safe
+    /// (inert when off, today's behavior) and actually rejects in prod (where enforcement is true). The
+    /// middleware's verb-gate can't cover this: a GET is always Allow there (reads are open by default), so
+    /// these forensic reads must self-guard. Resolves the caller from the bearer via the same
+    /// <see cref="IAuthPrincipal"/> the middleware uses — role derived from DB/env, never trusted from a header.
     /// </summary>
     private async Task<IActionResult?> RequireSessionAsync(HttpRequest req, CancellationToken ct)
     {
         if (!AuthorizationMiddleware.EnforcementEnabled())
             return null; // flag OFF → inert (deploy-safe; matches the rest of the security model)
         var principal = await _auth.FromBearerAsync(req.Headers.Authorization, ct);
-        return principal is null ? ApiResults.Unauthorized("Authentication required.") : null;
+        if (principal is null)
+            return ApiResults.Unauthorized("Authentication required.");        // no valid session → 401
+        if (!principal.CanWrite)
+            return ApiResults.Forbidden("You do not have permission to perform this action."); // revoked role → 403
+        return null;
     }
 
     /// <summary>
