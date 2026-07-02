@@ -427,32 +427,42 @@ public class IntegrationTests
               INSERT INTO checks (name, kind, target_url)            VALUES ('trust-unverified','http','https://u.ex')  RETURNING id INTO unver;
               INSERT INTO checks (name, kind, target_url)            VALUES ('trust-empty','http','https://e.ex')       RETURNING id INTO empty;
 
-              -- clean: 20 recent pass, 0 retry; latest run carries spec provenance → proven-live
-              FOR i IN 1..20 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (clean, 'pass', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+              -- clean: ★ THE RED-TEST for the retry-count fix. 20 recent pass, ALL retry_count = 1 — where
+              -- 1 = a clean FIRST-TRY / NO retry (runner migration 0048; retry_count is an ATTEMPT count, and
+              -- 0 never occurs in real data). A monitor that NEVER actually retried must be proven-live with
+              -- retryRate 0.00. Under the OLD `> 0` SQL these 20 count as "retried" → retryRate 1.0 → flaky
+              -- (the exact shipped bug Craig saw). Under the corrected `> 1` → 0 retries → proven-live.
+              FOR i IN 1..20 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (clean, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
               UPDATE runs SET spec_provenance = jsonb_build_object('executed_sha256','abc123','spec_path','monitors/clean/home.spec.ts')
                 WHERE check_id = clean AND started_at = (SELECT max(started_at) FROM runs WHERE check_id = clean);
 
-              -- flaky: 10 recent pass, 6 retried (retryRate 0.60) → flaky (via retry). Sensitive flows through.
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (flaky, 'pass', now() - (i*10 || ' seconds')::interval, CASE WHEN i <= 6 THEN 1 ELSE 0 END); END LOOP;
+              -- flaky: 10 recent pass — 6 with an ACTUAL retry (retry_count = 2), 4 clean first-try (= 1).
+              -- retryRate = 6/10 = 0.60 → flaky (via real retries). Under OLD `> 0` this is 10/10 = 1.0 (still
+              -- flaky, but the COUNT is wrong) — so the retryCount==6 / retryRate==0.60 asserts below fail on `> 0`.
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (flaky, 'pass', now() - (i*10 || ' seconds')::interval, CASE WHEN i <= 6 THEN 2 ELSE 1 END); END LOOP;
 
-              -- noise: 10 recent pass, 0 retry, but a selector-drift incident → flaky (via monitor-noise)
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (noise, 'pass', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+              -- noise: 10 recent clean-first-try pass (retry_count = 1 → retryRate 0.00), but a selector-drift
+              -- incident → flaky via monitor-noise ALONE (proves noise flags even with zero actual retries).
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (noise, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
               INSERT INTO incidents (check_id, status, severity, opened_at, rca) VALUES (noise, 'open','critical', now()-interval '1 day', jsonb_build_object('classification','selector-drift'));
 
-              -- verdicts: recent green, low retry, full verdict spread (NO monitor-noise) → proven-live; buckets reconcile
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (verdicts, 'pass', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+              -- verdicts: 10 recent clean-first-try pass (retry_count = 1), full verdict spread (NO noise) → proven-live.
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (verdicts, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
               INSERT INTO incidents (check_id, status, severity, opened_at, rca) VALUES
                 (verdicts,'resolved','critical', now()-interval '2 days', jsonb_build_object('classification','real-outage')),
                 (verdicts,'resolved','warning',  now()-interval '2 days', jsonb_build_object('classification','perf-regression')),
                 (verdicts,'resolved','critical', now()-interval '2 days', jsonb_build_object('classification','environment-regional')),
                 (verdicts,'resolved','critical', now()-interval '2 days', NULL);
 
-              -- nominal: green exists but STALE (2 days), recent fails, low retry → nominal
-              FOR i IN 1..5  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'pass', now() - interval '2 days' - (i || ' minutes')::interval, 0); END LOOP;
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'fail', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+              -- nominal: STALE green (2 days) + recent fails. Mixed retry_count — clean-first-try (1) AND
+              -- pre-migration NULL. NEITHER is an actual retry, so retryRate stays 0.00 and the NULL runs are
+              -- counted in runCount but never as a retry. Stale green (no fresh pass) → nominal.
+              FOR i IN 1..5  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'pass', now() - interval '2 days' - (i || ' minutes')::interval, 1); END LOOP;
+              FOR i IN 1..7  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'fail', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
+              FOR i IN 1..3  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'fail', now() - (i*10 || ' seconds')::interval, NULL); END LOOP;
 
-              -- unverified: recent runs, all fail, never green → unverified
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (unver, 'fail', now() - (i*10 || ' seconds')::interval, 0); END LOOP;
+              -- unverified: recent runs, all fail (clean first-try), never green → unverified
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (unver, 'fail', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
 
               -- empty: no runs at all → unverified + retryRate NULL (honest empty)
             END $$;
@@ -466,28 +476,33 @@ public class IntegrationTests
             var m = all.Monitors.Where(x => x.CheckName.StartsWith("trust-")).ToDictionary(x => x.CheckName);
             Assert.Equal(7, m.Count);
 
-            // ── proven-live: recent green, clean retries, no noise; spec provenance surfaced ──
+            // ── ★ THE RED-TEST: a monitor whose 20 runs are ALL retry_count = 1 (clean first-try / NO retry)
+            //    must be proven-live with retryRate 0.00 and retryCount 0. This FAILS on the old `> 0` SQL
+            //    (which reads 20/20 "retried" → retryRate 1.0 → flaky — the shipped bug) and PASSES on `> 1`. ──
             var clean = m["trust-clean"];
             Assert.Equal("proven-live", clean.Trust);
             Assert.Equal(20, clean.RunCount);
-            Assert.Equal(0m, clean.RetryRate);
+            Assert.Equal(0, clean.RetryCount);                  // ★ retry_count = 1 is NOT a retry
+            Assert.Equal(0m, clean.RetryRate);                  // ★ 0.00, not 1.0 — the bug's fingerprint
             Assert.NotNull(clean.LastGreenAt);
             Assert.Equal("abc123", clean.SpecProvenance.ExecutedSha256);
             Assert.Equal("monitors/clean/home.spec.ts", clean.SpecProvenance.SpecPath);
             Assert.False(clean.Sensitive);
 
-            // ── flaky via retry (0.60) — a monitor limping over the line; sensitive flag flows through ──
+            // ── flaky via ACTUAL retries: 6 of 10 runs have retry_count = 2 → retryRate 0.60. The COUNT (6,
+            //    not 10) and RATE (0.60, not 1.0) also fail on the old `> 0` SQL. Sensitive flag flows through. ──
             var flaky = m["trust-flaky"];
             Assert.Equal("flaky", flaky.Trust);
-            Assert.Equal(6, flaky.RetryCount);
+            Assert.Equal(6, flaky.RetryCount);                  // ★ only the retry_count = 2 runs count
             Assert.Equal(0.6m, flaky.RetryRate);
             Assert.True(flaky.Sensitive);
             Assert.Null(flaky.SpecProvenance.ExecutedSha256);   // no provenance seeded → honest null
 
-            // ── flaky via monitor-noise (a selector-drift incident) despite ZERO retry pressure ──
+            // ── flaky via monitor-noise (a selector-drift incident) despite ZERO actual retries. retryRate
+            //    0.00 (all runs retry_count = 1) also fails on the old `> 0` SQL, which would read 1.0. ──
             var noise = m["trust-noise"];
             Assert.Equal("flaky", noise.Trust);
-            Assert.Equal(0m, noise.RetryRate);
+            Assert.Equal(0m, noise.RetryRate);                  // ★ clean first-try runs → 0.00, not 1.0
             Assert.Equal(1, noise.Incidents.SelectorDrift);
 
             // ── proven-live WITH a full verdict breakdown: real-outage/perf/env/unclassified are NOT noise ──
@@ -505,10 +520,15 @@ public class IntegrationTests
                 v.Incidents.RealOutage + v.Incidents.FlakyTransient + v.Incidents.SelectorDrift
                 + v.Incidents.EnvironmentRegional + v.Incidents.PerfRegression + v.Incidents.Unclassified);
 
-            // ── nominal: has green but it's stale (older than 2 intervals) ──
+            // ── nominal: has green but it's stale (older than 2 intervals). ★ Mixed retry_count = 1 AND
+            //    pre-migration NULL — NEITHER is an actual retry: NULL runs are counted in runCount (15) but
+            //    retryRate stays 0.00 and retryCount 0 (NULL never satisfies `> 1`). ──
             var nominal = m["trust-nominal"];
             Assert.Equal("nominal", nominal.Trust);
             Assert.NotNull(nominal.LastGreenAt);
+            Assert.Equal(15, nominal.RunCount);                 // 5 pass + 7 fail(=1) + 3 fail(NULL)
+            Assert.Equal(0, nominal.RetryCount);                // ★ retry_count = 1 AND NULL both → not a retry
+            Assert.Equal(0m, nominal.RetryRate);
 
             // ── unverified: never passed → lastGreenAt null (a first-class state, not an error) ──
             var unver = m["trust-unverified"];
@@ -541,7 +561,7 @@ public class IntegrationTests
             Assert.Equal("proven-live", detail.Monitor.Trust);
             Assert.Equal(7, detail.RetrySeries.Count);                  // 7d → 7 daily points
             Assert.Equal(20, detail.RetrySeries[^1].RunCount);         // today: the 20 runs
-            Assert.Equal(0m, detail.RetrySeries[^1].RetryRate);
+            Assert.Equal(0m, detail.RetrySeries[^1].RetryRate);        // ★ red-test: 0.00 (all retry_count=1), not 1.0 on `> 0`
             Assert.Equal(0, detail.RetrySeries[0].RunCount);           // 6 days ago: no runs
             Assert.Null(detail.RetrySeries[0].RetryRate);              // ★ null, not 0
 
