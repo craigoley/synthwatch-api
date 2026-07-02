@@ -313,7 +313,7 @@ public class ReportsFunctions
                FROM generate_series((CURRENT_DATE - ({days} - 1))::date, CURRENT_DATE, INTERVAL '1 day') d(day)
                LEFT JOIN LATERAL (
                    SELECT count(*)::bigint AS run_count,
-                          count(*) FILTER (WHERE r.retry_count > 0)::bigint AS retry_count
+                          count(*) FILTER (WHERE r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retry_count
                    FROM runs r
                    WHERE r.check_id = {checkId} AND r.started_at::date = d.day::date
                ) rc ON true
@@ -353,7 +353,7 @@ public class ReportsFunctions
            FROM checks c
            LEFT JOIN LATERAL (
                SELECT count(*)::bigint AS run_count,
-                      count(*) FILTER (WHERE r.retry_count > 0)::bigint AS retry_count,
+                      count(*) FILTER (WHERE r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retry_count,
                       max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
                FROM runs r
                WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')
@@ -408,7 +408,7 @@ public class ReportsFunctions
            FROM checks c
            LEFT JOIN LATERAL (
                SELECT count(*)::bigint AS run_count,
-                      count(*) FILTER (WHERE r.retry_count > 0)::bigint AS retry_count,
+                      count(*) FILTER (WHERE r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retry_count,
                       max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
                FROM runs r
                WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')
