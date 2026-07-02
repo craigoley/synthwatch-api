@@ -37,7 +37,7 @@ New ground covered here that the prior report did not: mapper-drift systemic inv
 
 ## 1. SYSTEM MAP AS-OBSERVED
 
-**56 HTTP endpoints** across 23 `Functions/*.cs` files. Route prefix `api` from `host.json` (`extensions.http.routePrefix`, `host.json:15-19`). Every endpoint declares `AuthorizationLevel.Anonymous`; real auth is the middleware gate below.
+**66 HTTP endpoints** across 23 `Functions/*.cs` files (OBSERVED: `grep -c "[Function(" Functions/*.cs` = 66; the table below has 56 rows because the 10 report GETs and approve/reject share rows). Route prefix `api` from `host.json` (`extensions.http.routePrefix`, `host.json:15-19`). Every endpoint declares `AuthorizationLevel.Anonymous`; real auth is the middleware gate below.
 
 ### 1.1 Effective auth model
 
@@ -149,3 +149,140 @@ Note the DB credential split (OBSERVED): the **DB** token uses a `DefaultAzureCr
 4. **Reconcile approve/reject 200** returns an anonymous `{sourceKey,driftType,status}` object, no DTO (`Functions/ReconcileFunctions.cs:165`).
 5. **Duplicate-name status inconsistency:** channel duplicate → **400** (`ChannelsFunctions.cs:68-71`) vs check duplicate source_key → **409** (`ChecksFunctions.cs:230-235`).
 6. `NotificationsFunctions` uses raw `OkObjectResult` (cosmetic; `NotificationsFunctions.cs:49`).
+
+---
+
+## 2. MAPPER DRIFT — SYSTEMIC ANALYSIS
+
+This repo's confirmed production bug class: hand-written shape mappings silently drifting from what a consumer expects (historical instances: the flat-vs-nested `getPerformanceReport` mismatch; the `{date,value}` vs `{day,availabilityPct}`/`{day,avgMs}` series cluster; the trace-signals `mutations` drift fixed by runner #169/api #148; the reconcile-plan positional `spec_path` drift fixed in #131). Local git history is truncated to 50 commits (oldest #101, OBSERVED `git log --oneline | wc -l` = 50), so the first two instances predate retained history — their residue is documented in code comments (`ReportsFunctions.cs:659-663` records the `groupBy="none"` empty-report bug; `ChecksFunctions.cs:434-457` the DST bucket-drop; `Data/Entities/ReportNarrativeRow.cs:9-10` a "built ahead of the runner migration" contract).
+
+### 2a. Mapping/projection inventory
+
+**Mapping convention (applies to every raw-SQL row):** keyless row types are registered `HasNoKey().ToView(null)` with explicit `HasColumnName("snake_case")` per property in `Data/SynthWatchDbContext.cs` (SlaAvailabilityRow :368-381, TrustMonitorRow :448-471, SpecCatalogRow :654-677, …). Binding is **by column name, not position**; there are no `[Column]` attributes. Every raw-SQL read is therefore a hand-written 3-link chain: SQL `AS` alias (Functions) → `HasColumnName` (DbContext) → C# property → (usually) a hand-written DTO projection. Nothing type-checks link 1→2.
+
+Totals (OBSERVED, exhaustive sweep): **23 raw-SQL → keyless-row boundaries**, **~20 row/entity → DTO projections** (6 extracted to pure `Infrastructure/*Projection.cs` helpers, the rest inline), **11 typed jsonb contracts + 6 jsonb-as-text passthroughs**, plus 4 write-side SQL mirrors of runner TS logic. All hand-written; zero generated mappers. IT = `tests/SynthWatch.Api.Tests/IntegrationTests.cs` (executes the real handler classes against Testcontainers Postgres).
+
+| # | Mapping boundary | Kind | Tested by | Risk notes |
+|---|---|---|---|---|
+| 1 | `MetricsSql` 7 aliases → `CheckMetricsRow` (ChecksFunctions.cs:23-65→:97; DbContext :690-701) | raw-SQL | IT:114 | `spark` is `json_agg(...)::text` → #2 |
+| 2 | spark JSON keys `t,d,s` → `SparkPoint` `[JsonPropertyName]` (ChecksFunctions.cs:58→:100; Dtos/CheckDtos.cs:12-15) | jsonb-text | IT:126 (`NotEmpty` only — keys not pinned) | 3-hop: SQL alias → JSON key → dashboard shape |
+| 3 | `CheckMetricsRow` → `CheckMetricsDto` (ChecksFunctions.cs:98-100) | hand map | IT:114; MappingTests.cs:54 | |
+| 4 | `SELECT * FROM slo_status(...)` → `SloStatusRow` (ChecksFunctions.cs:178-182; DbContext :384-399) | raw-SQL | IT:134, IT:615 | **`SELECT *`** — a runner rename of the fn's RETURNS TABLE silently breaks binding |
+| 5 | `SloStatusRow` → `SloDto` + burn thresholds (ChecksFunctions.cs:154-176) | hand map | IT:134 | 14.4x/6x thresholds duplicated from runner alerting |
+| 6 | availability-series bucketed SQL → `AvailabilitySeriesPointRow` (ChecksFunctions.cs:458-482; DbContext :542-550) | raw-SQL | IT:693/746/759 (incl. DST) | the endpoint family of the past series drift; SLA taxonomy mirrored by hand (comment :453-457) |
+| 7 | row → `AvailabilityPointDto` (ChecksFunctions.cs:484-486) | hand map | IT:693 | |
+| 8 | `SELECT *` from `sla_availability_{24h,7d,30d,90d}` views → `SlaAvailabilityRow` (SlaFunctions.cs:30-42) | raw-SQL | IT:647, IT:682 | runner owns the views; `SELECT *` again |
+| 9 | row → `SlaDto`/`SlaFleetDto` (`Infrastructure/SlaProjection.cs:23-60`) | pure helper | SlaProjectionTests + IT:647 | |
+| 10-11 | deploys SQL → `DeployRow` → `DeployMarkerDto` (ReportsFunctions.cs:54-68; DbContext :517-527) | raw-SQL + map | IT:3401 | 42P01-tolerant (merged≠migrated guard) |
+| 12-13 | egress SQL → `EgressRunRow` → `EgressReportDto` (ReportsFunctions.cs:95-102; `EgressReportProjection.cs:15-33`) | raw-SQL + pure helper | IT:3455 | |
+| 14-15 | SLO-report LATERAL `slo_status`+`slo_burn_status` → `SloReportRow` → DTOs (ReportsFunctions.cs:148-162; `SloReportProjection.cs:20-67`) | raw-SQL + pure helper | IT:182 | aliases must track two runner fns |
+| 16-17 | MTTR SQL (`rca->>'classification'`) → `MttrIncidentRow` → DTOs (ReportsFunctions.cs:192-204; `MttrReportProjection.cs:26-100`) | raw-SQL + pure helper | IT:275 | runner reconcile.ts taxonomy duplicated as SQL literals |
+| 18-19 | incident-breakdown SQL → row → DTO inline (ReportsFunctions.cs:233-260) | raw-SQL + inline | IT:3238, IT:3288 | |
+| 20-21 | `TrustFleetSql`/`TrustDetailSql` → `TrustMonitorRow` → `TrustMonitorDto` (ReportsFunctions.cs:339-444; `TrustReportProjection.cs:80-107`) | raw-SQL + pure helper | IT:413, IT:565 | **20-alias SELECT duplicated verbatim in two methods** — fleet/detail can drift from each other |
+| 22 | trust retry-day SQL → `TrustRetryDayRow` → `TrustRetryPointDto` (ReportsFunctions.cs:309-327) | raw-SQL + map | IT:538 | |
+| 23-27 | availability/latency/vitals/series SQL (each ×2 grouped/ungrouped) → 5 row types (ReportsFunctions.cs:462-638; DbContext :552-612) | raw-SQL | IT:1033, IT:1146, IT:1205, IT:1268 | grouped/ungrouped SQL duplicated; `CheckId NULL` = group row convention |
+| 28 | rows → `AvailabilityReportDto`/`PerformanceReportDto` nested assembly (ReportsFunctions.cs:505-516, :640-675) | hand map inline | IT:1033/1146 + envelope pins | **the getPerformanceReport flat-vs-nested drift lived here** |
+| 29 | narrative SQL (`highlights::text`, `fact_pack::text`) → `ReportNarrativeRow` → `NarrativeDto` (ReportsFunctions.cs:702-729; DbContext :614-627) | raw-SQL + jsonb-text | IT:841 | row shipped ahead of runner migration (entity doc :9-10) |
+| 30-31 | status SQL ×3 → 3 row types → `StatusPageDto` (StatusFunctions.cs:31-57; `StatusPageProjection.cs:22-76`) | raw-SQL + pure helper | IT:3312 | |
+| 32 | reconcile_drift SQL → `ReconcileDriftRow` → item DTO (ReconcileFunctions.cs:63-69) | raw-SQL + jsonb-text | IT:895 | |
+| 33 | reconcile_apply_plan SQL ×3 → `ReconcileApplyPlanRow` (ReconcileFunctions.cs:89-92, :141-144, :180-183) | raw-SQL | approve/apply IT:3541-3944; **`GetReconcilePlan` endpoint itself: no test invokes it** (0% coverage, §5) | plan-serving envelope unpinned |
+| 34 | plan jsonb → `PlanDoc/PlanStmt` + **positional `Values[0..9]`** (`v[5]`=sensitive, `v[9]`=spec_path; ReconcileFunctions.cs:195, :213-223, :338-339) | jsonb positional | IT:3673-3944 | index drift vs runner `computeApplyPlan` is silent — **#131 was exactly this** |
+| 35 | spec_catalog SQL (21 aliases) → `SpecCatalogRow` → DTOs (SpecsFunctions.cs:36-75; DbContext :654-677) | raw-SQL + jsonb-text | IT:953 | widest alias surface after trust |
+| 36-39 | entity → DTO hand maps: `Run→RunDto`/`TimelineEntryDto`, `RunStep/RunMetric/Flow/Channel→DTOs`, `Incident→IncidentDto`+detail, `Check→CheckSummaryDto/CheckDetailDto` (60+ fields) | hand map | MappingTests.cs (13-139), IT various; **`RunMetricDto` field values never asserted** (envelope-only) | compile-checked source side; drift risk is vs dashboard expectations |
+| 40 | jsonb value-converter columns: `checks.{assertions,request_headers,auth,net_config,steps,redact_patterns}`, `channels.config`, `incidents.rca` (DbContext :261-281, :95-97, :361-363; options :706-710 camelCase/WhenWritingNull) | jsonb typed | IT:1796 round-trip; MappingTests.cs:109 (`generated_at`) | each is a writer(runner)/reader(api) contract; `rca.generated_at` snake_case leak lives here |
+| 41 | `runs.trace_signals` jsonb ↔ `TraceSignalsDto` + `TraceExtractor.FromZip` (cross-language port of runner traceSignals.ts) | jsonb x-repo | **golden-guarded**: TraceSignalsGoldenParityTests + `.github/workflows/trace-parity.yml` | drifted once (`mutations`); now the best-guarded contract in the repo |
+| 42 | audit before/after snapshots → `audit_log` jsonb (AuditWriter; DbContext :221-222) | jsonb write | IT:2530, AuditRedactionTests | |
+| 43 | write-side runner mirrors: check_tags upsert ≙ tags.ts, check_locations ≙ locations.ts, create-time seeding, checks `ON CONFLICT` (TagsFunctions.cs:80-86, LocationsFunctions.cs:113-117, ChecksFunctions.cs:237-240, ReconcileFunctions.cs:234-240) | raw-SQL write x-repo | IT:2212, IT:1946, IT:1841, IT:3673 | CLAUDE.md mirror-pattern with cross-ref comments |
+| 44 | **`POST /checks/{id}/run` → `run_requests`** (ChecksRunFunctions.cs:47-73; DbContext :133-144) | EF entity | **UNTESTED** — no test references it, and **`run_requests` is absent from `fixtures/schema.sql`** (OBSERVED: zero grep hits in the fixture) | the one live, provable snapshot-drift instance today |
+| 45 | misc LINQ anonymous selects (AiInsights/LocationDiff/Routing/Editors) | LINQ | IT various | compile-checked, low risk |
+
+### 2b. Why the class recurs, and what would structurally prevent it
+
+**Diagnosis (OBSERVED):** the failure surface is not one mapper — it is 23 by-name alias chains + 17 jsonb contracts + 2 `SELECT *` sites + 1 positional-array contract, spread across two repos (runner writes, API reads) and consumed by a third (dashboard). Three structural facts let drift through:
+
+1. **The schema snapshot is hand-maintained.** `fixtures/schema.sql` is a pg_dump with 8+ hand-appended "Added to the test snapshot" blocks (schema.sql:599-893). Nothing in CI compares it to the runner's migrations (OBSERVED: no workflow references it; it appears only in the test csproj copy step). Proof it drifts: `run_requests` (runner migration 0042) is missing, which is precisely why row 44 is untestable today.
+2. **Wire-shape pinning stops at the top level.** IT:3158 `List_endpoint_top_level_shapes_are_pinned` (#123) pins bare-array vs top-level key sets for ~25 endpoints — the series-point-level drift class (`{date,value}` vs `{day,avgMs}`) would pass it.
+3. **The cross-repo guards that exist are pattern-proven but applied to exactly one contract each.** Golden fixture: trace-signals only (trace-parity.yml). Predicate-parity InlineData: validation rules only. Both were built as fixes after the corresponding drift shipped.
+
+**Prevention options evaluated against this codebase:**
+
+| Option | What it catches here | What it misses | Cost |
+|---|---|---|---|
+| (a) Contract tests executing real SQL against a **drift-checked** schema snapshot | link 1→2 of every raw-SQL chain (23 boundaries), incl. `SELECT *` sites and missing tables/columns — the mechanism (Testcontainers + real handler classes) **already exists and covers 22/23 boundaries**; the missing piece is snapshot fidelity + the 2 untested boundaries | dashboard-side expectations (link 3→wire) | LOW — CI already checks out the runner repo in two workflows (grant-coverage.yml, trace-parity.yml) |
+| (b) Source-generated mappers (Mapperly/Riok) | only row→DTO links (rows 3,5,7,9,…) — the **best-tested, compile-checked** link in the chain; a generator cannot see SQL aliases, `HasColumnName`, jsonb keys, or the dashboard | the actual historical bug sites (SQL/wire/jsonb), all 4 of them | HIGH — churn across 60+-field DTOs for the lowest-risk link |
+| (c) Shared shape definitions (JSON Schema / TS types shared with dashboard+runner) | link 3 (wire) for all consumers | requires a three-repo artifact pipeline and dashboard buy-in; doesn't validate SQL→row | HIGH coordination |
+
+**Recommendation (one, with migration path): option (a) — make the existing contract-test machinery trustworthy end-to-end.** The repo already has the right architecture (integration tests run the real handlers' real SQL on real Postgres); it recurs anyway because the schema snapshot and the wire pin are both shallow. Concretely:
+
+1. **Schema-parity CI job** (new job in `grant-coverage.yml`, which already checks out `craigoley/synthwatch`): spin `postgres:16`, apply the runner's `db/migrations/*.sql` in order, `pg_dump --schema-only`, normalize, and diff against `fixtures/schema.sql` — fail with the diff on mismatch (or auto-regenerate the fixture as an artifact). This turns the snapshot from "hand-maintained, drifts silently" into "asserted every push". It would have caught `run_requests` (row 44) the day migration 0042 merged. Effort: one workflow job + ~50-line script; no code change.
+2. **Deep-shape pin**: extend the #123 envelope test from top-level key sets to full-depth key-structure comparison (serialize seeded responses, strip values, `JsonNode.DeepEquals` against checked-in golden shape files — the exact mechanism trace-parity already uses). This catches the series-point and flat-vs-nested classes on the API side without dashboard coordination. Effort: MEDIUM — one test + ~25 golden files, seeded data already exists.
+3. **Close the two uncovered boundaries** once (1) lands: add `run_requests` to the snapshot + an IT for `RunCheckNow` (also kills the §5 coverage zero), and an IT invoking `GetReconcilePlan`.
+4. **Optional follow-up** for the two `SELECT *` sites (rows 4, 8): name the columns explicitly so a runner-side column addition/rename fails loudly in the parity-checked ITs instead of binding silently.
+
+Not recommended now: (b) — it hardens the only link the compiler already helps with; (c) — right long-term, wrong first step; revisit after (a) is green, starting with the highest-churn report DTOs.
+
+---
+
+## 3. GRANTS FROM THE CONSUMER SIDE
+
+Every table × verb this codebase's SQL actually uses (production code: `Functions/`, `Infrastructure/`, `Data/`; test SQL excluded — it runs as the Testcontainers superuser). All rows OBSERVED in source; one representative citation per verb.
+
+### 3.1 The artifact: table × verb
+
+| table | SELECT | INSERT | UPDATE | DELETE | evidence (representative) |
+|---|:-:|:-:|:-:|:-:|---|
+| access_requests | ✅ | ✅ | — | ✅ | S: AuthFunctions.cs:191, EditorsFunctions.cs:146; I: AuthFunctions.cs:195; D: EditorsFunctions.cs:176-178 (`ExecuteDeleteAsync`) |
+| alert_routes | ✅ | ✅ | — | ✅ | S: RoutingFunctions.cs:36; I: RoutingFunctions.cs:153,158; D: RoutingFunctions.cs:152,157 |
+| audit_log | — | ✅ | — | — | I: AuditWriter.cs:49-50 (no API read exists, despite the doc comment at SynthWatchDbContext.cs:207) |
+| channels | ✅ | ✅ | ✅ | ✅ | S: ChannelsFunctions.cs:38; I: :63; U: fetch-mutate :86→99 (no syntactic marker); D: :134 |
+| check_locations | ✅ | ✅ | — | ✅ | S: LocationsFunctions.cs:126; I: ChecksFunctions.cs:237-240, LocationsFunctions.cs:113-116, ReconcileFunctions.cs:245-248 (all `ON CONFLICT DO NOTHING`); D: LocationsFunctions.cs:117-119 |
+| check_tags | ✅ | ✅ | **✅** | ✅ | S: TagsFunctions.cs:99 + raw joins (StatusFunctions.cs:37-55, ReportsFunctions.cs:159-161, every `?tag` filter); **I+U: TagsFunctions.cs:80-84 — `INSERT … ON CONFLICT (check_id, key) DO UPDATE SET value` needs INSERT *and* UPDATE**; D: TagsFunctions.cs:86-87 |
+| checks | ✅ | ✅ | ✅ | ✅ | S: ChecksFunctions.cs:73 + dozens of raw joins; I: :213,228 and ReconcileFunctions.cs:234-240 (`ON CONFLICT (source_key) DO UPDATE` = I+U); U: PATCH :272→280, soft-delete :318-321, **plus runner-emitted `UPDATE checks SET …` executed verbatim via raw DbCommand (ReconcileFunctions.cs:289-296, :324-334)**; D: :314 (`?hard=true`) |
+| daily_check_rollup | ✅ | — | — | — | ReportsFunctions.cs:466-497, :623-633 |
+| deploys | ✅ | — | — | — | ReportsFunctions.cs:54-58 (42P01-tolerant) |
+| editors | ✅ | ✅ | — | ✅ | S: EditorsFunctions.cs:68, AuthPrincipalService.cs:55; I: EditorsFunctions.cs:97-98; D: :123-124 |
+| flow_manifest | ✅ | — | — | — | FlowsFunctions.cs:27 |
+| incidents | ✅ | — | — | — | IncidentsFunctions.cs:49,108,154 + raw (ChecksFunctions.cs:46-53, StatusFunctions.cs:34-52, ReportsFunctions.cs:197-371, SpecsFunctions.cs:59-62) |
+| locations | ✅ | — | — | — | LocationsFunctions.cs:30,102-103; SELECT-source inside INSERTs (ChecksFunctions.cs:239) |
+| maintenance_windows | ✅ | — | — | — | ChecksFunctions.cs:471-476; ReportsFunctions.cs:540-602 (anti-joins) |
+| otp_codes | ✅ | ✅ | ✅ | — | S: AuthFunctions.cs:62,99-102; I: :67-74; U: fetch-mutate :110-116 |
+| reconcile_apply_plan | ✅ | — | ✅ | — | S: ReconcileFunctions.cs:89-92,141-144,180-183; U: :161-163, :253-255 |
+| reconcile_drift | ✅ | — | — | — | ReconcileFunctions.cs:63-66 |
+| red_tests | ✅ | — | — | — | ReportsFunctions.cs:382-388,437-443 |
+| report_narratives | ✅ | — | — | — | ReportsFunctions.cs:702-708 |
+| run_metrics | ✅ | — | — | — | ChecksFunctions.cs:399; ReportsFunctions.cs:592,614 |
+| run_requests | ✅ | ✅ | — | — | S: ChecksRunFunctions.cs:62; I: :52-55 |
+| run_steps | ✅ | — | — | — | RunsFunctions.cs:31 |
+| runs | ✅ | — | — | — | ChecksFunctions.cs:78-377, ArtifactsFunctions.cs:40-94, ReportsFunctions.cs (many), StatusFunctions.cs:39, SpecsFunctions.cs:48-57 |
+| sessions | ✅ | ✅ | ✅ | — | S: AuthPrincipalService.cs:42-43; I: AuthFunctions.cs:125-132; U: :150-151 (LastUsedAt), :169-170 (RevokedAt) |
+| sla_availability_{24h,7d,30d,90d} (views) | ✅ | — | — | — | SlaFunctions.cs:30-42 (allowlisted `FromSqlRaw`), StatusFunctions.cs:46 |
+| spec_catalog | ✅ | — | — | — | SpecsFunctions.cs:36-63 |
+| tag_routes | ✅ | ✅ | — | ✅ | S: RoutingFunctions.cs:37,169; I: :163; D: :162 |
+| test_send_requests | ✅ | ✅ | — | — | S: ChannelTestFunctions.cs:69; I: :46-47 |
+
+Plus `SELECT 1` (no table) — HealthFunctions.cs:34.
+
+**Postgres functions requiring EXECUTE (OBSERVED):** `slo_status(check_id, from, to)` — ChecksFunctions.cs:180, ReportsFunctions.cs:153; `slo_burn_status(check_id)` — ReportsFunctions.cs:156.
+
+**Sequences (INFERRED):** 10 insert-target tables have DB-generated ids (`ValueGeneratedOnAdd` in the DbContext): checks, channels, alert_routes, tag_routes, test_send_requests, run_requests, otp_codes, sessions, access_requests, audit_log. If the runner's migrations declare these `serial`/`bigserial`, the API role needs `USAGE` on each `<table>_id_seq` ("permission denied for sequence" otherwise); if `GENERATED … AS IDENTITY`, table INSERT suffices — identity sequences are internal dependencies and need no separate grant (verified: [postgresql.org identity-columns docs](https://www.postgresql.org/docs/current/ddl-identity-columns.html)). Which form applies is decided in the runner repo's migrations — **not verifiable from this side** (OPEN QUESTION §7).
+
+### 3.2 What the CI gate checks (`.github/workflows/grant-coverage.yml`)
+
+- **`scripts/check-grant-coverage.mjs`** — Azure RBAC plane only: statically parses `infra/main.bicep` role assignments for the function app's MI and compares the `(roleId@scope)` set exactly (both directions) against `infra/required-grants.json → azureRbac`. No table×verb relevance.
+- **`scripts/check-pg-grant-coverage.mjs`** — Postgres plane:
+  - REQUIRED = `infra/required-grants.json → postgres.writes` (hand-maintained write allowlist; SELECT deliberately excluded, assumed covered by an ops-side `ALTER DEFAULT PRIVILEGES` per the manifest comment).
+  - GRANTED = regex `GRANT <privs> ON <tables> TO "synthwatch-api"` over the **runner repo's** `db/migrations/*.sql` (checked out in the workflow), UNIONed with `postgres.opsBaseline` (currently `checks: INSERT,UPDATE,DELETE`).
+  - Fails if any required (table, priv) is granted nowhere.
+  - Secondary auto-catch: regex-scans this repo's `.cs` for `INSERT INTO / DELETE FROM / UPDATE … SET` — **after neutralizing `DO UPDATE SET` → `DO_CONFLICT` (script line 96)** — and fails if a raw-write table isn't in `postgres.writes`. Table membership only; verbs are not compared.
+
+### 3.3 Gap analysis — what the gate cannot see from this side
+
+1. **[MAJOR, CONFIRMED] `check_tags` UPDATE is required by code and structurally invisible to every CI layer.** Falsification run on all three legs: (i) `TagsFunctions.cs:80-84` is `INSERT … ON CONFLICT (check_id, key) DO UPDATE SET value = EXCLUDED.value` (OBSERVED); (ii) PostgreSQL requires UPDATE privilege on the updated column(s) when `ON CONFLICT DO UPDATE` is present (official docs: [postgresql.org/docs/current/sql-insert.html](https://www.postgresql.org/docs/current/sql-insert.html)); (iii) `infra/required-grants.json:95` lists `check_tags: ["INSERT","DELETE"]` — no UPDATE — and the scanner's `DO UPDATE SET` neutralization removes the only syntactic evidence, so the table passes on INSERT membership alone (OBSERVED script line 96). The Testcontainers suite runs as superuser, so tests can't catch it either. **Whether prod actually grants UPDATE on check_tags is unknowable from this repo** (runner migrations out of scope for this session) — if it doesn't, the first `PUT /checks/{id}/tags` that re-values an existing key 500s. OPEN QUESTION §7; the manifest fix (add `"UPDATE"`) is 1 word.
+2. **Runner-emitted SQL executed verbatim is unscannable.** `ReconcileFunctions.cs:289-296, :324-334` execute plan `text` fetched from `reconcile_apply_plan` via raw `DbCommand` — `UPDATE checks SET …` strings that exist only in the database, never in C# source (corroborated independently: the `latest-all` analyzer run flags exactly these two sites as CA2100 "review query string passed to DbCommand.CommandText", §5). Covered today only because `checks: UPDATE` sits in `opsBaseline`; a future plan touching another table is invisible to the scanner.
+3. **EF change-tracking writes are invisible by design** (acknowledged in the manifest comment): all Add/Remove/fetch-mutate+SaveChanges writes (channels UPDATE, otp_codes UPDATE, sessions UPDATE, checks PATCH/soft-delete, every Add/Remove) rely on the hand-maintained allowlist. A new EF write to a new table merges silently unless someone updates the manifest.
+4. **Sequences are unmodeled.** No privilege vocabulary beyond the 4 DML verbs; the migration parser drops non-DML privileges and can't match `ALL SEQUENCES IN SCHEMA`. If any id column is `serial`, a missing `USAGE` 500s every insert with no CI signal.
+5. **Function EXECUTE is unmodeled.** `slo_status`/`slo_burn_status` need EXECUTE; the migration parser deliberately skips `GRANT … ON FUNCTION`, and `postgres.writes` has no function slot. A missing EXECUTE breaks `GET /checks/{id}`, `/reports/slo`, `/reports/trust` paths.
+6. **SELECT coverage is asserted nowhere.** All 15+ read-only tables/views rest on an `ALTER DEFAULT PRIVILEGES` claim in a JSON comment, never verified by CI — and default privileges only apply to objects created after they're set, by the role they're set for. The code already anticipates one such failure (`deploys` 42P01 guard); the other 14 would 500.
+7. **Scanner regex blind spots (latent, none currently triggered):** schema-qualified/quoted table names, concatenated SQL, `MERGE`, and files outside `Functions/`, `Infrastructure/`, `Data/`.
+
+**Inverse check (gate entries the code no longer uses): none.** Every `postgres.writes` row matched live code in §3.1. The manifest is allowlist-accurate except the missing `check_tags: UPDATE`.
