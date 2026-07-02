@@ -60,15 +60,8 @@ public class LocationsFunctions
         long id,
         CancellationToken ct)
     {
-        SetLocationsRequest? body;
-        try
-        {
-            body = await req.ReadFromJsonAsync<SetLocationsRequest>(ct);
-        }
-        catch (JsonException)
-        {
-            return ApiResults.BadRequest("Request body is not valid JSON.");
-        }
+        var (body, bodyError) = await RequestJson.ReadAsync<SetLocationsRequest>(req, ct);
+        if (bodyError is not null) return bodyError;
         if (body is null)
             return ApiResults.BadRequest("Request body is required.");
 

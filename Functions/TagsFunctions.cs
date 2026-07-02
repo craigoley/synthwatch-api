@@ -46,15 +46,8 @@ public class TagsFunctions
         long id,
         CancellationToken ct)
     {
-        SetTagsRequest? body;
-        try
-        {
-            body = await req.ReadFromJsonAsync<SetTagsRequest>(ct);
-        }
-        catch (JsonException)
-        {
-            return ApiResults.BadRequest("Request body is not valid JSON.");
-        }
+        var (body, bodyError) = await RequestJson.ReadAsync<SetTagsRequest>(req, ct);
+        if (bodyError is not null) return bodyError;
         if (body is null) return ApiResults.BadRequest("Request body is required.");
         // Guard (per the routing-PUT hardening): a missing/unrecognized `tags` key deserializes to null;
         // reject rather than wiping. An explicit empty array clears.

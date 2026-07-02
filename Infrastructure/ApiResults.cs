@@ -22,6 +22,13 @@ public static class ApiResults
     public static IActionResult BadRequest(string message) =>
         new BadRequestObjectResult(ProblemResults.Body(StatusCodes.Status400BadRequest, "Bad Request", message, RequestCorrelation.Current, "bad_request")) { ContentTypes = { ProblemResults.ContentType } };
 
+    /// <summary>415 — the request body's Content-Type isn't JSON. Explicit + clean: <c>ReadFromJsonAsync</c>
+    /// throws <c>InvalidOperationException</c> (NOT the <c>JsonException</c> handlers catch) on a wrong content
+    /// type, which otherwise fell through to a shielded 500.</summary>
+    public static IActionResult UnsupportedMediaType(string message) =>
+        new ObjectResult(ProblemResults.Body(StatusCodes.Status415UnsupportedMediaType, "Unsupported Media Type", message, RequestCorrelation.Current, "unsupported_media_type"))
+            { StatusCode = StatusCodes.Status415UnsupportedMediaType, ContentTypes = { ProblemResults.ContentType } };
+
     public static IActionResult Conflict(string message) =>
         new ConflictObjectResult(ProblemResults.Body(StatusCodes.Status409Conflict, "Conflict", message, RequestCorrelation.Current, "conflict")) { ContentTypes = { ProblemResults.ContentType } };
 

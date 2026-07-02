@@ -41,6 +41,37 @@ public class ParseIntentTests
         Assert.IsType<ParseIntentDto>(Assert.IsType<OkObjectResult>(
             await new ParseIntentFunctions(aoai).ParseMonitorIntent(TextReq(text), default)).Value!);
 
+    private static HttpRequest RawReq(string? contentType, string body)
+    {
+        var ctx = new DefaultHttpContext();
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Request.Body = new MemoryStream(bytes);
+        ctx.Request.ContentLength = bytes.Length;
+        if (contentType is not null) ctx.Request.ContentType = contentType;
+        return ctx.Request;
+    }
+
+    // ── ★ CONTENT-TYPE GATE (the fix): a non-JSON body is a clean 415, never a shielded 500. Before the fix
+    //    ReadFromJsonAsync threw InvalidOperationException (NOT the caught JsonException) on a wrong content
+    //    type → this handler would THROW here rather than return 415 (the must-go-red). A JSON content type
+    //    with a malformed body stays the existing 400. FakeAoai is Configured=true so the body IS parsed. ──
+    [Fact]
+    public async Task Non_json_content_type_is_415_not_500()
+    {
+        var text = await new ParseIntentFunctions(new FakeAoai()).ParseMonitorIntent(RawReq("text/plain", "hello"), default);
+        Assert.Equal(415, Assert.IsType<ObjectResult>(text).StatusCode);
+
+        var none = await new ParseIntentFunctions(new FakeAoai()).ParseMonitorIntent(RawReq(null, "hello"), default);
+        Assert.Equal(415, Assert.IsType<ObjectResult>(none).StatusCode);   // missing Content-Type → 415 too
+    }
+
+    [Fact]
+    public async Task Malformed_json_is_still_400()
+    {
+        var res = await new ParseIntentFunctions(new FakeAoai()).ParseMonitorIntent(RawReq("application/json", "not json"), default);
+        Assert.Equal(400, Assert.IsType<BadRequestObjectResult>(res).StatusCode);
+    }
+
     // ── the validation cases ──
     [Fact]
     public async Task Ping_request_prefills_tcp_reachability_kind()

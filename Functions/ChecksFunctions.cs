@@ -187,15 +187,8 @@ public class ChecksFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "checks")] HttpRequest req,
         CancellationToken ct)
     {
-        CreateCheckRequest? body;
-        try
-        {
-            body = await req.ReadFromJsonAsync<CreateCheckRequest>(ct);
-        }
-        catch (JsonException)
-        {
-            return ApiResults.BadRequest("Request body is not valid JSON.");
-        }
+        var (body, bodyError) = await RequestJson.ReadAsync<CreateCheckRequest>(req, ct);
+        if (bodyError is not null) return bodyError;
 
         if (body is null)
             return ApiResults.BadRequest("Request body is required.");
@@ -256,15 +249,8 @@ public class ChecksFunctions
         long id,
         CancellationToken ct)
     {
-        UpdateCheckRequest? body;
-        try
-        {
-            body = await req.ReadFromJsonAsync<UpdateCheckRequest>(ct);
-        }
-        catch (JsonException)
-        {
-            return ApiResults.BadRequest("Request body is not valid JSON.");
-        }
+        var (body, bodyError) = await RequestJson.ReadAsync<UpdateCheckRequest>(req, ct);
+        if (bodyError is not null) return bodyError;
 
         if (body is null)
             return ApiResults.BadRequest("Request body is required.");

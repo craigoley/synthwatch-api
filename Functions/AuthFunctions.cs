@@ -237,6 +237,10 @@ public class AuthFunctions
 
     private static async Task<T?> ReadBodyAsync<T>(HttpRequest req) where T : class
     {
+        // A non-JSON Content-Type makes ReadFromJsonAsync throw InvalidOperationException (NOT JsonException) →
+        // a shielded 500. Guard it: a non-JSON or malformed body is treated as an ABSENT body → null, which
+        // every caller maps to a uniform 400 (the enumeration-safe posture — never leak request-shape detail).
+        if (!req.HasJsonContentType()) return null;
         try { return await req.ReadFromJsonAsync<T>(); }
         catch (JsonException) { return null; }
     }
