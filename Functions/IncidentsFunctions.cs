@@ -112,7 +112,7 @@ public class IncidentsFunctions
         // LEFT-join equivalent: the check may be gone (don't drop the incident).
         var check = await _db.Checks.AsNoTracking()
             .Where(c => c.Id == inc.CheckId)
-            .Select(c => new { c.Name, c.Kind })
+            .Select(c => new { c.Name, c.Kind, c.TargetUrl })
             .FirstOrDefaultAsync(ct);
 
         var to = inc.ResolvedAt ?? DateTimeOffset.UtcNow;
@@ -159,14 +159,82 @@ public class IncidentsFunctions
             .Select(x => new RecurrenceDto(x.Id, x.OpenedAt, x.ResolvedAt, x.Status, x.Summary))
             .ToList();
 
+        var nearbyDeploys = await NearbyDeploysAsync(check?.TargetUrl, inc.OpenedAt, ct);
+
         var detail = new IncidentDetailDto(
             inc.Id, inc.CheckId, check?.Name, check?.Kind, inc.Status, inc.Severity,
             inc.OpenedAt, inc.ResolvedAt,
             DurationSeconds: inc.ResolvedAt is null ? null : (inc.ResolvedAt.Value - inc.OpenedAt).TotalSeconds,
-            inc.ConsecutiveFailures, inc.Summary, inc.Rca, perLocation, timeline, recurrence);
+            inc.ConsecutiveFailures, inc.Summary, inc.Rca, perLocation, timeline, recurrence, nearbyDeploys);
 
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=10";
         req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(detail);
+    }
+
+    // Deploy-proximity window (ASYMMETRIC on purpose): a deploy DETECTED up to 15 min AFTER an incident opened
+    // can still have happened BEFORE it — detection lags reality (the marker is captured passively by
+    // browser-check runs, so detected_at carries poll latency, not authoritative deploy time). So we look from
+    // 60 min BEFORE opened_at to 15 min AFTER.
+    private const int DeployProximityLeadMinutes = 60;
+    private const int DeployProximityLagMinutes = 15;
+
+    /// <summary>
+    /// Deploys DETECTED near this incident on the SAME host — a possible correlation, NEVER causation
+    /// (detected_at is detection time with poll latency). Host-matched with query-side normalization (lowercase
+    /// + strip a leading "www." on BOTH sides), so an apex-host check (e.g. a wegmans.com SSL check) matches a
+    /// www.wegmans.com deploy — the runner's stored hostOf() keeps "www.", and its dedup key is runner-owned +
+    /// out of scope, so we close the gap read-side only. Empty (never null) when there are no matches — the
+    /// honest-empty state the UI renders as absence. Tolerant of the deploys table not being migrated in this
+    /// env (→ empty, never a 500). Detail endpoint only — NOT ListIncidents.
+    /// </summary>
+    private async Task<IReadOnlyList<NearbyDeployDto>> NearbyDeploysAsync(
+        string? targetUrl, DateTimeOffset openedAt, CancellationToken ct)
+    {
+        var host = NormalizeHost(targetUrl);
+        if (host.Length == 0)
+            return new List<NearbyDeployDto>();
+
+        var windowStart = openedAt.AddMinutes(-DeployProximityLeadMinutes);
+        var windowEnd = openedAt.AddMinutes(DeployProximityLagMinutes);
+
+        List<NearbyDeployRow> rows;
+        try
+        {
+            // offset_minutes is SIGNED (detected_at - opened_at): negative = detected before the incident opened.
+            // regexp_replace strips a leading "www." from the stored host so apex ↔ www match.
+            rows = await _db.NearbyDeploys.FromSql(
+                $@"SELECT d.detected_at, d.source, d.is_sha, d.sha, d.fingerprint,
+                          round(EXTRACT(EPOCH FROM (d.detected_at - {openedAt})) / 60.0)::int AS offset_minutes
+                   FROM deploys d
+                   WHERE regexp_replace(lower(d.target_host), '^www\.', '') = {host}
+                     AND d.detected_at >= {windowStart} AND d.detected_at <= {windowEnd}
+                   ORDER BY d.detected_at").AsNoTracking().ToListAsync(ct);
+        }
+        catch (Npgsql.PostgresException e) when (e.SqlState == "42P01")
+        {
+            return new List<NearbyDeployDto>(); // deploys not migrated in this env — serve empty, never a 500.
+        }
+
+        return rows
+            .Select(d => new NearbyDeployDto(
+                d.DetectedAt, d.Source, d.IsSha,
+                Sha: d.IsSha ? (d.Sha ?? "") : "", // empty unless it's a real SHA (mirrors DeployMarkerDto)
+                d.Fingerprint, d.OffsetMinutes))
+            .ToList();
+    }
+
+    /// <summary>Host for proximity matching: the URL's host (or the raw value when it isn't an absolute URL),
+    /// lowercased with a single leading "www." stripped — the SAME normalization the SQL applies to the stored
+    /// target_host, so apex and www variants match.</summary>
+    private static string NormalizeHost(string? targetUrl)
+    {
+        if (string.IsNullOrWhiteSpace(targetUrl))
+            return "";
+        var host = Uri.TryCreate(targetUrl, UriKind.Absolute, out var u) && !string.IsNullOrEmpty(u.Host)
+            ? u.Host
+            : targetUrl;
+        host = host.Trim().ToLowerInvariant();
+        return host.StartsWith("www.", StringComparison.Ordinal) ? host["www.".Length..] : host;
     }
 }

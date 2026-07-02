@@ -52,6 +52,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<StatusSlaRow> StatusSla => Set<StatusSlaRow>();
     public DbSet<StatusIncidentRow> StatusIncidents => Set<StatusIncidentRow>();
     public DbSet<DeployRow> Deploys => Set<DeployRow>();
+    public DbSet<NearbyDeployRow> NearbyDeploys => Set<NearbyDeployRow>();
     public DbSet<ReconcileDriftRow> ReconcileDrift => Set<ReconcileDriftRow>();
     public DbSet<ReconcileApplyPlanRow> ReconcileApplyPlan => Set<ReconcileApplyPlanRow>();
     public DbSet<SpecCatalogRow> SpecCatalog => Set<SpecCatalogRow>();
@@ -525,6 +526,20 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.IsSha).HasColumnName("is_sha");
             e.Property(x => x.Source).HasColumnName("source");
             e.Property(x => x.DeployedAt).HasColumnName("deployed_at");
+        });
+
+        // Keyless: the incident-detail deploy-proximity annotation (deploys detected near an incident +
+        // a computed signed minute offset), raw SQL only.
+        modelBuilder.Entity<NearbyDeployRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.DetectedAt).HasColumnName("detected_at");
+            e.Property(x => x.Source).HasColumnName("source");
+            e.Property(x => x.IsSha).HasColumnName("is_sha");
+            e.Property(x => x.Sha).HasColumnName("sha");
+            e.Property(x => x.Fingerprint).HasColumnName("fingerprint");
+            e.Property(x => x.OffsetMinutes).HasColumnName("offset_minutes");
         });
 
         // Keyless: GET /reports/egress — per-(location, egress_ip) roll-up from runs (0054), raw SQL only.
