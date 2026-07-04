@@ -2,6 +2,18 @@
 
 Rules Claude should follow when working in this repo.
 
+## Auth gate decision rule (copy this when adding an endpoint)
+
+**Mutating verb (POST/PUT/PATCH/DELETE)?** Do nothing — the middleware verb-gate covers it automatically
+(fail-closed: editor/admin session required; `/editors*`/`/access-requests*` are admin-floor in the gate;
+`/auth/logout` is session-floor). **GET that serves credentials, forensic artifacts, or operator config?**
+Add a handler self-guard with the `RequireSessionAsync` pattern (#154) — the verb-gate never sees reads.
+**User management or anything that must hold even mid-rollout?** Make the handler guard ignore the flag
+(the Editors pattern). `AUTH_ENFORCEMENT_ENABLED` exists for **deploy safety only**: it is FAIL-CLOSED
+(ON unless explicitly `false`/`0`), turning it off opens every write, all paid-AOAI endpoints, and
+reconcile/apply at once, and startup logs a warning while it is off — never design an endpoint's security
+around the flag being off.
+
 ## Lessons from 2026-06-29
 
 - **The runner (synthwatch repo) OWNS the DB schema + migrations; this API serves reads/writes against it.** API entity/DbContext changes must match columns the runner's migrations create, and any validation gate should MIRROR the runner's canonical rule (`reconcile.ts`, `tags.ts`, `locations.ts`) exactly — as a shared pure helper with a cross-ref comment + predicate-parity `[InlineData]` tests so the two stay in sync. *(from #114 — `CheckValidation.SensitiveNeedsRedaction` mirrors `reconcile.ts:181`; same pattern as the setCheckTags/setCheckLocations mirrors and the "cross-repo contract fix" commits)*

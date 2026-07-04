@@ -24,12 +24,17 @@ public sealed class AuthorizationMiddleware : IFunctionsWorkerMiddleware
 
     public AuthorizationMiddleware(ILogger<AuthorizationMiddleware> logger) => _logger = logger;
 
-    /// <summary>The master switch. DEFAULT OFF — only "true"/"1" turns enforcement on.</summary>
-    public static bool EnforcementEnabled()
-    {
-        var v = Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED");
-        return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
-    }
+    /// <summary>The master switch. ★ FAIL-CLOSED: enforcement is ON unless AUTH_ENFORCEMENT_ENABLED is
+    /// EXPLICITLY "false"/"0". Unset, empty, or unrecognized values all mean ON — a fresh environment that
+    /// forgets the setting comes up enforcing, never silently open (the pre-handoff default-OFF posture meant
+    /// one missing app setting opened every write, all three paid-AOAI endpoints, and reconcile/apply).
+    /// Turning it OFF is a deliberate, temporary, deploy-safety act — and Program.cs logs loudly when it is.</summary>
+    public static bool EnforcementEnabled() =>
+        EnforcementEnabled(Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED"));
+
+    /// <summary>Pure parse (unit-testable without touching process env): OFF only for explicit "false"/"0".</summary>
+    public static bool EnforcementEnabled(string? raw) =>
+        !(string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase) || raw == "0");
 
     public async Task Invoke(FunctionContext context, FunctionExecutionDelegate next)
     {
