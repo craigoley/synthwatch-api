@@ -117,10 +117,18 @@ public class IncidentsFunctions
 
         var to = inc.ResolvedAt ?? DateTimeOffset.UtcNow;
 
-        // Core window: runs during the incident.
-        var core = await _db.Runs.AsNoTracking()
-            .Where(r => r.CheckId == inc.CheckId && r.StartedAt >= inc.OpenedAt && r.StartedAt <= to)
+        // Core window: runs during the incident — NEWEST-first with a hard cap. An OPEN incident's window is
+        // otherwise unbounded (a 10-day 60s-cadence incident ≈ 14,400 rows; a real capture measured 2,309
+        // rows / 765KB of JSON — the page the on-call engineer needs most is the one that must not be huge).
+        // The count is separate so the response can say "showing newest 500 of N".
+        var coreWindow = _db.Runs.AsNoTracking()
+            .Where(r => r.CheckId == inc.CheckId && r.StartedAt >= inc.OpenedAt && r.StartedAt <= to);
+        var totalRuns = await coreWindow.LongCountAsync(ct);
+        var core = await coreWindow
+            .OrderByDescending(r => r.StartedAt).ThenByDescending(r => r.Id)
+            .Take(TimelineRunCap)
             .ToListAsync(ct);
+        var truncated = totalRuns > core.Count;
 
         // Lead: the failure streak just before opened_at (cap 10) — cheap context for the page.
         var leadCount = Math.Clamp(inc.ConsecutiveFailures, 0, 10);
@@ -141,7 +149,9 @@ public class IncidentsFunctions
         // location, derived from `core` (the same window the timeline uses). For a RESOLVED incident
         // this is the per-location state as of the incident (not now); for an OPEN incident `to` = now()
         // so it tracks the live state. (Previously this used the latest run per location across ALL time,
-        // so a resolved incident's panel showed the present, not the incident.) Coalesce a null/empty
+        // so a resolved incident's panel showed the present, not the incident.) When the timeline is
+        // truncated, `core` is the newest cap — the LATEST in-window run per location is inside that newest
+        // slice for any location still running, so the panel stays correct. Coalesce a null/empty
         // location to "default" (the runs.location DEFAULT) — matching RunDto/TimelineEntryDto — so a
         // null never becomes its own bogus group. Reuses `core`, so no extra query.
         var perLocation = core
@@ -165,7 +175,8 @@ public class IncidentsFunctions
             inc.Id, inc.CheckId, check?.Name, check?.Kind, inc.Status, inc.Severity,
             inc.OpenedAt, inc.ResolvedAt,
             DurationSeconds: inc.ResolvedAt is null ? null : (inc.ResolvedAt.Value - inc.OpenedAt).TotalSeconds,
-            inc.ConsecutiveFailures, inc.Summary, inc.Rca, perLocation, timeline, recurrence, nearbyDeploys);
+            inc.ConsecutiveFailures, inc.Summary, inc.Rca, perLocation, timeline, recurrence, nearbyDeploys,
+            totalRuns, truncated);
 
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=10";
         req.HttpContext.Response.Headers["Vary"] = "Origin";
@@ -176,6 +187,10 @@ public class IncidentsFunctions
     // can still have happened BEFORE it — detection lags reality (the marker is captured passively by
     // browser-check runs, so detected_at carries poll latency, not authoritative deploy time). So we look from
     // 60 min BEFORE opened_at to 15 min AFTER.
+    // ★ Hard cap on timeline entries served per incident (newest-first). Named so the dashboard copy
+    // ("showing newest 500 of N") and the API agree in one place. See IncidentDetailDto.TotalRuns/Truncated.
+    private const int TimelineRunCap = 500;
+
     private const int DeployProximityLeadMinutes = 60;
     private const int DeployProximityLagMinutes = 15;
 

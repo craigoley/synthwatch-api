@@ -155,7 +155,13 @@ public record IncidentDetailDto(
     IReadOnlyList<RecurrenceDto> Recurrence,
     // ★ Deploys DETECTED near this incident on the same host — possible correlation, NEVER causation. Empty
     // when none (honest-empty; the UI renders absence, never a fabricated row). Detail endpoint only.
-    IReadOnlyList<NearbyDeployDto> NearbyDeploys);
+    IReadOnlyList<NearbyDeployDto> NearbyDeploys,
+    // ★ Timeline truncation contract: TotalRuns = how many runs fall in the incident window [opened_at, to]
+    // (the lead streak is NOT counted); Truncated = the timeline carries only the NEWEST cap of them. The
+    // two together let the dashboard render "showing newest N of TotalRuns" — and keep honest-empty
+    // (TotalRuns=0, Truncated=false) distinguishable from honest-truncated.
+    long TotalRuns,
+    bool Truncated);
 
 /// <summary>
 /// A deploy DETECTED near an incident (same host, inside the proximity window). ★ CORRELATION, NOT CAUSATION:
