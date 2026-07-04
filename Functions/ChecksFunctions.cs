@@ -14,8 +14,15 @@ namespace SynthWatch.Api.Functions;
 public class ChecksFunctions
 {
     private readonly SynthWatchDbContext _db;
+    private readonly IAuthPrincipal? _auth;
 
-    public ChecksFunctions(SynthWatchDbContext db) => _db = db;
+    // _auth is optional for test convenience only — DI always injects it (registered scoped in Program.cs);
+    // the SessionReadGate field-gating it feeds is inert when enforcement is off (the test baseline).
+    public ChecksFunctions(SynthWatchDbContext db, IAuthPrincipal? auth = null)
+    {
+        _db = db;
+        _auth = auth;
+    }
 
     // Per-check dashboard-parity metrics, ported verbatim from the dashboard's old route
     // handler (lateral joins on the runs_check_started_idx hot path). Parameterless — only
@@ -109,18 +116,26 @@ public class ChecksFunctions
 
         var emptyRollup = (IReadOnlyList<LocationStatusDto>)Array.Empty<LocationStatusDto>();
         var emptyTags = (IReadOnlyList<TagDto>)Array.Empty<TagDto>();
+        // request_headers readback is session-only: validation never scans RequestHeaders for secrets (only
+        // Auth is references-only), so anonymous readers get the check WITHOUT them. Field-level gate — the
+        // list itself stays open (status/metrics are the public surface); same floor as SessionReadGate.
+        var showHeaders = await SessionReadGate.HasWriteSessionAsync(_auth, req, ct);
         var result = checks.Select(c => CheckSummaryDto.From(
             c,
             latestByCheck.GetValueOrDefault(c.Id),
             metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty),
             rollupByCheck.GetValueOrDefault(c.Id, emptyRollup),
-            tagsByCheck.GetValueOrDefault(c.Id, emptyTags)));
+            tagsByCheck.GetValueOrDefault(c.Id, emptyTags)))
+            .Select(dto => showHeaders ? dto : dto with { RequestHeaders = null });
 
         // Short cache so the dashboard's polling doesn't hit the DB every tick; current status
-        // moves run-to-run, so keep it brief (10s). Vary on Origin since platform CORS echoes a
-        // per-origin Access-Control-Allow-Origin and these responses are publicly cacheable.
+        // moves run-to-run, so keep it brief (10s). The body is now SESSION-DEPENDENT (request_headers are
+        // field-gated above), so Vary MUST include Authorization: an anonymous request (no header) and a
+        // session request (Bearer …) get distinct shared-cache keys, so a shared cache can never serve an
+        // editor's header-bearing body to an anonymous caller. Vary on Origin too (platform CORS echoes a
+        // per-origin Access-Control-Allow-Origin). The common anonymous poll still caches publicly.
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=10";
-        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        req.HttpContext.Response.Headers["Vary"] = "Origin, Authorization";
         return ApiResults.Ok(result);
     }
 
@@ -141,7 +156,11 @@ public class ChecksFunctions
             .Take(20)
             .ToListAsync(ct);
 
-        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct), await BuildSloAsync(id, check.SloTarget, ct)));
+        var dto = CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct), await BuildSloAsync(id, check.SloTarget, ct));
+        // request_headers readback is session-only (see ListChecks) — the detail itself stays open.
+        if (!await SessionReadGate.HasWriteSessionAsync(_auth, req, ct))
+            dto = dto with { RequestHeaders = null };
+        return ApiResults.Ok(dto);
     }
 
     // SLO error-budget + burn. Mirrors the SLA function-read pattern (keyless entity + raw SQL),

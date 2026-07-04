@@ -14,9 +14,10 @@ namespace SynthWatch.Api.Infrastructure;
 /// the exception-shielding middleware, so a session-lookup error bubbles to it → a shielded 500 = DENIED
 /// (fail-closed; an auth error is never an open door).
 ///
-/// ★ FLAG-GATED: inert unless AUTH_ENFORCEMENT_ENABLED is true (default OFF). Off → every request passes as
-/// today (deploy-safe: this can ship before the dashboard sends tokens, slice 3). On → mutating verbs require
-/// a valid editor/admin session (except the login/access allowlist), and every authorized mutation is audited.
+/// ★ FAIL-CLOSED FLAG: enforcement is ON unless AUTH_ENFORCEMENT_ENABLED is explicitly "false"/"0" (see
+/// EnforcementEnabled). Explicitly off → every request passes (a temporary deploy-safety state; startup logs a
+/// warning). On → mutating verbs require a valid editor/admin session (except the login/access allowlist and
+/// the logout session-floor), and every authorized mutation is audited.
 /// </summary>
 public sealed class AuthorizationMiddleware : IFunctionsWorkerMiddleware
 {

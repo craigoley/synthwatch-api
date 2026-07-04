@@ -3189,6 +3189,95 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Read_gate_sweep_channels_reconcile_and_request_headers_require_a_session()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        const string tok = "swt_readgate_editor", ghostTok = "swt_readgate_ghost";
+        // One channel WITH an authHeader (the live-credential class the write-side validation deliberately
+        // allows), one check WITH request_headers, one drift row + one plan row (runner-emitted SQL text).
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ BEGIN
+              INSERT INTO channels (name, type, config, enabled)
+                VALUES ('readgate-hook','webhook', jsonb_build_object('url','https://hook.example','authHeader','Bearer hook-secret'), true);
+              INSERT INTO checks (name, kind, target_url, request_headers)
+                VALUES ('readgate-check','http','https://h.example', jsonb_build_object('X-Api-Key','hdr-secret'));
+              INSERT INTO reconcile_drift (source_key, drift_type, detail, detected_at)
+                VALUES ('readgate.spec','changed', jsonb_build_object('before', jsonb_build_object('u','a'), 'after', jsonb_build_object('u','b')), now());
+              INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan, computed_at)
+                VALUES ('readgate.spec','changed','pending',
+                        jsonb_build_object('summary','s','statements', jsonb_build_array(jsonb_build_object('purpose','p','text','UPDATE checks SET target_url=$2 WHERE source_key=$1'))), now());
+              INSERT INTO editors (email, added_by) VALUES ('user@readgate.test','system');
+            END $$;
+            """);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(tok)}, 'user@readgate.test', now() + interval '1 hour')");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(ghostTok)}, 'ghost@readgate.test', now() + interval '1 hour')");
+
+        var cid = await db.Checks.Where(c => c.Name == "readgate-check").Select(c => c.Id).FirstAsync();
+        var auth = new AuthPrincipalService(db);
+        var channels = new ChannelsFunctions(db, audit: null, auth: auth);
+        var reconcile = new ReconcileFunctions(db, new FakeRunnerJobTrigger(),
+            Microsoft.Extensions.Options.Options.Create(new SynthWatch.Api.Infrastructure.RunnerJobOptions()), auth);
+        var checks = new ChecksFunctions(db, auth);
+
+        var prior = Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED");
+        try
+        {
+            // ── MUST-GO-RED baseline: enforcement OFF → all three reads are OPEN and request_headers serve
+            //    to anonymous callers (the pre-fix behavior — proves the gate is what closes them). ──
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "false");
+            Assert.IsType<OkObjectResult>(await channels.GetChannels(AuthReq(), default));
+            Assert.IsType<OkObjectResult>(await reconcile.GetReconcilePlan(AuthReq(), default));
+            var openDetail = Assert.IsType<CheckDetailDto>(((OkObjectResult)await checks.GetCheck(AuthReq(), cid, default)).Value);
+            Assert.NotNull(openDetail.RequestHeaders);
+
+            // ── ENFORCEMENT ON → anonymous 401 on channels + reconcile plan/drift (the #154 pattern). ──
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "true");
+            Assert.IsType<UnauthorizedObjectResult>(await channels.GetChannels(AuthReq(), default));
+            Assert.IsType<UnauthorizedObjectResult>(await reconcile.GetReconcilePlan(AuthReq(), default));
+            Assert.IsType<UnauthorizedObjectResult>(await reconcile.GetReconcileDrift(AuthReq(), default));
+
+            // ── ROLE FLOOR: a still-valid session whose live role was revoked → 403 (mirrors the write-gate). ──
+            Assert.Equal(403, StatusOf(await channels.GetChannels(AuthReq(ghostTok), default)));
+            Assert.Equal(403, StatusOf(await reconcile.GetReconcilePlan(AuthReq(ghostTok), default)));
+
+            // ── EDITOR session → served; and the gated reconcile responses are never publicly cacheable. ──
+            Assert.IsType<OkObjectResult>(await channels.GetChannels(AuthReq(tok), default));
+            var planReq = AuthReq(tok);
+            Assert.IsType<OkObjectResult>(await reconcile.GetReconcilePlan(planReq, default));
+            Assert.Equal("no-store", planReq.HttpContext.Response.Headers.CacheControl.ToString());
+            var driftReq = AuthReq(tok);
+            Assert.IsType<OkObjectResult>(await reconcile.GetReconcileDrift(driftReq, default));
+            Assert.Equal("no-store", driftReq.HttpContext.Response.Headers.CacheControl.ToString());
+
+            // ── FIELD GATE: check detail/list stay open, but request_headers serve ONLY to a session. ──
+            var anonDetail = Assert.IsType<CheckDetailDto>(((OkObjectResult)await checks.GetCheck(AuthReq(), cid, default)).Value);
+            Assert.Null(anonDetail.RequestHeaders);                      // anonymous: stripped, endpoint still 200
+            var editorDetail = Assert.IsType<CheckDetailDto>(((OkObjectResult)await checks.GetCheck(AuthReq(tok), cid, default)).Value);
+            Assert.Equal("hdr-secret", editorDetail.RequestHeaders!["X-Api-Key"]); // session: verbatim
+            var listReq = AuthReq();
+            var anonList = ((IEnumerable<CheckSummaryDto>)((OkObjectResult)await checks.ListChecks(listReq, default)).Value!).ToList();
+            Assert.All(anonList, dto => Assert.Null(dto.RequestHeaders)); // list summaries stripped too
+            // The list body is now session-dependent, so its shared-cache key MUST include Authorization —
+            // otherwise a shared cache could serve an editor's header-bearing body to an anonymous caller.
+            Assert.Equal("Origin, Authorization", listReq.HttpContext.Response.Headers["Vary"].ToString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", prior);
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email IN ('user@readgate.test','ghost@readgate.test'); " +
+                "DELETE FROM editors WHERE email = 'user@readgate.test'; " +
+                "DELETE FROM reconcile_apply_plan WHERE source_key = 'readgate.spec'; " +
+                "DELETE FROM reconcile_drift WHERE source_key = 'readgate.spec'; " +
+                "DELETE FROM channels WHERE name = 'readgate-hook'; " +
+                "DELETE FROM checks WHERE name = 'readgate-check';");
+        }
+    }
+
+    [SkippableFact]
     public async Task AiInsights_returns_retryable_unavailable_on_a_transient_blob_error()
     {
         RequireDocker();
