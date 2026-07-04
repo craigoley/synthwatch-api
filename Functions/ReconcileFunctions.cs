@@ -23,11 +23,15 @@ public class ReconcileFunctions
     private readonly IRunnerJobTrigger _trigger;
     private readonly RunnerJobOptions _jobOptions;
 
-    public ReconcileFunctions(SynthWatchDbContext db, IRunnerJobTrigger trigger, IOptions<RunnerJobOptions> jobOptions)
+    private readonly IAuthPrincipal? _auth;
+
+    // _auth optional for test convenience only — DI always injects it; the read gate is inert flag-off.
+    public ReconcileFunctions(SynthWatchDbContext db, IRunnerJobTrigger trigger, IOptions<RunnerJobOptions> jobOptions, IAuthPrincipal? auth = null)
     {
         _db = db;
         _trigger = trigger;
         _jobOptions = jobOptions.Value;
+        _auth = auth;
     }
 
     /// <summary>
@@ -60,6 +64,10 @@ public class ReconcileFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reconcile/drift")] HttpRequest req,
         CancellationToken ct)
     {
+        // Session-gated read (#154 pattern): drift detail carries verbatim before/after config diffs.
+        if (await SessionReadGate.RequireSessionAsync(_auth, req, ct) is { } denied)
+            return denied;
+
         var rows = await _db.ReconcileDrift.FromSql(
             $@"SELECT source_key, drift_type, detail::text AS detail, detected_at
                FROM reconcile_drift
@@ -71,8 +79,9 @@ public class ReconcileFunctions
         // The latest detected_at = when the last reconcile ran; null when there's no drift.
         DateTimeOffset? detectedAt = rows.Count == 0 ? null : rows.Max(r => r.DetectedAt);
 
-        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
-        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        // Session-gated response: never publicly cacheable (a shared cache must not serve one caller's
+        // gated body to another; the old public,max-age=30 predates the gate).
+        req.HttpContext.Response.Headers.CacheControl = "no-store";
         return ApiResults.Ok(new ReconcileDriftDto(items, detectedAt));
     }
 
@@ -86,6 +95,11 @@ public class ReconcileFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reconcile/plan")] HttpRequest req,
         CancellationToken ct)
     {
+        // Session-gated read (#154 pattern): the plan carries the verbatim runner-emitted SQL (statement
+        // text + values, incl. redact-pattern config) that /reconcile/apply executes.
+        if (await SessionReadGate.RequireSessionAsync(_auth, req, ct) is { } denied)
+            return denied;
+
         var rows = await _db.ReconcileApplyPlan.FromSql(
             $@"SELECT source_key, drift_type, status, plan::text AS plan, computed_at
                FROM reconcile_apply_plan
@@ -96,8 +110,8 @@ public class ReconcileFunctions
 
         DateTimeOffset? computedAt = rows.Count == 0 ? null : rows.Max(r => r.ComputedAt);
 
-        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
-        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        // Session-gated response: never publicly cacheable (see GetReconcileDrift).
+        req.HttpContext.Response.Headers.CacheControl = "no-store";
         return ApiResults.Ok(new ReconcileApplyPlanDto(items, computedAt));
     }
 

@@ -52,17 +52,8 @@ public class ArtifactsFunctions
     /// these forensic reads must self-guard. Resolves the caller from the bearer via the same
     /// <see cref="IAuthPrincipal"/> the middleware uses — role derived from DB/env, never trusted from a header.
     /// </summary>
-    private async Task<IActionResult?> RequireSessionAsync(HttpRequest req, CancellationToken ct)
-    {
-        if (!AuthorizationMiddleware.EnforcementEnabled())
-            return null; // flag OFF → inert (deploy-safe; matches the rest of the security model)
-        var principal = await _auth.FromBearerAsync(req.Headers.Authorization, ct);
-        if (principal is null)
-            return ApiResults.Unauthorized("Authentication required.");        // no valid session → 401
-        if (!principal.CanWrite)
-            return ApiResults.Forbidden("You do not have permission to perform this action."); // revoked role → 403
-        return null;
-    }
+    private Task<IActionResult?> RequireSessionAsync(HttpRequest req, CancellationToken ct) =>
+        SessionReadGate.RequireSessionAsync(_auth, req, ct); // the shared #154 gate (extracted; same semantics)
 
     /// <summary>
     /// GET /api/runs/{id}/trace — streams the run's Playwright trace.zip from Blob (the API proxies

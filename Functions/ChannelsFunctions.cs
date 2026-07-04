@@ -23,18 +23,27 @@ public class ChannelsFunctions
     // is the case the audit redaction must scrub (config.url / authHeader / recipient emails).
     private readonly IAuditScope? _audit;
 
-    public ChannelsFunctions(SynthWatchDbContext db, IAuditScope? audit = null)
+    private readonly IAuthPrincipal? _auth;
+
+    // _auth optional for test convenience only — DI always injects it; the read gate is inert flag-off.
+    public ChannelsFunctions(SynthWatchDbContext db, IAuditScope? audit = null, IAuthPrincipal? auth = null)
     {
         _db = db;
         _audit = audit;
+        _auth = auth;
     }
 
-    /// <summary>GET /api/channels — all channels.</summary>
+    /// <summary>GET /api/channels — all channels. Session-gated (#154 pattern): ChannelDto carries the
+    /// channel config verbatim, and config.authHeader is a live webhook credential the write-side validation
+    /// deliberately allows — the readback must not hand it to anonymous callers.</summary>
     [Function("GetChannels")]
     public async Task<IActionResult> GetChannels(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "channels")] HttpRequest req,
         CancellationToken ct)
     {
+        if (await SessionReadGate.RequireSessionAsync(_auth, req, ct) is { } denied)
+            return denied;
+
         var channels = await _db.Channels.AsNoTracking()
             .OrderBy(c => c.Id)
             .ToListAsync(ct);
