@@ -43,21 +43,15 @@ jobs:
       - name: Checkout (synthwatch-api — the fixture + DbContext)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # The schema is OWNED by the runner repo; its migrations are the source of truth. Both repos are public,
-      # so the default token reads it. persist-credentials:false — we only read files. (Same pattern as
-      # grant-coverage.yml / trace-parity.yml.)
-      - name: Checkout runner repo (the migration source of truth)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: craigoley/synthwatch
-          path: runner-repo
-          persist-credentials: false
-
+      # NOTE: runner-column-parity (RUNNER_PARITY=1, which checks out craigoley/synthwatch and diffs shared-table
+      # columns) is DEFERRED — the runner's numbered migrations don't replay cleanly into an empty DB in filename
+      # order (0001_run_metrics references runs, created later), so it needs the runner's real replay order. The
+      # catalog-diff engine is proven below by --self-test; presence is the REQUIRED assertion for now.
       - name: Install psql client
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
 
       - name: Must-go-red — prove the catalog diff detects a dropped column
         run: bash scripts/check-schema-parity.sh --self-test
 
-      - name: Assert the fixture mirrors the runner schema
+      - name: Assert every DbContext-mapped table exists in the fixture
         run: bash scripts/check-schema-parity.sh
