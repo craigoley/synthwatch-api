@@ -1,0 +1,57 @@
+name: Schema parity
+
+# Catch the "test fixture drifted from the runner-owned schema" class at CI instead of as a silent coverage
+# hole (#129 reconcile_apply_plan) or a prod 500 (#153 lagging infra_error CHECK). Two assertions, neither of
+# which ever diffs the fixture FILE (42% is hand-appended incident-memory blocks — regenerating clobbers them):
+#   (a) DbContext presence — every table mapped in Data/SynthWatchDbContext.cs exists in the fixture.
+#   (b) Runner column parity — for tables in BOTH the runner migrations and the fixture, the fixture carries
+#       every column/constraint the runner defines (shared tables only; a runner table the API never reads is
+#       legitimately absent).
+# The self-test proves the catalog-diff engine actually goes red on a dropped column (must-go-red).
+# A failure fails ci-gate, which holds the merge.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  schema-parity:
+    name: Schema parity (fixture vs runner migrations)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pg
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5433
+      PGUSER: postgres
+      PGPASSWORD: pg
+    steps:
+      - name: Checkout (synthwatch-api — the fixture + DbContext)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # NOTE: runner-column-parity (RUNNER_PARITY=1, which checks out craigoley/synthwatch and diffs shared-table
+      # columns) is DEFERRED — the runner's numbered migrations don't replay cleanly into an empty DB in filename
+      # order (0001_run_metrics references runs, created later), so it needs the runner's real replay order. The
+      # catalog-diff engine is proven below by --self-test; presence is the REQUIRED assertion for now.
+      - name: Install psql client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Must-go-red — prove the catalog diff detects a dropped column
+        run: bash scripts/check-schema-parity.sh --self-test
+
+      - name: Assert every DbContext-mapped table exists in the fixture
+        run: bash scripts/check-schema-parity.sh

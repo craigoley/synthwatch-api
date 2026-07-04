@@ -25,6 +25,7 @@ public class AuthGateTests
         ("POST", "/api/channels/5/test"),
         ("POST", "/api/runs/5/ai-insights"),   // spends AOAI tokens → must be gated (cost control)
         ("POST", "/api/runs/5/baseline-diff"), // spends AOAI tokens → must be gated (cost control)
+        ("POST", "/api/checks/parse-intent"),  // spends AOAI tokens (chat-to-prefill) → must be gated (cost control)
         ("POST", "/api/reconcile/trigger"),    // starts the reconcile ACA job → must be gated (compute spend)
     };
 

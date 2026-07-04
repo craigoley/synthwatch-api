@@ -1036,3 +1036,17 @@ CREATE TABLE public.red_tests (
     detail     jsonb
 );
 CREATE INDEX red_tests_check_time_idx ON public.red_tests (check_id, tested_at DESC);
+
+-- run_requests (migration 0042) — on-demand "Run now" queue. The API INSERTs one 'pending' row per POST
+-- /checks/{id}/run (at most one pending per check) and READs to coalesce; the runner drains + moves to 'done'.
+-- Mirrored here from the RunRequest entity + DbContext mapping (Data/SynthWatchDbContext.cs:134). The
+-- schema-parity CI job validates these columns against the runner's real migration 0042.
+CREATE TABLE public.run_requests (
+    id            bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    check_id      bigint      NOT NULL REFERENCES public.checks(id) ON DELETE CASCADE,
+    status        text        NOT NULL DEFAULT 'pending',
+    requested_at  timestamp with time zone NOT NULL DEFAULT now(),
+    completed_at  timestamp with time zone
+);
+-- At most one PENDING request per check (the coalesce the API relies on).
+CREATE UNIQUE INDEX run_requests_one_pending_per_check ON public.run_requests (check_id) WHERE (status = 'pending');

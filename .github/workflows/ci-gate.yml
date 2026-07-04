@@ -50,7 +50,7 @@ jobs:
       # before deciding (so a slow-to-register check can't let it pass prematurely). "Claude
       # review" reports a SKIPPED run on Dependabot PRs (still present); "Test …" always runs.
       REQUIRED: >-
-        ["Test (xUnit + Testcontainers Postgres)","Claude review","Trace-signals golden parity"]
+        ["Test (xUnit + Testcontainers Postgres)","Claude review","Trace-signals golden parity","Schema parity (fixture vs runner migrations)"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; the auto-merge job
       # FAILS on a draft PR, which is benign).
       IGNORE: >-
