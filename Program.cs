@@ -3,6 +3,7 @@ using Microsoft.Azure.Functions.Worker.Builder;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Infrastructure;
@@ -70,4 +71,24 @@ builder.UseMiddleware<RequestLoggingMiddleware>();
 builder.UseMiddleware<ExceptionHandlingMiddleware>();
 builder.UseMiddleware<AuthorizationMiddleware>();
 
-builder.Build().Run();
+var host = builder.Build();
+
+// ★ Enforcement is fail-closed (ON unless AUTH_ENFORCEMENT_ENABLED is explicitly "false"/"0"). Turning it
+// OFF opens every write, all three paid-AOAI endpoints, and reconcile/apply — legitimate only as a temporary
+// deploy-safety measure, so make that state impossible to miss in the logs.
+if (!AuthorizationMiddleware.EnforcementEnabled())
+{
+    StartupLog.EnforcementOff(host.Services
+        .GetRequiredService<ILoggerFactory>()
+        .CreateLogger("SynthWatch.Api.Startup"));
+}
+
+host.Run();
+
+/// <summary>High-performance (CA1848) startup log delegates — same idiom as RequestLog/ExceptionLog.</summary>
+internal static partial class StartupLog
+{
+    [LoggerMessage(EventId = 1001, Level = LogLevel.Warning,
+        Message = "AUTH_ENFORCEMENT_ENABLED is explicitly OFF — every write, all paid-AOAI endpoints, and reconcile/apply are OPEN to anonymous callers. This is a temporary deploy-safety state only; remove the setting (or set it true) to enforce.")]
+    public static partial void EnforcementOff(ILogger logger);
+}
