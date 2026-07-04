@@ -3257,8 +3257,12 @@ public class IntegrationTests
             Assert.Null(anonDetail.RequestHeaders);                      // anonymous: stripped, endpoint still 200
             var editorDetail = Assert.IsType<CheckDetailDto>(((OkObjectResult)await checks.GetCheck(AuthReq(tok), cid, default)).Value);
             Assert.Equal("hdr-secret", editorDetail.RequestHeaders!["X-Api-Key"]); // session: verbatim
-            var anonList = ((IEnumerable<CheckSummaryDto>)((OkObjectResult)await checks.ListChecks(AuthReq(), default)).Value!).ToList();
+            var listReq = AuthReq();
+            var anonList = ((IEnumerable<CheckSummaryDto>)((OkObjectResult)await checks.ListChecks(listReq, default)).Value!).ToList();
             Assert.All(anonList, dto => Assert.Null(dto.RequestHeaders)); // list summaries stripped too
+            // The list body is now session-dependent, so its shared-cache key MUST include Authorization —
+            // otherwise a shared cache could serve an editor's header-bearing body to an anonymous caller.
+            Assert.Equal("Origin, Authorization", listReq.HttpContext.Response.Headers["Vary"].ToString());
         }
         finally
         {
