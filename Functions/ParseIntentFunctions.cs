@@ -59,6 +59,15 @@ public class ParseIntentFunctions
             TimeoutMs = s.TimeoutMs,
             CertExpiryWarnDays = s.CertExpiryWarnDays,
             NetConfig = s.NetConfig,
+            // #158: carry the request fields the model captured (http only). TryBuildNew below validates them
+            // exactly as the form does — a bad method/assertion/auth becomes a fieldError, never a silent drop.
+            Method = s.Method,
+            ExpectedStatus = s.ExpectedStatus,
+            RequestHeaders = s.RequestHeaders,
+            RequestBody = s.RequestBody,
+            BodyMustContain = s.BodyMustContain,
+            Assertions = s.Assertions,
+            Auth = s.Auth,
         };
         var valid = CheckValidation.TryBuildNew(fields, out _, out var errors);
         return ApiResults.Ok(ParseIntentDto.Parsed(fields, valid, errors, s.Notes));
