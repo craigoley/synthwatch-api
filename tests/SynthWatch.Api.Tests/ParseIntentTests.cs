@@ -113,6 +113,63 @@ public class ParseIntentTests
         Assert.True(badTarget.FieldErrors.ContainsKey("targetUrl"));
     }
 
+    // ── #158: the chat path must CARRY the request fields the user asked for (method / headers / body /
+    //    assertions), not silently drop them into a weaker or broken monitor. ──
+
+    [Fact]
+    public async Task Http_request_carries_headers_body_method_and_assertions()
+    {
+        // The 341/342 (custom headers) + 343 (POST + body) repro shape — mapped through now, not dropped.
+        var dto = await Parse(Returning("""
+            {"kind":"http","name":"algolia product search","targetUrl":"https://api.example.com/search",
+             "method":"POST","expectedStatus":200,
+             "requestHeaders":{"X-Api-Key":"k123","Content-Type":"application/json"},
+             "requestBody":"{\"query\":\"cake\"}",
+             "assertions":[{"source":"body","comparison":"contains","expected":"results"}]}
+            """), "POST https://api.example.com/search with an X-Api-Key header and body {query:cake}, assert body contains results");
+        Assert.True(dto.Valid);
+        Assert.Null(dto.Redirect);
+        Assert.Equal("POST", dto.Fields!.Method);
+        Assert.Equal("k123", dto.Fields.RequestHeaders!["X-Api-Key"]);
+        Assert.Equal("""{"query":"cake"}""", dto.Fields.RequestBody);
+        Assert.Single(dto.Fields.Assertions!);
+        Assert.Equal("body", dto.Fields.Assertions![0].Source);
+        Assert.Empty(dto.FieldErrors);
+    }
+
+    [Fact]
+    public async Task Content_check_request_carries_a_body_assertion_not_a_status_only_check()
+    {
+        // The 350/351 SILENT-WEAKER repro: a "make sure the page shows X" ask must produce the content
+        // assertion, not a trivially-green status-only monitor.
+        var dto = await Parse(Returning("""
+            {"kind":"http","name":"cake catering handoff","targetUrl":"https://www.wegmans.com/cake",
+             "bodyMustContain":"Order your cake"}
+            """), "check https://www.wegmans.com/cake shows 'Order your cake'");
+        Assert.True(dto.Valid);
+        Assert.Equal("Order your cake", dto.Fields!.BodyMustContain);
+    }
+
+    // ★ VALIDATE-DON'T-TRUST still holds for the new fields: a malformed assertion / an inline auth secret is a
+    //   visible fieldError (valid=false), NOT a silent drop and NOT a 500.
+    [Fact]
+    public async Task Malformed_assertion_or_inline_auth_secret_is_a_field_error_not_silent()
+    {
+        var badAssertion = await Parse(Returning("""
+            {"kind":"http","name":"x","targetUrl":"https://x.com",
+             "assertions":[{"source":"telepathy","comparison":"eq","expected":1}]}
+            """), "http x asserting telepathy");
+        Assert.False(badAssertion.Valid);
+        Assert.True(badAssertion.FieldErrors.ContainsKey("assertions[0].source"));
+        Assert.NotNull(badAssertion.Fields);                 // still prefilled so the human sees + fixes it
+
+        var inlineSecret = await Parse(Returning("""
+            {"kind":"http","name":"x","targetUrl":"https://x.com","auth":{"type":"bearer","token":"sk-live-123"}}
+            """), "http x with bearer token sk-live-123");
+        Assert.False(inlineSecret.Valid);
+        Assert.True(inlineSecret.FieldErrors.ContainsKey("auth")); // references-only rule caught the inline secret
+    }
+
     // ★ Browser/multistep ask → redirect, never a fabricated prefill.
     [Fact]
     public async Task Browser_request_redirects_with_no_prefill()
