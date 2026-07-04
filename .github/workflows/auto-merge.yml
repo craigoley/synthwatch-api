@@ -28,11 +28,13 @@ jobs:
     concurrency:
       group: auto-merge-${{ github.event.pull_request.number }}
       cancel-in-progress: true
-    # ★ TRUST GATE (hard, deterministic — NOT an LLM decision). Only the operator (craigoley /
-    # cao825), the agent (craigoleyagent), and dependabot[bot] may auto-merge. Any other author ->
-    # this job is skipped -> their PR NEVER auto-merges. dependabot is allowed here even though it is
-    # review-skipped in claude-review.yml (low-value to review, safe to auto-merge once checks pass).
-    if: contains(fromJSON('["craigoley", "cao825", "craigoleyagent", "dependabot[bot]"]'), github.event.pull_request.user.login)
+    # ★ TRUST GATE (hard, deterministic — NOT an LLM decision). BOTH conditions are required: the PR's
+    # base branch must be `main`, AND the author must be on the allowlist — only the operator (craigoley /
+    # cao825), the agent (craigoleyagent), and dependabot[bot] may auto-merge. Any other author, OR any base
+    # other than main -> this job is skipped -> their PR NEVER auto-merges. dependabot is allowed here even
+    # though it is review-skipped in claude-review.yml (low-value to review, safe to auto-merge once checks pass).
+    # base==main closes the July-4 stacking hole: a stacked PR based on an UNPROTECTED feature branch would otherwise auto-merge there with no required checks (runner #192).
+    if: github.event.pull_request.base.ref == 'main' && contains(fromJSON('["craigoley", "cao825", "craigoleyagent", "dependabot[bot]"]'), github.event.pull_request.user.login)
     steps:
       - name: Enable native auto-merge (waits for required checks)
         env:
