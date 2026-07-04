@@ -3120,6 +3120,75 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Incident_timeline_is_capped_newest_first_with_totalRuns_and_truncated()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // One check, two incidents: a small RESOLVED one (under cap — timeline must be complete and say so)
+        // and a long-OPEN one with 510 in-window runs (over cap — newest 500 only, with the honest count).
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('cap-check','http','https://cap.example') RETURNING id INTO cid;
+              INSERT INTO incidents (check_id,status,severity,opened_at,resolved_at,consecutive_failures)
+                VALUES (cid,'resolved','critical', now() - interval '3 hours', now() - interval '170 minutes', 0);
+              INSERT INTO incidents (check_id,status,severity,opened_at,consecutive_failures)
+                VALUES (cid,'open','critical', now() - interval '2 hours', 0);
+              -- 510 runs inside the OPEN incident's window, newest ≈ now (10s cadence => spans ~85 min)
+              INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms)
+                SELECT cid,'fail', now() - (g * interval '10 seconds'),
+                       now() - (g * interval '10 seconds') + interval '2 seconds', 50
+                FROM generate_series(0, 509) g;
+              -- 3 runs inside the RESOLVED incident's 10-minute window
+              INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms)
+                SELECT cid,'fail', now() - interval '3 hours' + (g * interval '2 minutes'),
+                       now() - interval '3 hours' + (g * interval '2 minutes') + interval '2 seconds', 50
+                FROM generate_series(1, 3) g;
+            END $$;
+            """);
+        var cid = await db.Checks.Where(c => c.Name == "cap-check").Select(c => c.Id).FirstAsync();
+        var smallId = await db.Incidents.Where(i => i.CheckId == cid && i.Status == "resolved").Select(i => i.Id).FirstAsync();
+        var bigId = await db.Incidents.Where(i => i.CheckId == cid && i.Status == "open").Select(i => i.Id).FirstAsync();
+        var fn = new IncidentsFunctions(db);
+        try
+        {
+            // ── UNDER CAP: complete timeline, honest-complete flags. ──
+            var small = Assert.IsType<IncidentDetailDto>(
+                ((OkObjectResult)await fn.GetIncident(Request(), smallId, default)).Value);
+            Assert.Equal(3, small.TotalRuns);
+            Assert.False(small.Truncated);
+            Assert.Equal(3, small.Timeline.Count);
+
+            // ── OVER CAP: exactly the newest 500 of 510, and the response SAYS so. ──
+            var bigOpened = await db.Incidents.Where(i => i.Id == bigId).Select(i => i.OpenedAt).FirstAsync();
+            var expectedNewest = await db.Runs.AsNoTracking()
+                .Where(r => r.CheckId == cid && r.StartedAt >= bigOpened)
+                .OrderByDescending(r => r.StartedAt).ThenByDescending(r => r.Id)
+                .Take(500).Select(r => r.Id).ToListAsync();
+            var oldestTen = await db.Runs.AsNoTracking()
+                .Where(r => r.CheckId == cid && r.StartedAt >= bigOpened)
+                .OrderBy(r => r.StartedAt).ThenBy(r => r.Id)
+                .Take(10).Select(r => r.Id).ToListAsync();
+
+            var big = Assert.IsType<IncidentDetailDto>(
+                ((OkObjectResult)await fn.GetIncident(Request(), bigId, default)).Value);
+            Assert.Equal(510, big.TotalRuns);
+            Assert.True(big.Truncated);
+            Assert.Equal(500, big.Timeline.Count);
+            var servedIds = big.Timeline.Select(t => t.RunId).ToHashSet();
+            Assert.Equal(expectedNewest.ToHashSet(), servedIds);          // exactly the newest 500
+            Assert.All(oldestTen, id => Assert.DoesNotContain(id, servedIds)); // the oldest 10 are the ones dropped
+            Assert.True(big.Timeline.SequenceEqual(big.Timeline.OrderBy(t => t.StartedAt))); // still ASC for the UI
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name = 'cap-check'); " +
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name = 'cap-check'); " +
+                "DELETE FROM checks WHERE name = 'cap-check';");
+        }
+    }
+
+    [SkippableFact]
     public async Task AiInsights_returns_retryable_unavailable_on_a_transient_blob_error()
     {
         RequireDocker();
