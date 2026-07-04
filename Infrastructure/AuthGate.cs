@@ -28,6 +28,13 @@ public static class AuthGate
     public static readonly string[] UnauthWriteAllowlist =
         { "/auth/request-code", "/auth/verify", "/auth/request-access" };
 
+    /// <summary>Session-floor writes — any VALID session may call these regardless of its live role. Exactly
+    /// one entry: logout. A demoted editor (valid session, live role resolved to anonymous) must be able to
+    /// revoke their own session; requiring the editor floor here left them with a session they could no longer
+    /// use but also could not kill. No-token requests still 401 (the role-null check runs first), so this is
+    /// deliberately NOT the unauthenticated allowlist above.</summary>
+    public static readonly string[] SessionFloorWriteRoutes = { "/auth/logout" };
+
     public static bool IsMutating(string method) => MutatingMethods.Contains(method);
 
     /// <summary>Lowercased, single leading slash, no trailing slash. "/Api/Checks/" → "/api/checks".</summary>
@@ -74,6 +81,8 @@ public static class AuthGate
             return GateOutcome.Allow;          // login / access-request — the only unauthenticated writes
         if (role is null)
             return GateOutcome.Deny401;        // no valid session
+        if (SessionFloorWriteRoutes.Contains(RouteOf(path)))
+            return GateOutcome.Allow;          // session-floor: any live role may revoke its own session (logout)
         if (role is Roles.Editor or Roles.Admin)
         {
             if (IsAdminOnlyRoute(method, path) && role != Roles.Admin)

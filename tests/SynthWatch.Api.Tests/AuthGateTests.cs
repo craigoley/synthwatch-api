@@ -87,6 +87,25 @@ public class AuthGateTests
     public void Logout_is_NOT_allowlisted_so_it_requires_a_session() =>
         Assert.Equal(GateOutcome.Deny401, AuthGate.Decide("POST", "/api/auth/logout", enforcementEnabled: true, role: null));
 
+    // ── the session-floor route: logout works for ANY valid session, including a demoted editor ──────
+
+    [Theory]
+    [InlineData(Roles.Anonymous)] // the demoted-editor case: valid session whose live role was revoked
+    [InlineData(Roles.Editor)]
+    [InlineData(Roles.Admin)]
+    public void Logout_is_session_floor_so_any_valid_session_can_revoke_itself(string role) =>
+        Assert.Equal(GateOutcome.Allow, AuthGate.Decide("POST", "/api/auth/logout", enforcementEnabled: true, role: role));
+
+    [Theory]
+    [InlineData("/auth/logout")]      // no /api prefix
+    [InlineData("/api/auth/logout/")] // trailing slash
+    public void Session_floor_matches_prefix_and_slash_variants(string path) =>
+        Assert.Equal(GateOutcome.Allow, AuthGate.Decide("POST", path, enforcementEnabled: true, role: Roles.Anonymous));
+
+    [Fact]
+    public void Session_floor_does_not_leak_to_other_writes() =>
+        Assert.Equal(GateOutcome.Deny403, AuthGate.Decide("POST", "/api/checks", enforcementEnabled: true, role: Roles.Anonymous));
+
     // ── enforcement OFF: the inert, deploy-safe default — every write passes as today ────────────────
 
     [Theory]
