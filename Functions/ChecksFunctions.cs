@@ -129,10 +129,13 @@ public class ChecksFunctions
             .Select(dto => showHeaders ? dto : dto with { RequestHeaders = null });
 
         // Short cache so the dashboard's polling doesn't hit the DB every tick; current status
-        // moves run-to-run, so keep it brief (10s). Vary on Origin since platform CORS echoes a
-        // per-origin Access-Control-Allow-Origin and these responses are publicly cacheable.
+        // moves run-to-run, so keep it brief (10s). The body is now SESSION-DEPENDENT (request_headers are
+        // field-gated above), so Vary MUST include Authorization: an anonymous request (no header) and a
+        // session request (Bearer …) get distinct shared-cache keys, so a shared cache can never serve an
+        // editor's header-bearing body to an anonymous caller. Vary on Origin too (platform CORS echoes a
+        // per-origin Access-Control-Allow-Origin). The common anonymous poll still caches publicly.
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=10";
-        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        req.HttpContext.Response.Headers["Vary"] = "Origin, Authorization";
         return ApiResults.Ok(result);
     }
 
