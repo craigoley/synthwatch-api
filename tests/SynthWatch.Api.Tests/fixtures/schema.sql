@@ -127,9 +127,10 @@ CREATE TABLE public.checks (
     CONSTRAINT browser_needs_flow CHECK (((kind <> 'browser'::text) OR (flow_name IS NOT NULL))),
     CONSTRAINT checks_failure_threshold_check CHECK ((failure_threshold > 0)),
     CONSTRAINT checks_interval_seconds_check CHECK ((interval_seconds > 0)),
+    CONSTRAINT checks_slo_target_check CHECK (slo_target IS NULL OR (slo_target > 0 AND slo_target < 1)),
     CONSTRAINT checks_kind_check CHECK ((kind = ANY (ARRAY['http'::text, 'browser'::text, 'ssl'::text, 'dns'::text, 'tcp'::text, 'ping'::text, 'multistep'::text]))),
     CONSTRAINT checks_severity_check CHECK ((severity = ANY (ARRAY['critical'::text, 'warning'::text]))),
-    CONSTRAINT checks_spec_path_shape CHECK ((spec_path IS NULL OR ((spec_path ~ '^monitors/.+\.spec\.ts$') AND ("position"(spec_path, '..'::text) = 0)))),
+    CONSTRAINT checks_spec_path_shape CHECK ((spec_path IS NULL OR ((spec_path ~ '^monitors/.+\.spec\.ts$') AND (position('..' in spec_path) = 0)))),
     CONSTRAINT checks_timeout_ms_check CHECK ((timeout_ms > 0)),
     CONSTRAINT checks_warn_renotify_seconds_check CHECK ((warn_renotify_seconds > 0))
 );
@@ -280,7 +281,7 @@ CREATE TABLE public.run_steps (
     duration_ms integer NOT NULL,
     error_message text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT run_steps_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'fail'::text, 'error'::text])))
+    CONSTRAINT run_steps_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'fail'::text, 'error'::text, 'running'::text])))
 );
 
 
@@ -316,7 +317,7 @@ CREATE TABLE public.runs (
     cert_days_remaining integer,
     trace_url text,
     trace_signals jsonb,
-    location text DEFAULT 'default'::text,
+    location text DEFAULT 'default'::text NOT NULL,
     retry_count integer,
     egress_ip text,
     spec_provenance jsonb,
@@ -897,7 +898,7 @@ CREATE TABLE public.reconcile_drift (
     source_key  text NOT NULL,
     drift_type  text NOT NULL
                 CONSTRAINT reconcile_drift_drift_type_check
-                CHECK (drift_type = ANY (ARRAY['new'::text, 'changed'::text, 'missing'::text, 'orphan'::text])),
+                CHECK (drift_type = ANY (ARRAY['new'::text, 'changed'::text, 'missing'::text, 'orphan'::text, 'redaction_mismatch'::text])),
     detail      jsonb NOT NULL DEFAULT '{}'::jsonb,
     detected_at timestamp with time zone NOT NULL DEFAULT now(),
     CONSTRAINT reconcile_drift_pkey PRIMARY KEY (source_key, drift_type)
@@ -1046,7 +1047,8 @@ CREATE TABLE public.run_requests (
     check_id      bigint      NOT NULL REFERENCES public.checks(id) ON DELETE CASCADE,
     status        text        NOT NULL DEFAULT 'pending',
     requested_at  timestamp with time zone NOT NULL DEFAULT now(),
-    completed_at  timestamp with time zone
+    completed_at  timestamp with time zone,
+    CONSTRAINT run_requests_status_check CHECK (status IN ('pending', 'done'))
 );
 -- At most one PENDING request per check (the coalesce the API relies on).
 CREATE UNIQUE INDEX run_requests_one_pending_per_check ON public.run_requests (check_id) WHERE (status = 'pending');

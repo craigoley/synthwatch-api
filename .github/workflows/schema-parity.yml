@@ -43,10 +43,6 @@ jobs:
       - name: Checkout (synthwatch-api — the fixture + DbContext)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # NOTE: runner-column-parity (RUNNER_PARITY=1, which checks out craigoley/synthwatch and diffs shared-table
-      # columns) is DEFERRED — the runner's numbered migrations don't replay cleanly into an empty DB in filename
-      # order (0001_run_metrics references runs, created later), so it needs the runner's real replay order. The
-      # catalog-diff engine is proven below by --self-test; presence is the REQUIRED assertion for now.
       - name: Install psql client
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
 
@@ -54,4 +50,53 @@ jobs:
         run: bash scripts/check-schema-parity.sh --self-test
 
       - name: Assert every DbContext-mapped table exists in the fixture
+        run: bash scripts/check-schema-parity.sh
+
+  # Runner column parity: diff the fixture's shared tables/constraints/functions against the CURRENT runner
+  # schema (db/schema.sql + idempotent migrations-on-top). A GATING check (in ci-gate's REQUIRED list) — a real
+  # fixture-vs-runner drift fails it, holding the merge, exactly the #153/#129 class this gate exists to catch.
+  # #167 enabled this (RED at first), then made it precise + faithful so it lands GREEN: it closed the real
+  # fixture lags (runs.location NOT NULL, reconcile_drift +redaction_mismatch, run_steps +running, the missing
+  # checks_slo_target_check, the swapped-arg checks_spec_path_shape, run_requests_status_check), and taught the
+  # diff to ignore NON-schema-shape noise (column DEFAULTs, function comments/whitespace) + a reviewed allowlist
+  # of runner-INTERNAL columns the API never maps (see scripts/check-schema-parity.sh). A NEW real drift still
+  # goes red; the --self-test in the required job proves the engine still detects a dropped column + a real
+  # function-logic change.
+  runner-parity:
+    name: Runner column parity (fixture vs runner schema)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pg
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5433
+      PGUSER: postgres
+      PGPASSWORD: pg
+      RUNNER_PARITY: "1"
+    steps:
+      - name: Checkout (synthwatch-api — the fixture + DbContext)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The runner OWNS the schema; db/schema.sql is its source of truth. Both repos are public, so the default
+      # token reads it. persist-credentials:false — read-only. Same checkout pattern as grant-coverage.yml /
+      # trace-parity.yml. Tracks runner main (unpinned) so the gate reflects the CURRENT runner schema.
+      - name: Checkout runner repo (db/schema.sql = the source of truth)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: craigoley/synthwatch
+          path: runner-repo
+          persist-credentials: false
+
+      - name: Install psql client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Diff fixture shared objects against the runner schema (RUNNER_PARITY=1)
         run: bash scripts/check-schema-parity.sh

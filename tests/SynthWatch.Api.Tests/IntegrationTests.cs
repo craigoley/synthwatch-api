@@ -717,19 +717,24 @@ public class IntegrationTests
         // API now guards (computes SLO only for a target in (0,1)) and serves Slo = null instead.
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        await db.Database.ExecuteSqlRawAsync("""
-            DO $$
-            DECLARE cid bigint;
-            BEGIN
-              INSERT INTO checks (name, kind, target_url, slo_target)
-                VALUES ('slo-100', 'http', 'https://s.example', 1.0) RETURNING id INTO cid;
-              INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms)
-                VALUES (cid, 'fail', now() - interval '1 hour', now(), 40),
-                       (cid, 'pass', now() - interval '2 hours', now(), 40);
-            END $$;
-            """);
+        // The runner CHECK forbids slo_target = 1.0 (checks_slo_target_check: slo_target < 1), so a faithful
+        // fixture (post-#167 parity patch) rejects the insert. Temporarily lift the CHECK to seed the exact
+        // div-by-zero value the API's defense-in-depth guard exists for (a legacy row predating the CHECK),
+        // then restore it in finally so the fixture stays faithful for the rest of the (serial) collection.
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE checks DROP CONSTRAINT checks_slo_target_check;");
         try
         {
+            await db.Database.ExecuteSqlRawAsync("""
+                DO $$
+                DECLARE cid bigint;
+                BEGIN
+                  INSERT INTO checks (name, kind, target_url, slo_target)
+                    VALUES ('slo-100', 'http', 'https://s.example', 1.0) RETURNING id INTO cid;
+                  INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms)
+                    VALUES (cid, 'fail', now() - interval '1 hour', now(), 40),
+                           (cid, 'pass', now() - interval '2 hours', now(), 40);
+                END $$;
+                """);
             var fn = new ChecksFunctions(db);
             var id = await db.Checks.Where(c => c.Name == "slo-100").Select(c => c.Id).FirstAsync();
             var ok = Assert.IsType<OkObjectResult>(await fn.GetCheck(Request(), id, default)); // 200, not 500
@@ -738,6 +743,8 @@ public class IntegrationTests
         finally
         {
             await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'slo-100';");
+            await db.Database.ExecuteSqlRawAsync(
+                "ALTER TABLE checks ADD CONSTRAINT checks_slo_target_check CHECK (slo_target IS NULL OR (slo_target > 0 AND slo_target < 1));");
         }
     }
 
@@ -1871,27 +1878,32 @@ public class IntegrationTests
         // / (null-location)=fail, then an AFTER-window eastus=pass (recovery) that must NOT leak in.
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        await db.Database.ExecuteSqlRawAsync("""
-            DO $$
-            DECLARE cid bigint;
-            BEGIN
-              INSERT INTO checks (name, kind, target_url)
-                VALUES ('perloc-test', 'http', 'https://p.example') RETURNING id INTO cid;
-              INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures)
-                VALUES (cid, 'resolved', 'critical', now() - interval '1 day',
-                        now() - interval '1 day' + interval '30 min', 0);
-              -- IN-WINDOW runs (one per location; one with an explicit NULL location)
-              INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms, location) VALUES
-                (cid, 'fail', now() - interval '1 day' + interval '10 min', now() - interval '1 day' + interval '10 min', 50, 'eastus'),
-                (cid, 'fail', now() - interval '1 day' + interval '12 min', now() - interval '1 day' + interval '12 min', 50, 'westus'),
-                (cid, 'fail', now() - interval '1 day' + interval '14 min', now() - interval '1 day' + interval '14 min', 50, NULL);
-              -- AFTER the window: eastus recovered. This is the CURRENT status; it must NOT appear.
-              INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms, location)
-                VALUES (cid, 'pass', now() - interval '1 hour', now() - interval '1 hour', 50, 'eastus');
-            END $$;
-            """);
+        // #39's null-location coalesce defends LEGACY runs (pre-0014, before runs.location was backfilled).
+        // The runner's current schema is runs.location NOT NULL, so a faithful fixture (post-#167 parity
+        // patch) rejects a NULL-location insert. Temporarily drop NOT NULL to seed that legacy row, then
+        // restore it in finally (the check delete cascades its runs away first, so SET NOT NULL succeeds).
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE runs ALTER COLUMN location DROP NOT NULL;");
         try
         {
+            await db.Database.ExecuteSqlRawAsync("""
+                DO $$
+                DECLARE cid bigint;
+                BEGIN
+                  INSERT INTO checks (name, kind, target_url)
+                    VALUES ('perloc-test', 'http', 'https://p.example') RETURNING id INTO cid;
+                  INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures)
+                    VALUES (cid, 'resolved', 'critical', now() - interval '1 day',
+                            now() - interval '1 day' + interval '30 min', 0);
+                  -- IN-WINDOW runs (one per location; one with an explicit NULL location)
+                  INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms, location) VALUES
+                    (cid, 'fail', now() - interval '1 day' + interval '10 min', now() - interval '1 day' + interval '10 min', 50, 'eastus'),
+                    (cid, 'fail', now() - interval '1 day' + interval '12 min', now() - interval '1 day' + interval '12 min', 50, 'westus'),
+                    (cid, 'fail', now() - interval '1 day' + interval '14 min', now() - interval '1 day' + interval '14 min', 50, NULL);
+                  -- AFTER the window: eastus recovered. This is the CURRENT status; it must NOT appear.
+                  INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms, location)
+                    VALUES (cid, 'pass', now() - interval '1 hour', now() - interval '1 hour', 50, 'eastus');
+                END $$;
+                """);
             var checkId = await db.Checks.Where(c => c.Name == "perloc-test").Select(c => c.Id).FirstAsync();
             var incId = await db.Incidents.Where(i => i.CheckId == checkId).Select(i => i.Id).FirstAsync();
 
@@ -1910,6 +1922,7 @@ public class IntegrationTests
         finally
         {
             await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'perloc-test';");
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE runs ALTER COLUMN location SET NOT NULL;");
         }
     }
 
