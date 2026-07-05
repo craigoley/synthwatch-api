@@ -53,12 +53,17 @@ jobs:
         run: bash scripts/check-schema-parity.sh
 
   # Runner column parity: diff the fixture's shared tables/constraints/functions against the CURRENT runner
-  # schema (db/schema.sql + idempotent migrations-on-top). This is a SEPARATE, NON-REQUIRED job on purpose —
-  # a real fixture-vs-runner drift surfaces here as a visible red on the PR WITHOUT wedging the REQUIRED
-  # schema-parity job above. Promote to ci-gate REQUIRED once the fixture drift it reports is closed AND the
-  # column scope is tightened to API-mapped columns (see the finding in the PR that enabled this).
+  # schema (db/schema.sql + idempotent migrations-on-top). A GATING check (in ci-gate's REQUIRED list) — a real
+  # fixture-vs-runner drift fails it, holding the merge, exactly the #153/#129 class this gate exists to catch.
+  # #167 enabled this (RED at first), then made it precise + faithful so it lands GREEN: it closed the real
+  # fixture lags (runs.location NOT NULL, reconcile_drift +redaction_mismatch, run_steps +running, the missing
+  # checks_slo_target_check, the swapped-arg checks_spec_path_shape, run_requests_status_check), and taught the
+  # diff to ignore NON-schema-shape noise (column DEFAULTs, function comments/whitespace) + a reviewed allowlist
+  # of runner-INTERNAL columns the API never maps (see scripts/check-schema-parity.sh). A NEW real drift still
+  # goes red; the --self-test in the required job proves the engine still detects a dropped column + a real
+  # function-logic change.
   runner-parity:
-    name: Runner column parity (fixture vs runner schema, non-blocking)
+    name: Runner column parity (fixture vs runner schema)
     runs-on: ubuntu-latest
     services:
       postgres:
