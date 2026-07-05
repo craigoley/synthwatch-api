@@ -16,11 +16,12 @@
 #   --self-test   Prove the catalog-diff engine goes red: load the fixture into BOTH DBs (identical → GREEN),
 #                 drop a column from one, assert the engine reports drift + exits non-zero. The must-go-red.
 #
-# Opt-in (RUNNER_PARITY=1): also diff shared-table COLUMNS against the runner's migrations (the lagging-CHECK
-# class, #153). Left OFF by default because the runner's numbered migrations do NOT replay cleanly into an
-# empty DB in filename order (e.g. 0001_run_metrics references runs, created later) — enabling it needs the
-# runner's real replay order (its base schema / migration-runner ordering), which lives in the runner repo.
-# The catalog-diff engine itself is proven by --self-test; only the migration-REPLAY half is deferred.
+# Opt-in (RUNNER_PARITY=1): also diff shared-table COLUMNS/constraints/functions against the CURRENT runner
+# schema (the lagging-CHECK / lagging-enum class, #153 — e.g. the runner adding a status value the fixture's
+# CHECK still rejects). The runner schema is materialized from db/schema.sql + idempotent migrations-on-top
+# (see load_runner_schema) — NOT a standalone numbered-migration replay, which was the earlier deferral's
+# blocker. Requires the runner repo checked out at ./runner-repo. Runs in a SEPARATE, non-required CI job so a
+# real drift surfaces as a visible red without wedging the REQUIRED presence gate.
 set -euo pipefail
 
 PGHOST="${PGHOST:-127.0.0.1}"
@@ -29,6 +30,11 @@ PGUSER="${PGUSER:-postgres}"
 export PGPASSWORD="${PGPASSWORD:-pg}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE="${FIXTURE:-$REPO_ROOT/tests/SynthWatch.Api.Tests/fixtures/schema.sql}"
+# The runner OWNS its schema as db/schema.sql (the converged end-state for a NEW install; migration 0001's own
+# header: "New installs get the same end state from db/schema.sql — the two must converge"). The numbered
+# db/migrations/*.sql are IDEMPOTENT incremental patches for ALREADY-DEPLOYED DBs (applied via db/migrate.sh),
+# so they do NOT replay standalone into an empty DB in filename order — that was the #164 deferral's blocker.
+RUNNER_SCHEMA="${RUNNER_SCHEMA:-$REPO_ROOT/runner-repo/db/schema.sql}"
 RUNNER_MIGRATIONS="${RUNNER_MIGRATIONS:-$REPO_ROOT/runner-repo/db/migrations}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -49,19 +55,24 @@ load_fixture() { # <db>
   psql_db "$1" -c "SET check_function_bodies = false;" -f "$FIXTURE" >/dev/null
 }
 
-# The synthwatch-api role the runner GRANTs target — create it before applying migrations so GRANT … TO
-# "synthwatch-api" doesn't error (the fixture deliberately omits grants; this shim is grants-only scaffolding).
-load_runner_migrations() { # <db>
-  psql_db "$1" -c "SET check_function_bodies = false;" \
-                 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='synthwatch-api') THEN CREATE ROLE \"synthwatch-api\"; END IF; END \$\$;" >/dev/null
-  if [ ! -d "$RUNNER_MIGRATIONS" ]; then
-    echo "runner migrations not found at $RUNNER_MIGRATIONS (is the runner repo checked out?)" >&2; exit 2
+# Materialize the CURRENT runner schema in a fresh DB: db/schema.sql (the converged base) FIRST, then every
+# numbered migration applied IDEMPOTENTLY on top (IF NOT EXISTS / CREATE OR REPLACE, per db/migrate.sh's
+# contract) to catch any migration newer than the last schema.sql sync. The CREATE ROLE shim runs first so a
+# GRANT … TO "synthwatch-api" in schema.sql/a migration doesn't error (the diff never captures grants — the
+# snapshot below is columns/constraints/functions only — so grants can't produce a false diff either).
+load_runner_schema() { # <db>
+  psql_db "$1" -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='synthwatch-api') THEN CREATE ROLE \"synthwatch-api\"; END IF; END \$\$;" >/dev/null
+  if [ ! -f "$RUNNER_SCHEMA" ]; then
+    echo "runner schema not found at $RUNNER_SCHEMA (is the runner repo checked out?)" >&2; exit 2
   fi
-  # Lexical order = migration order (zero-padded 0001_…), matching check-pg-grant-coverage.mjs.
-  local f
-  for f in $(ls "$RUNNER_MIGRATIONS"/*.sql | sort); do
-    psql_db "$1" -c "SET check_function_bodies = false;" -f "$f" >/dev/null
-  done
+  psql_db "$1" -c "SET check_function_bodies = false;" -f "$RUNNER_SCHEMA" >/dev/null
+  # Migrations on top are idempotent, so newest-wins regardless of whether schema.sql or a migration leads.
+  if [ -d "$RUNNER_MIGRATIONS" ]; then
+    local f
+    for f in $(ls "$RUNNER_MIGRATIONS"/*.sql | sort); do
+      psql_db "$1" -c "SET check_function_bodies = false;" -f "$f" >/dev/null
+    done
+  fi
 }
 
 # Normalized catalog snapshot of the PUBLIC schema. Columns (table/name/type/nullable/default), table/domain
@@ -146,15 +157,15 @@ run_parity() {
   load_fixture fix
   local rc=0
   check_dbcontext_presence fix || rc=1
-  # Runner column parity is OPT-IN (RUNNER_PARITY=1) — deferred until the runner's real migration replay order
-  # is available (its numbered migrations don't replay cleanly into an empty DB in filename order). CI leaves it
-  # off; the catalog-diff engine it uses is proven by --self-test.
+  # Runner column parity is OPT-IN (RUNNER_PARITY=1). The REQUIRED presence gate leaves it off; the separate
+  # (non-required) runner-parity CI job sets it on. Materializes the runner schema from db/schema.sql +
+  # idempotent migrations (load_runner_schema), then diffs shared objects.
   if [ "${RUNNER_PARITY:-}" = "1" ]; then
-    if [ ! -d "$RUNNER_MIGRATIONS" ]; then
-      echo "RUNNER_PARITY=1 but no runner migrations at $RUNNER_MIGRATIONS" >&2; exit 2
+    if [ ! -f "$RUNNER_SCHEMA" ]; then
+      echo "RUNNER_PARITY=1 but no runner schema at $RUNNER_SCHEMA" >&2; exit 2
     fi
     psql_db postgres -c "DROP DATABASE IF EXISTS mig;" -c "CREATE DATABASE mig;" >/dev/null
-    load_runner_migrations mig
+    load_runner_schema mig
     check_runner_column_parity mig fix || rc=1
   fi
   [ "$rc" -eq 0 ] && echo "✅ Schema parity OK." || exit 1
