@@ -19,8 +19,9 @@ public interface IEmailSender
 /// — so no ACS access key is stored on the Function App (consistent with how it does Postgres/blob/ARM).
 /// Falls back to <c>ACS_EMAIL_CONNECTION_STRING</c> if MI send is blocked. Sender = <c>AUTH_EMAIL_FROM</c>.
 ///
-/// ★ Deploy prerequisite: the API's MI needs the "Communication Services Contributor" role on the ACS
-/// resource for MI send (a manual role assignment — see the PR). Until then, set the connection string.
+/// ★ RBAC: the API's MI needs the "Communication and Email Service Owner" role (GUID
+/// 09976791-48a7-449e-bb21-39d1a415f350) on the ACS resource for MI send — auto-assigned by bicep
+/// (acsEmailOwnerAssignment in infra/main.bicep). Falls back to the connection string if MI send is blocked.
 /// </summary>
 public sealed class AcsEmailSender : IEmailSender
 {

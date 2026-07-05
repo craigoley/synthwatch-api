@@ -83,7 +83,7 @@ setting is comma-separated, normalized (lowercased/trimmed). Editors, by contras
 Services**, preferring **managed identity** (no ACS key stored on the Function App).
 
 - **Path:** `Functions/AuthFunctions.cs:53` (`auth/request-code`) → `TrySendAsync(email, AuthEmailTemplates.SignInCode(code), ct)` (`AuthFunctions.cs:79`) → `IEmailSender.SendAsync` → `AcsEmailSender` (`Infrastructure/EmailSender.cs:25`).
-- **Transport:** `Azure.Communication.Email.EmailClient` via `DefaultAzureCredential` against `ACS_EMAIL_ENDPOINT`, falling back to `ACS_EMAIL_CONNECTION_STRING`; sender address = `AUTH_EMAIL_FROM` (`EmailSender.cs:38`–`53`). Deploy prereq: the MI needs **Communication Services Contributor** on the ACS resource (`EmailSender.cs:22`).
+- **Transport:** `Azure.Communication.Email.EmailClient` via `DefaultAzureCredential` against `ACS_EMAIL_ENDPOINT`, falling back to `ACS_EMAIL_CONNECTION_STRING`; sender address = `AUTH_EMAIL_FROM` (`EmailSender.cs:38`–`53`). RBAC: the MI holds **Communication and Email Service Owner** (role GUID `09976791-48a7-449e-bb21-39d1a415f350`) on the ACS resource — **auto-assigned by bicep** (`acsEmailOwnerAssignment`, `infra/main.bicep:356`–`360`), not a manual step.
 - **Enumeration-safe:** a code is only *sent* to a known editor/admin; an unknown email gets a stored, unsendable code and the endpoint **always** returns 202 (`AuthFunctions.cs:48,76`).
 - **Set:** `AUTH_EMAIL_FROM` (`infra/main.bicep:220`), `ACS_EMAIL_ENDPOINT` (`infra/main.bicep:224`).
 
