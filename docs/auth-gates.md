@@ -61,3 +61,35 @@ curl -si -H "Authorization: Bearer $TOKEN" "$BASE/reconcile/plan"  | head -1   #
 curl -s "$BASE/checks/1" | grep -c requestHeaders                              # 0
 curl -s -H "Authorization: Bearer $TOKEN" "$BASE/checks/1" | grep -c requestHeaders  # 1 (when configured)
 ```
+
+## Operator config facts (env vars)
+
+Three facts the API owns that the dashboard's #190 runbook flagged as *verify-from-API-side*. Each is
+quoted at `file:line` against source (2026-07-05). The enforcement flag's **live** value is deliberately
+left `needs-verification` — see below.
+
+### Admin allowlist — `ADMIN_EMAILS`  ✅ confirmed
+
+Admin is **env-based**, not a DB row, so an admin can't be locked out of their own allowlist edits. The
+setting is comma-separated, normalized (lowercased/trimmed). Editors, by contrast, are the DB `editors` table.
+
+- **Read (canonical):** `Infrastructure/AuthPrincipalService.cs:62` — `public static HashSet<string> AdminEmails() => (Environment.GetEnvironmentVariable("ADMIN_EMAILS") ?? string.Empty)…`; role resolution at `AuthPrincipalService.cs:53` (`if (AdminEmails().Contains(email))` → admin; else `editors` table → editor; else anonymous). Duplicated in `Functions/AuthFunctions.cs:220`.
+- **Set:** `infra/main.bicep:216` (`name: 'ADMIN_EMAILS'` / `value: adminEmails`) from `param adminEmails string = ''` (`main.bicep:47`). Bicep note (`main.bicep:213`): *"ADMIN_EMAILS is the SECURITY source of truth for admin (the API enforces, not the dashboard)."*
+- The dashboard's tooltip guess of `ADMIN_EMAILS` was **correct** — no rename needed.
+
+### OTP delivery — email via Azure Communication Services (ACS)  ✅ confirmed
+
+`POST /api/auth/request-code` issues a 6-digit code and delivers it by **email through Azure Communication
+Services**, preferring **managed identity** (no ACS key stored on the Function App).
+
+- **Path:** `Functions/AuthFunctions.cs:53` (`auth/request-code`) → `TrySendAsync(email, AuthEmailTemplates.SignInCode(code), ct)` (`AuthFunctions.cs:79`) → `IEmailSender.SendAsync` → `AcsEmailSender` (`Infrastructure/EmailSender.cs:25`).
+- **Transport:** `Azure.Communication.Email.EmailClient` via `DefaultAzureCredential` against `ACS_EMAIL_ENDPOINT`, falling back to `ACS_EMAIL_CONNECTION_STRING`; sender address = `AUTH_EMAIL_FROM` (`EmailSender.cs:38`–`53`). Deploy prereq: the MI needs **Communication Services Contributor** on the ACS resource (`EmailSender.cs:22`).
+- **Enumeration-safe:** a code is only *sent* to a known editor/admin; an unknown email gets a stored, unsendable code and the endpoint **always** returns 202 (`AuthFunctions.cs:48,76`).
+- **Set:** `AUTH_EMAIL_FROM` (`infra/main.bicep:220`), `ACS_EMAIL_ENDPOINT` (`infra/main.bicep:224`).
+
+### Enforcement flag — `AUTH_ENFORCEMENT_ENABLED`  ✅ name + wiring confirmed / ⚠️ live value needs-verification
+
+- **Name + read:** `Infrastructure/AuthorizationMiddleware.cs:33` (`EnforcementEnabled()` → `Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED")`); pure parse at `AuthorizationMiddleware.cs:37` — `!(raw == "false" || raw == "0")`, case-insensitive.
+- **Semantics (code):** **fail-closed** — unset / empty / unrecognized → **ON**; only an explicit `false`/`0` turns it OFF (`AuthorizationMiddleware.cs:28`–`38`). `Program.cs:79`–`92` logs a loud startup warning whenever it resolves OFF.
+- **Set:** `infra/main.bicep:229` (`name: 'AUTH_ENFORCEMENT_ENABLED'` / `value: string(authEnforcementEnabled)`) from `param authEnforcementEnabled bool = false` (`main.bicep:56`).
+- ⚠️ **Live prod value = needs-verification.** Because bicep sets the var *explicitly*, the code's "unset → ON" fail-safe does **not** apply to a bicep deploy — the deployed value is whatever the param resolves to, and its **default is `false`** (→ `"False"` → OFF). No `.bicepparam` / parameters file / `deploy.yml` in this repo overrides it to `true`. So the live posture **cannot be derived from repo source alone** — read the deployed Function App's `AUTH_ENFORCEMENT_ENABLED` app setting to confirm whether prod is actually enforcing. (Do not assume ON from the code's fail-closed intent; the explicit bicep value wins.)
