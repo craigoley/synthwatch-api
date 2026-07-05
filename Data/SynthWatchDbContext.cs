@@ -49,6 +49,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<TrustRetryDayRow> TrustRetryDays => Set<TrustRetryDayRow>();
     public DbSet<StatusCheckRow> StatusChecks => Set<StatusCheckRow>();
     public DbSet<EgressRunRow> EgressRuns => Set<EgressRunRow>();
+    public DbSet<RegionHealthRow> RegionHealth => Set<RegionHealthRow>();
     public DbSet<StatusSlaRow> StatusSla => Set<StatusSlaRow>();
     public DbSet<StatusIncidentRow> StatusIncidents => Set<StatusIncidentRow>();
     public DbSet<DeployRow> Deploys => Set<DeployRow>();
@@ -552,6 +553,16 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.RunCount).HasColumnName("run_count");
             e.Property(x => x.FirstSeen).HasColumnName("first_seen");
             e.Property(x => x.LastSeen).HasColumnName("last_seen");
+        });
+
+        // Keyless: GET /reports/region-health — one row per enabled region, freshness = MAX(check_locations
+        // .last_run_at). raw SQL only (LEFT JOIN locations→check_locations); last_run_at NULL = never reported.
+        modelBuilder.Entity<RegionHealthRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Location).HasColumnName("location");
+            e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
         });
 
         // Keyless: read the inline availability-over-time bucketed query via raw SQL only.
