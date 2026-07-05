@@ -52,8 +52,8 @@ param authEmailFrom string = 'donotreply@0ad660ff-ac71-4b63-a5f6-ce885666c796.az
 @description('Phase 12 auth — ACS resource endpoint for MI-based email send. NON-secret (the resource\'s public endpoint). The API MI sends via DefaultAzureCredential against this; it holds the "Communication and Email Service Owner" role on synthwatch-acs (already assigned). Empty = MI send off (set ACS_EMAIL_CONNECTION_STRING as a fallback instead).')
 param acsEmailEndpoint string = 'https://synthwatch-acs.unitedstates.communication.azure.com/'
 
-@description('Phase 12 auth — slice 2 GATE master switch. DEFAULT OFF: the AuthorizationMiddleware is inert and writes pass as today. ★ Flip to true ONLY together with slice 3 (the dashboard sending session tokens) — turning it on before the dashboard sends tokens would 401 every write.')
-param authEnforcementEnabled bool = false
+@description('Phase 12 auth — slice 2 GATE master switch. FAIL-CLOSED DEFAULT true: the AuthorizationMiddleware ENFORCES (editor/admin session required for writes). Slice 3 shipped — the dashboard sends session tokens and prod has AUTH_ENFORCEMENT_ENABLED=true (live-verified 2026-07-05). ★ A default-param redeploy PRESERVES enforcement; disabling it is an EXPLICIT opt-out (pass authEnforcementEnabled=false) that opens every write, all paid-AOAI endpoints, and reconcile/apply at once. This mirrors #161 (the RUNTIME flag defaults fail-closed / ON-when-unset) one layer down at infra, and protects the #162/#154 read-gate + forensic-endpoint auth work: without this, a default-param `az deployment group create` (see README Deploy — it passes only pgHost/allowedCorsOrigin) would write string(false) and silently disable prod enforcement.')
+param authEnforcementEnabled bool = true
 
 @description('Trace AI Insights (slice 2) — Azure OpenAI endpoint, e.g. https://synthwatch-aoai.openai.azure.com/. DEFAULT EMPTY = INERT: POST /api/runs/{id}/ai-insights returns "not configured" until set. ★ Deploy prereq: also grant the Function App MI "Cognitive Services OpenAI User" on synthwatch-aoai (see the PR).')
 param azureOpenAiEndpoint string = ''
@@ -224,7 +224,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'ACS_EMAIL_ENDPOINT'
           value: acsEmailEndpoint
         }
-        // Phase 12 auth slice 2 — the gate. DEFAULT OFF (inert); flipped on with slice 3.
+        // Phase 12 auth slice 2 — the gate. FAIL-CLOSED DEFAULT true (enforcing); default-param deploy keeps it on. See #161/#162.
         {
           name: 'AUTH_ENFORCEMENT_ENABLED'
           value: string(authEnforcementEnabled)
