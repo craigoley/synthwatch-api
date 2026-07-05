@@ -14,6 +14,23 @@ dashboard first; later a status page, a Prometheus exporter, and AI root-cause.
 > currently `AuthorizationLevel.Anonymous` and is expected to be locked down in that
 > follow-up.
 
+## Operations / On-call
+
+Runbooks for a paged operator — reach for these first during a live incident:
+
+- **[`docs/observability-tracing.md`](docs/observability-tracing.md)** — **500 in prod: find the
+  exact exception by invocation id.** The `problem+json` `instance` field on any error IS the
+  Function invocation id; one KQL query pivots it to the request + exception + stack.
+  ⚠️ **Workspace-not-classic trap:** the telemetry lands in the **`App*` tables**
+  (`AppRequests`, `AppExceptions`, …) of the **Log Analytics workspace** (`synthwatch-api-law`),
+  **NOT** the classic Application Insights store — `az monitor app-insights query` returns
+  **empty** and looks "dark" even while the exception is right there in the workspace. Query the
+  workspace.
+- **[`docs/auth-gates.md`](docs/auth-gates.md)** — **which endpoints are gated + how
+  `AUTH_ENFORCEMENT_ENABLED` behaves** (fail-closed: enforcement is ON unless the setting is
+  explicitly `false`/`0`). Also carries the operator config facts: the admin allowlist
+  (`ADMIN_EMAILS`), the OTP email channel, and the enforcement-flag wiring.
+
 ## Platform constraints (why it is built this way)
 
 - **.NET 10 isolated worker**, not in-process (in-process support ends Nov 2026).
