@@ -4046,6 +4046,83 @@ public class IntegrationTests
         }
     }
 
+    // ★ GET /reports/region-health (F-4) — a silently-dead region is otherwise invisible. Proves: an enabled
+    // region with a RECENT claim → fresh; an OLD claim → stale (the alarm); an enabled region with ZERO claim
+    // data → never_reported (must NOT fabricate a fresh row) — both the no-cursor and never-claimed-cursor
+    // sub-cases; a DISABLED region → absent entirely (not stale, not never), even with a recent cursor.
+    // Freshness = MAX(check_locations.last_run_at), advanced by the runner at claim time on every run.
+    [SkippableFact]
+    public async Task Region_health_classifies_fresh_stale_never_reported_and_excludes_disabled()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint;
+            BEGIN
+              INSERT INTO locations (name, enabled) VALUES
+                ('rh-fresh', true), ('rh-stale', true), ('rh-never', true), ('rh-seeded', true), ('rh-disabled', false)
+                ON CONFLICT (name) DO UPDATE SET enabled = EXCLUDED.enabled;
+              INSERT INTO checks (name, kind, target_url, interval_seconds)
+                VALUES ('rh-check','http','https://rh.test', 300) RETURNING id INTO cid;
+              -- fresh: claimed 20s ago; stale: claimed 2h ago (> 3×300s=900s threshold);
+              -- seeded: a cursor that has NEVER claimed (last_run_at NULL) → never_reported;
+              -- disabled: a RECENT claim, but the location is disabled → must be excluded entirely.
+              -- rh-never: an enabled location with NO check_locations row at all → also never_reported.
+              INSERT INTO check_locations (check_id, location, last_run_at) VALUES
+                (cid, 'rh-fresh',    now() - interval '20 seconds'),
+                (cid, 'rh-stale',    now() - interval '2 hours'),
+                (cid, 'rh-seeded',   NULL),
+                (cid, 'rh-disabled', now() - interval '10 seconds');
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var dto = Assert.IsType<RegionHealthReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetRegionHealth(Request(), default)).Value!);
+            var byLoc = dto.Regions.ToDictionary(r => r.Location);
+
+            // Threshold = N × fleet MIN enabled interval (300s from the fixture's seed-http + rh-check) = 900s.
+            Assert.Equal(300, dto.MinIntervalSeconds);
+            Assert.Equal(RegionHealthProjection.StalenessIntervalMultiplier * dto.MinIntervalSeconds, dto.StalenessThresholdSeconds);
+
+            // FRESH: recent claim, age under threshold.
+            Assert.Equal("fresh", byLoc["rh-fresh"].Status);
+            Assert.NotNull(byLoc["rh-fresh"].LastRunAt);
+            Assert.True(byLoc["rh-fresh"].AgeSeconds < dto.StalenessThresholdSeconds);
+
+            // ★ STALE: the F-4 alarm — old claim, age over threshold.
+            Assert.Equal("stale", byLoc["rh-stale"].Status);
+            Assert.True(byLoc["rh-stale"].AgeSeconds > dto.StalenessThresholdSeconds);
+
+            // ★ NEVER-REPORTED (must not fabricate) — both sub-cases, with null age/lastRunAt:
+            Assert.Equal("never_reported", byLoc["rh-never"].Status);   // no cursor at all
+            Assert.Null(byLoc["rh-never"].LastRunAt);
+            Assert.Null(byLoc["rh-never"].AgeSeconds);
+            Assert.Equal("never_reported", byLoc["rh-seeded"].Status);  // cursor exists but never claimed (NULL)
+            Assert.Null(byLoc["rh-seeded"].LastRunAt);
+
+            // DISABLED region → excluded entirely (not stale, not never — just absent), despite its recent cursor.
+            Assert.False(byLoc.ContainsKey("rh-disabled"));
+
+            // wire-shape pin (#123): top-level + region key sets
+            var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+            var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(dto, web)).RootElement;
+            Assert.Equal(new[] { "minIntervalSeconds", "regions", "stalenessThresholdSeconds" },
+                root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            var region = root.GetProperty("regions").EnumerateArray().First(r => r.GetProperty("location").GetString() == "rh-fresh");
+            Assert.Equal(new[] { "ageSeconds", "lastRunAt", "location", "status" },
+                region.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM checks WHERE name='rh-check'; " +   // cascades check_locations
+                "DELETE FROM locations WHERE name IN ('rh-fresh','rh-stale','rh-never','rh-seeded','rh-disabled');");
+        }
+    }
+
     // Reconcile-apply Phase 1: the APPROVE endpoint, against the real schema (the test #127 was missing).
     [SkippableFact]
     public async Task Approve_pending_plan_transitions_to_approved_and_writes_decision()

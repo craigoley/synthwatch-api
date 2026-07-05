@@ -108,6 +108,42 @@ public class ReportsFunctions
     }
 
     /// <summary>
+    /// GET /api/reports/region-health — per-region freshness so a SILENTLY-DEAD region becomes visible (F-4: a
+    /// dead region stops writing runs, so quorum degrades gracefully and therefore INVISIBLY; max(started_at)
+    /// per region going stale IS the signal). Expected regions are DECLARATIVE (locations WHERE enabled), so a
+    /// configured-but-dark region still appears (stale/never_reported), never silently drops out. Freshness =
+    /// MAX(check_locations.last_run_at), which the runner advances at CLAIM time on every run (pass OR fail) —
+    /// a pure liveness signal, PK-indexed + fleet-sized, so NO scan of the runs table. Read-only, Anonymous GET
+    /// (the /reports/* anon tier post-#162 — only channels / reconcile plan+drift / forensic artifacts are session-gated).
+    /// </summary>
+    [Function("GetRegionHealth")]
+    public async Task<IActionResult> GetRegionHealth(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/region-health")] HttpRequest req,
+        CancellationToken ct)
+    {
+        // One row per ENABLED region. LEFT JOIN so an enabled location with NO check_locations rows (or only
+        // never-claimed cursors → all last_run_at NULL) still yields a row with max=NULL → never_reported,
+        // never dropped and never fabricated. Aggregate over the PK-indexed, fleet-sized check_locations
+        // (one row per check-location pair), NOT a max() scan over the 20k+ runs table.
+        var rows = await _db.RegionHealth.FromSql(
+            $@"SELECT l.name AS location, max(cl.last_run_at) AS last_run_at
+               FROM locations l
+               LEFT JOIN check_locations cl ON cl.location = l.name
+               WHERE l.enabled
+               GROUP BY l.name
+               ORDER BY l.name").AsNoTracking().ToListAsync(ct);
+
+        // The staleness threshold keys off the fleet's MIN enabled check interval (× a named-constant
+        // multiplier). coalesce to 300 so an empty fleet degrades to the interval floor rather than NULL.
+        var minInterval = await _db.Checks.Where(c => c.Enabled).MinAsync(c => (int?)c.IntervalSeconds, ct) ?? 300;
+
+        var dto = RegionHealthProjection.Build(minInterval, rows, DateTimeOffset.UtcNow);
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(dto);
+    }
+
+    /// <summary>
     /// Parse the repeatable <c>?tag=key:value</c> filter into a normalized "key:value"[] (distinct, trimmed).
     /// Empty array = no filter. The query clause below ANDs across all selected tags (a check must carry EVERY
     /// one) — mirrors the dashboard's multi-select-AND tag filter. Passed as a single text[] param so the same
