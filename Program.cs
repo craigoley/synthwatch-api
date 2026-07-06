@@ -66,7 +66,8 @@ builder.Services.AddScoped<IAuditScope, AuditScope>();
 
 // Worker middleware (outermost first): request logging (times whole pipeline + final status), then
 // exception shielding, then the authorization gate — INSIDE shielding so a session-lookup error becomes a
-// shielded 500 = DENIED (fail-closed). The gate is inert unless AUTH_ENFORCEMENT_ENABLED (default OFF).
+// shielded 500 = DENIED (fail-closed). The gate ENFORCES by default — inert only when
+// AUTH_ENFORCEMENT_ENABLED is EXPLICITLY "false"/"0" (fail-closed: #161 runtime default ON-when-unset, #173 bicep default true).
 builder.UseMiddleware<RequestLoggingMiddleware>();
 builder.UseMiddleware<ExceptionHandlingMiddleware>();
 builder.UseMiddleware<AuthorizationMiddleware>();
