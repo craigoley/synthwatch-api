@@ -943,6 +943,81 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Check_detail_locations_rollup_keys_on_assigned_locations_not_runs_history()
+    {
+        // Regression for the "By location" panel counting a DROPPED location. The rollup must key on
+        // check_locations (assigned), LEFT JOIN each location's latest run — NOT group over runs history.
+        // Seed: 2 ASSIGNED locations both pass + 1 UNASSIGNED location (centralus) with an OLD fail (dropped,
+        // like westus2 in the live repro). Expected: 2 entries, 0 failing, the dropped location ABSENT.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('ploc-rollup','http','https://d.example') RETURNING id INTO cid;
+              -- ASSIGNED set: eastus2 + westus2 (NOT centralus).
+              INSERT INTO check_locations (check_id,location) VALUES (cid,'eastus2'),(cid,'westus2');
+              -- Latest run per ASSIGNED location = pass (recent).
+              INSERT INTO runs (check_id,status,started_at,location) VALUES
+                (cid,'pass',now(),'eastus2'),
+                (cid,'pass',now(),'westus2');
+              -- DROPPED location: centralus has an OLD fail but no check_locations row → must be excluded.
+              INSERT INTO runs (check_id,status,started_at,location) VALUES
+                (cid,'fail',now() - interval '1 day','centralus');
+            END $$;
+            """);
+        var id = await db.Checks.Where(c => c.Name == "ploc-rollup").Select(c => c.Id).FirstAsync();
+        try
+        {
+            var fn = new ChecksFunctions(db);
+            var detail = Assert.IsType<CheckDetailDto>(
+                Assert.IsType<OkObjectResult>(await fn.GetCheck(Request(), id, default)).Value!);
+
+            // Exactly the 2 ASSIGNED locations, ordered by name; the dropped centralus is absent.
+            Assert.Equal(new[] { "eastus2", "westus2" }, detail.Locations.Select(l => l.Location).ToArray());
+            Assert.DoesNotContain(detail.Locations, l => l.Location == "centralus");
+            // "N/M failing" uses M = assigned locations → 0 failing (both pass). Goes RED if the dropped
+            // location's old fail is counted, or if the rollup keys on runs history.
+            Assert.Equal(0, detail.Locations.Count(l => l.Status is "fail" or "error"));
+            Assert.All(detail.Locations, l => Assert.Equal("pass", l.Status));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'ploc-rollup';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task Check_detail_locations_rollup_marks_assigned_but_unrun_location_pending()
+    {
+        // Honest no-data state: a location that IS assigned but has no run yet (freshly added) must appear as
+        // "pending" — NOT absent, NOT a fabricated pass.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('ploc-pending','http','https://d.example') RETURNING id INTO cid;
+              INSERT INTO check_locations (check_id,location) VALUES (cid,'eastus2'),(cid,'centralus');
+              INSERT INTO runs (check_id,status,started_at,location) VALUES (cid,'pass',now(),'eastus2');
+              -- centralus assigned but NEVER run.
+            END $$;
+            """);
+        var id = await db.Checks.Where(c => c.Name == "ploc-pending").Select(c => c.Id).FirstAsync();
+        try
+        {
+            var fn = new ChecksFunctions(db);
+            var detail = Assert.IsType<CheckDetailDto>(
+                Assert.IsType<OkObjectResult>(await fn.GetCheck(Request(), id, default)).Value!);
+
+            Assert.Equal("pending", detail.Locations.Single(l => l.Location == "centralus").Status);
+            Assert.Equal("pass", detail.Locations.Single(l => l.Location == "eastus2").Status);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'ploc-pending';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Narrative_serves_stored_row_with_factpack_and_404s_when_missing()
     {
         RequireDocker();

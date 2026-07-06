@@ -50,6 +50,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<StatusCheckRow> StatusChecks => Set<StatusCheckRow>();
     public DbSet<EgressRunRow> EgressRuns => Set<EgressRunRow>();
     public DbSet<RegionHealthRow> RegionHealth => Set<RegionHealthRow>();
+    public DbSet<CheckLocationStatusRow> CheckLocationStatuses => Set<CheckLocationStatusRow>();
     public DbSet<StatusSlaRow> StatusSla => Set<StatusSlaRow>();
     public DbSet<StatusIncidentRow> StatusIncidents => Set<StatusIncidentRow>();
     public DbSet<DeployRow> Deploys => Set<DeployRow>();
@@ -563,6 +564,17 @@ public class SynthWatchDbContext : DbContext
             e.ToView(null);
             e.Property(x => x.Location).HasColumnName("location");
             e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
+        });
+
+        // Keyless: the check-detail per-location rollup — one row per ASSIGNED location (check_locations),
+        // LEFT JOIN LATERAL its latest run's status. raw SQL only (see ChecksFunctions.CheckLocationsRollupAsync);
+        // status NULL = assigned-but-never-run (pending). Same check_locations-driven discipline as RegionHealthRow.
+        modelBuilder.Entity<CheckLocationStatusRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Location).HasColumnName("location");
+            e.Property(x => x.Status).HasColumnName("status");
         });
 
         // Keyless: read the inline availability-over-time bucketed query via raw SQL only.

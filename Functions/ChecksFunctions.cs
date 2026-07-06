@@ -156,7 +156,8 @@ public class ChecksFunctions
             .Take(20)
             .ToListAsync(ct);
 
-        var dto = CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct), await BuildSloAsync(id, check.SloTarget, ct));
+        var dto = CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct),
+            await BuildSloAsync(id, check.SloTarget, ct), await CheckLocationsRollupAsync(id, ct));
         // request_headers readback is session-only (see ListChecks) — the detail itself stays open.
         if (!await SessionReadGate.HasWriteSessionAsync(_auth, req, ct))
             dto = dto with { RequestHeaders = null };
@@ -300,6 +301,30 @@ public class ChecksFunctions
             .OrderBy(t => t.Key).ThenBy(t => t.Value)
             .Select(t => new TagDto(t.Key, t.Value))
             .ToListAsync(ct);
+
+    /// <summary>The "By location" rollup for check-detail: one entry per ASSIGNED location (check_locations),
+    /// LEFT JOIN LATERAL its latest run's status. Driving from check_locations (not runs history) EXCLUDES a
+    /// dropped location whose stale runs still exist, and surfaces a freshly-assigned location with no run yet
+    /// as "pending" (status NULL) rather than absent or a fabricated pass. Mirrors the /reports/region-health
+    /// LEFT-JOIN-check_locations discipline, per-check. {checkId} binds as a parameter (FromSql/FormattableString).</summary>
+    private async Task<IReadOnlyList<LocationStatusDto>> CheckLocationsRollupAsync(long checkId, CancellationToken ct)
+    {
+        var rows = await _db.CheckLocationStatuses.FromSql(
+            $@"SELECT cl.location AS location, r.status AS status
+               FROM check_locations cl
+               LEFT JOIN LATERAL (
+                   SELECT status FROM runs
+                   WHERE check_id = cl.check_id AND location = cl.location
+                   ORDER BY started_at DESC
+                   LIMIT 1
+               ) r ON true
+               WHERE cl.check_id = {checkId}
+               ORDER BY cl.location").AsNoTracking().ToListAsync(ct);
+
+        return rows
+            .Select(x => new LocationStatusDto(x.Location, x.Status ?? LocationStatusDto.Pending))
+            .ToList();
+    }
 
     /// <summary>DELETE /api/checks/{id} — soft delete (enabled=false) by default; ?hard=true removes the row.</summary>
     [Function("DeleteCheck")]

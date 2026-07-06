@@ -116,7 +116,12 @@ public record CheckSummaryDto(
 }
 
 /// <summary>A check's latest-run status from one location (per-location rollup for the grid).</summary>
-public record LocationStatusDto(string Location, string Status);
+public record LocationStatusDto(string Location, string Status)
+{
+    /// <summary>Status for an ASSIGNED location that has no run yet (freshly added, or never claimed) — the
+    /// honest no-data state. Not a run status, not a fabricated pass; the panel renders it as awaiting data.</summary>
+    public const string Pending = "pending";
+}
 
 /// <summary>Per-check computed metrics (ported SQL), merged into the check summary by id.</summary>
 public record CheckMetricsDto(
@@ -166,6 +171,11 @@ public record CheckDetailDto(
     string CurrentStatus,
     string CurrentHealth,
     IReadOnlyList<RunDto> RecentRuns,
+    // Per-location rollup for the "By location" panel. Keyed on the check's ASSIGNED locations
+    // (check_locations), each LEFT JOINed to its latest run's status — NOT derived from runs history. So a
+    // DROPPED location (old runs, no longer assigned) is absent, and a freshly-ADDED location with no run yet
+    // is present with status "pending". The panel's "N/M failing" count uses M = assigned locations.
+    IReadOnlyList<LocationStatusDto> Locations,
     // key:value tags (Phase 9a) joined from check_tags.
     IReadOnlyList<TagDto> Tags,
     // Monitors-as-code (Phase 13): the manifest id + spec path this check was activated from (null for
@@ -180,7 +190,8 @@ public record CheckDetailDto(
     bool HasRedactPatterns,
     string RedactionHealth)
 {
-    public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, IReadOnlyList<TagDto> tags, SloDto? slo = null) => new(
+    public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, IReadOnlyList<TagDto> tags,
+        SloDto? slo = null, IReadOnlyList<LocationStatusDto>? locations = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.BodyMustContain, c.IntervalSeconds, c.LastRunAt, c.TimeoutMs, c.FailureThreshold,
         c.Severity, c.Enabled, c.CreatedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
@@ -196,6 +207,7 @@ public record CheckDetailDto(
         CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
         RecentRuns: recentRuns.Select(RunDto.From).ToList(),
+        Locations: locations ?? Array.Empty<LocationStatusDto>(),
         Tags: tags,
         SourceKey: c.SourceKey,
         SpecPath: c.SpecPath,
