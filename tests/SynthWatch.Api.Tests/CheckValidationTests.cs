@@ -24,6 +24,28 @@ public class CheckValidationTests
         Assert.Equal("http", check.Kind);
     }
 
+    // #169: a check created with NO explicit failure_threshold must get the runner's canonical default (1),
+    // not the old drifted 3. Runner db/schema.sql = DEFAULT 1 (migration 0045, "was 3" — alert on the FIRST
+    // scheduled-down since in-run retries already confirm the failure). Goes RED if the create-path default
+    // (CheckValidation.TryBuildNew `?? 1`) is reverted to 3 or the comparison drifts.
+    [Fact]
+    public void New_check_without_explicit_failure_threshold_defaults_to_1()
+    {
+        var req = HttpReq(); // no FailureThreshold set → null
+        Assert.Null(req.FailureThreshold);
+        Assert.True(CheckValidation.TryBuildNew(req, out var check, out _));
+        Assert.Equal(1, check.FailureThreshold);
+    }
+
+    [Fact]
+    public void Explicit_failure_threshold_is_preserved_over_the_default()
+    {
+        var req = HttpReq();
+        req.FailureThreshold = 3; // a deliberate value must NOT be coerced to the default
+        Assert.True(CheckValidation.TryBuildNew(req, out var check, out _));
+        Assert.Equal(3, check.FailureThreshold);
+    }
+
     // ---- secret-ref auth: inline credentials MUST be refused (the security property) ----
 
     [Fact]

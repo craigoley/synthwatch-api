@@ -97,7 +97,7 @@ CREATE TABLE public.checks (
     interval_seconds integer DEFAULT 300 NOT NULL,
     last_run_at timestamp with time zone,
     timeout_ms integer DEFAULT 30000 NOT NULL,
-    failure_threshold integer DEFAULT 3 NOT NULL,
+    failure_threshold integer DEFAULT 1 NOT NULL,
     severity text DEFAULT 'critical'::text NOT NULL,
     enabled boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,

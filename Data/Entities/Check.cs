@@ -31,7 +31,11 @@ public class Check
 
     public int TimeoutMs { get; set; } = 30000;
 
-    public int FailureThreshold { get; set; } = 3;
+    // Canonical default is 1, owned by the runner (db/schema.sql: NOT NULL DEFAULT 1) — set deliberately in
+    // runner migration 0045 (was 3): in-run fast-retries confirm a failure, so alert on the FIRST
+    // scheduled-down, not the third. The real create-path default is CheckValidation.TryBuildNew (`?? 1`);
+    // this initializer keeps any bare `new Check()` consistent with it. See #169 (default-divergence).
+    public int FailureThreshold { get; set; } = 1;
 
     // CHECK: severity IN ('critical','warning')
     public string Severity { get; set; } = "critical";
