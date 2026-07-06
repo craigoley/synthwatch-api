@@ -109,7 +109,7 @@ public static class CheckValidation
         check.BodyMustContain = string.IsNullOrWhiteSpace(req.BodyMustContain) ? null : req.BodyMustContain;
         check.IntervalSeconds = req.IntervalSeconds ?? 300;
         check.TimeoutMs = req.TimeoutMs ?? 30000;
-        check.FailureThreshold = req.FailureThreshold ?? 3;
+        check.FailureThreshold = req.FailureThreshold ?? 1; // runner canonical default (db/schema.sql DEFAULT 1, migration 0045: was 3)
         check.Severity = severity;
         check.Enabled = req.Enabled ?? true;
         check.LighthouseEnabled = req.LighthouseEnabled ?? false;
