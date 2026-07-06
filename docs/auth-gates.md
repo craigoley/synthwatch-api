@@ -65,8 +65,9 @@ curl -s -H "Authorization: Bearer $TOKEN" "$BASE/checks/1" | grep -c requestHead
 ## Operator config facts (env vars)
 
 Three facts the API owns that the dashboard's #190 runbook flagged as *verify-from-API-side*. Each is
-quoted at `file:line` against source (2026-07-05). The enforcement flag's **live** value is deliberately
-left `needs-verification` — see below.
+quoted at `file:line` against source (2026-07-05). All three are now **confirmed** — the enforcement
+flag's live value, previously left `needs-verification`, is resolved below now that **#173** flipped the
+bicep default to fail-closed `true` and the live app setting was read directly.
 
 ### Admin allowlist — `ADMIN_EMAILS`  ✅ confirmed
 
@@ -87,9 +88,9 @@ Services**, preferring **managed identity** (no ACS key stored on the Function A
 - **Enumeration-safe:** a code is only *sent* to a known editor/admin; an unknown email gets a stored, unsendable code and the endpoint **always** returns 202 (`AuthFunctions.cs:48,76`).
 - **Set:** `AUTH_EMAIL_FROM` (`infra/main.bicep:220`), `ACS_EMAIL_ENDPOINT` (`infra/main.bicep:224`).
 
-### Enforcement flag — `AUTH_ENFORCEMENT_ENABLED`  ✅ name + wiring confirmed / ⚠️ live value needs-verification
+### Enforcement flag — `AUTH_ENFORCEMENT_ENABLED`  ✅ confirmed (name + wiring + live value)
 
 - **Name + read:** `Infrastructure/AuthorizationMiddleware.cs:33` (`EnforcementEnabled()` → `Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED")`); pure parse at `AuthorizationMiddleware.cs:37` — `!(raw == "false" || raw == "0")`, case-insensitive.
 - **Semantics (code):** **fail-closed** — unset / empty / unrecognized → **ON**; only an explicit `false`/`0` turns it OFF (`AuthorizationMiddleware.cs:28`–`38`). `Program.cs:79`–`92` logs a loud startup warning whenever it resolves OFF.
-- **Set:** `infra/main.bicep:229` (`name: 'AUTH_ENFORCEMENT_ENABLED'` / `value: string(authEnforcementEnabled)`) from `param authEnforcementEnabled bool = false` (`main.bicep:56`).
-- ⚠️ **Live prod value = needs-verification.** Because bicep sets the var *explicitly*, the code's "unset → ON" fail-safe does **not** apply to a bicep deploy — the deployed value is whatever the param resolves to, and its **default is `false`** (→ `"False"` → OFF). No `.bicepparam` / parameters file / `deploy.yml` in this repo overrides it to `true`. So the live posture **cannot be derived from repo source alone** — read the deployed Function App's `AUTH_ENFORCEMENT_ENABLED` app setting to confirm whether prod is actually enforcing. (Do not assume ON from the code's fail-closed intent; the explicit bicep value wins.)
+- **Set:** `infra/main.bicep:229`–`230` (`name: 'AUTH_ENFORCEMENT_ENABLED'` / `value: string(authEnforcementEnabled)`) from `param authEnforcementEnabled bool = true` (`main.bicep:56`). ★ The default was flipped `false → true` in **#173** (fail-closed at the infra layer, mirroring #161 one layer down): a default-param `az deployment group create` now **preserves** enforcement instead of silently disabling it.
+- ✅ **Live prod value = `true` (enforcing).** Confirmed two independent ways that agree: (1) **source** — the bicep param default is `true` as of #173, and because bicep sets the var *explicitly*, the deployed value is the param's — so a default-param deploy writes `"True"` → ON; (2) **live** — the deployed Function App app setting reads `AUTH_ENFORCEMENT_ENABLED=true` (`az functionapp config appsettings list -g synthwatch-rg -n synthwatch-api`, 2026-07-05), independently corroborated by #162's anonymous GETs returning 401 in prod. Re-read the live app setting to reconfirm after any manual override (the explicit bicep value, not the code's "unset → ON" fail-safe, is what a redeploy writes).
