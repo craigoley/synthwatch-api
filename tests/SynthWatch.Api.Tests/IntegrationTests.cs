@@ -126,7 +126,8 @@ public class IntegrationTests
         Assert.NotEmpty(seed.Spark);              // json_agg sparkline
         Assert.Equal(0, seed.OpenIncidentCount);  // the seeded incident is resolved
         Assert.Null(seed.MaxOpenSeverity);
-        // Per-location rollup: the seed runs are single-location -> one "default" entry.
+        // Per-location rollup keys on check_locations (the ASSIGNED set): seed-http is assigned the
+        // single 'default' location, so the grid carries one "default" entry.
         Assert.Contains(seed.Locations, l => l.Location == "default");
     }
 
