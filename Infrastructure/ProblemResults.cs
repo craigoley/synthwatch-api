@@ -11,6 +11,9 @@ public static class ProblemResults
 {
     public const string ContentType = "application/problem+json";
 
+    /// <summary>Build the RFC 9457 problem+json response body (type = "about:blank"; the status IS the type,
+    /// so <paramref name="title"/> carries the human label). Also emits the legacy error/message members the
+    /// dashboard's error path reads, and the correlation id as <c>instance</c>.</summary>
     /// <param name="legacyError">the prior machine code (e.g. "internal_error", "unauthorized") — kept for the dashboard.</param>
     /// <param name="instance">the invocation/correlation id (null when none is available).</param>
     public static object Body(int status, string title, string detail, string? instance, string legacyError) => new

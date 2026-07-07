@@ -59,9 +59,11 @@ public class TagsFunctions
 
         // Normalize + dedupe by key (last value wins), dropping empty-value tags — exactly as #84.
         var byKey = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var n in body.Tags.Select(t => TagNormalization.NormalizeTag(t.Key, t.Value)))
+        foreach (var n in body.Tags.Select(t => TagNormalization.NormalizeTag(t.Key, t.Value))
+                                    .Where(n => n is not null)
+                                    .Select(n => n!.Value))
         {
-            if (n is not null) byKey[n.Value.Key] = n.Value.Value;
+            byKey[n.Key] = n.Value;
         }
         var keys = byKey.Keys.ToArray();
         var values = byKey.Values.ToArray();
