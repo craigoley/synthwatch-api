@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Dtos;
@@ -26,12 +27,16 @@ public class ReconcileFunctions
     private readonly IAuthPrincipal? _auth;
 
     // _auth optional for test convenience only — DI always injects it; the read gate is inert flag-off.
-    public ReconcileFunctions(SynthWatchDbContext db, IRunnerJobTrigger trigger, IOptions<RunnerJobOptions> jobOptions, IAuthPrincipal? auth = null)
+    private readonly ILogger<ReconcileFunctions>? _logger;
+
+    public ReconcileFunctions(SynthWatchDbContext db, IRunnerJobTrigger trigger, IOptions<RunnerJobOptions> jobOptions,
+        IAuthPrincipal? auth = null, ILogger<ReconcileFunctions>? logger = null)
     {
         _db = db;
         _trigger = trigger;
         _jobOptions = jobOptions.Value;
         _auth = auth;
+        _logger = logger;
     }
 
     /// <summary>
@@ -74,7 +79,7 @@ public class ReconcileFunctions
                ORDER BY drift_type, source_key").AsNoTracking().ToListAsync(ct);
 
         var items = rows.Select(r =>
-            new ReconcileDriftItemDto(r.SourceKey, r.DriftType, SafeJson(r.Detail), r.DetectedAt)).ToList();
+            new ReconcileDriftItemDto(r.SourceKey, r.DriftType, SafeJson(r.Detail, _logger, r.SourceKey), r.DetectedAt)).ToList();
 
         // The latest detected_at = when the last reconcile ran; null when there's no drift.
         DateTimeOffset? detectedAt = rows.Count == 0 ? null : rows.Max(r => r.DetectedAt);
@@ -106,7 +111,7 @@ public class ReconcileFunctions
                ORDER BY status, drift_type, source_key").AsNoTracking().ToListAsync(ct);
 
         var items = rows.Select(r =>
-            new ReconcileApplyPlanItemDto(r.SourceKey, r.DriftType, r.Status, SafeJson(r.Plan), r.ComputedAt)).ToList();
+            new ReconcileApplyPlanItemDto(r.SourceKey, r.DriftType, r.Status, SafeJson(r.Plan, _logger, r.SourceKey), r.ComputedAt)).ToList();
 
         DateTimeOffset? computedAt = rows.Count == 0 ? null : rows.Max(r => r.ComputedAt);
 
@@ -352,9 +357,22 @@ public class ReconcileFunctions
     private sealed record PlanStmt(string? Text, List<JsonElement>? Values, List<string>? Regions);
 
     // Parse runner-written jsonb (read as text) defensively — a malformed value degrades to {}, never throws.
-    private static JsonElement SafeJson(string? json)
+    private static JsonElement SafeJson(string? json, ILogger? logger, string? sourceKey)
     {
         try { return JsonSerializer.Deserialize<JsonElement>(string.IsNullOrWhiteSpace(json) ? "{}" : json); }
-        catch (JsonException) { return JsonSerializer.Deserialize<JsonElement>("{}"); }
+        catch (JsonException)
+        {
+            // Malformed runner-written jsonb → degrade to {} (unchanged); log so a corrupt stored row is visible.
+            if (logger is not null) ReconcileLog.MalformedPlanJson(logger, sourceKey ?? "(unknown)");
+            return JsonSerializer.Deserialize<JsonElement>("{}");
+        }
     }
+}
+
+/// <summary>High-performance (CA1848) log delegates for ReconcileFunctions tolerance paths.</summary>
+internal static partial class ReconcileLog
+{
+    [LoggerMessage(EventId = 7003, Level = LogLevel.Information,
+        Message = "malformed runner-written reconcile jsonb for source_key {SourceKey} — degraded to {{}} (corrupt stored row)")]
+    public static partial void MalformedPlanJson(ILogger logger, string sourceKey);
 }

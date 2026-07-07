@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
@@ -12,8 +13,13 @@ namespace SynthWatch.Api.Functions;
 public class IncidentsFunctions
 {
     private readonly SynthWatchDbContext _db;
+    private readonly ILogger<IncidentsFunctions>? _logger;
 
-    public IncidentsFunctions(SynthWatchDbContext db) => _db = db;
+    public IncidentsFunctions(SynthWatchDbContext db, ILogger<IncidentsFunctions>? logger = null)
+    {
+        _db = db;
+        _logger = logger;
+    }
 
     // Incidents are SPARSE compared to runs (one per failure episode, not ~hundreds/day), so the
     // default look-back is wider — 30d gives a useful recent window of resolved incidents without a
@@ -228,6 +234,8 @@ public class IncidentsFunctions
         }
         catch (Npgsql.PostgresException e) when (e.SqlState == "42P01")
         {
+            // Serve empty (never a 500) — but leave a breadcrumb so a persistently-empty panel is one grep, not a mystery.
+            if (_logger is not null) IncidentsLog.DeploysTableAbsent(_logger, host);
             return new List<NearbyDeployDto>(); // deploys not migrated in this env — serve empty, never a 500.
         }
 
@@ -252,4 +260,12 @@ public class IncidentsFunctions
         host = host.Trim().ToLowerInvariant();
         return host.StartsWith("www.", StringComparison.Ordinal) ? host["www.".Length..] : host;
     }
+}
+
+/// <summary>High-performance (CA1848) log delegates for IncidentsFunctions tolerance paths.</summary>
+internal static partial class IncidentsLog
+{
+    [LoggerMessage(EventId = 7000, Level = LogLevel.Debug,
+        Message = "deploys table absent (42P01) — nearby-deploys serving empty for host {Host} (expected pre-migration; merged≠migrated)")]
+    public static partial void DeploysTableAbsent(ILogger logger, string host);
 }

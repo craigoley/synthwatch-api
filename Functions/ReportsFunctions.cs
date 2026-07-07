@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
@@ -21,8 +22,13 @@ namespace SynthWatch.Api.Functions;
 public class ReportsFunctions
 {
     private readonly SynthWatchDbContext _db;
+    private readonly ILogger<ReportsFunctions>? _logger;
 
-    public ReportsFunctions(SynthWatchDbContext db) => _db = db;
+    public ReportsFunctions(SynthWatchDbContext db, ILogger<ReportsFunctions>? logger = null)
+    {
+        _db = db;
+        _logger = logger;
+    }
 
     private static int? WindowDays(string w) => w switch
     {
@@ -59,6 +65,8 @@ public class ReportsFunctions
         }
         catch (Npgsql.PostgresException e) when (e.SqlState == "42P01")
         {
+            // Serve empty (not a 500) — breadcrumb so a persistently-empty deploys report is one grep, not a mystery.
+            if (_logger is not null) DeploysReportLog.DeploysTableAbsent(_logger, host);
             rows = new(); // deploys not migrated yet (runner PR deploys first) — serve empty, not a 500.
         }
 
@@ -773,4 +781,12 @@ public class ReportsFunctions
         try { return JsonSerializer.Deserialize<JsonElement>(string.IsNullOrWhiteSpace(json) ? "{}" : json); }
         catch (JsonException) { return JsonSerializer.Deserialize<JsonElement>("{}"); }
     }
+}
+
+/// <summary>High-performance (CA1848) log delegates for ReportsFunctions tolerance paths.</summary>
+internal static partial class DeploysReportLog
+{
+    [LoggerMessage(EventId = 7001, Level = LogLevel.Debug,
+        Message = "deploys table absent (42P01) — /reports/deploys serving empty for host {Host} (expected pre-migration; merged≠migrated)")]
+    public static partial void DeploysTableAbsent(ILogger logger, string host);
 }

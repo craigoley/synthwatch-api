@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Dtos;
 using SynthWatch.Api.Infrastructure;
@@ -25,12 +26,15 @@ public class LocationDiffFunctions
     private readonly SynthWatchDbContext _db;
     private readonly IArtifactReader _artifacts;
     private readonly IAoaiClient _aoai;
+    private readonly ILogger<LocationDiffFunctions>? _logger;
 
-    public LocationDiffFunctions(SynthWatchDbContext db, IArtifactReader artifacts, IAoaiClient aoai)
+    public LocationDiffFunctions(SynthWatchDbContext db, IArtifactReader artifacts, IAoaiClient aoai,
+        ILogger<LocationDiffFunctions>? logger = null)
     {
         _db = db;
         _artifacts = artifacts;
         _aoai = aoai;
+        _logger = logger;
     }
 
     [Function("GetBaselineDiff")]
@@ -143,8 +147,20 @@ public class LocationDiffFunctions
                 var dto = JsonSerializer.Deserialize<TraceSignalsDto>(persisted, Web);
                 if (dto is not null) return dto;
             }
-            catch (JsonException) { /* malformed persisted JSON → no signals */ }
+            catch (JsonException)
+            {
+                // Malformed persisted JSON → serve no signals (unchanged); log so a corrupt stored row is visible.
+                if (_logger is not null) LocationDiffLog.MalformedPersistedSignals(_logger, id);
+            }
         }
         return null;
     }
+}
+
+/// <summary>High-performance (CA1848) log delegates for LocationDiffFunctions tolerance paths.</summary>
+internal static partial class LocationDiffLog
+{
+    [LoggerMessage(EventId = 7002, Level = LogLevel.Information,
+        Message = "malformed persisted trace-signals JSON for run {RunId} — serving no signals (corrupt stored row)")]
+    public static partial void MalformedPersistedSignals(ILogger logger, long runId);
 }
