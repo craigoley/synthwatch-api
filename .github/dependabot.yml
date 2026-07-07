@@ -7,6 +7,10 @@ updates:
       day: monday
       time: "05:00"
     open-pull-requests-limit: 10
+    # Wait 7 days before proposing an update to a newly-published version — a freshly-published
+    # package (or a compromised release) has to survive a week before Dependabot proposes it.
+    cooldown:
+      default-days: 7
     ignore:
       # HARD PIN — do not let Dependabot re-propose the 2.x -> 3.x major. WorkerService 3.x pulls
       # Microsoft.ApplicationInsights 3.x, which is incompatible with the Functions worker AI
@@ -31,6 +35,8 @@ updates:
       day: monday
       time: "05:00"
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
     groups:
       actions-minor-patch:
         update-types:
