@@ -199,6 +199,9 @@ public class ReportsFunctions
                -- (read == page). Its own fixed 1h/6h/30m windows (NOT the report window), so no from/to args.
                CROSS JOIN LATERAL slo_burn_status(c.id) b
                WHERE c.slo_target IS NOT NULL
+                 -- ★ Pre-prod default-EXCLUDE (arc S1c): a non-prod check never enters the prod SLO/error-budget
+                 -- fleet. coalesce() so a row written before checks.environment existed still reads as prod.
+                 AND coalesce(c.environment, 'prod') = 'prod'
                  AND (cardinality({tags}) = 0 OR c.id IN (
                        SELECT ft.check_id FROM check_tags ft
                        WHERE ft.key || ':' || ft.value = ANY({tags})
@@ -241,6 +244,8 @@ public class ReportsFunctions
                FROM incidents i
                JOIN checks c ON c.id = i.check_id
                WHERE i.opened_at >= now() - ({days} * INTERVAL '1 day')
+                 -- ★ Pre-prod default-EXCLUDE (arc S1c): a non-prod check's incidents never enter the prod MTTR.
+                 AND coalesce(c.environment, 'prod') = 'prod'
                  AND (cardinality({tags}) = 0 OR i.check_id IN (
                        SELECT ft.check_id FROM check_tags ft
                        WHERE ft.key || ':' || ft.value = ANY({tags})
@@ -436,6 +441,10 @@ public class ReportsFunctions
                LIMIT 1
            ) rt ON true
            WHERE c.enabled = true
+             -- ★ Pre-prod default-EXCLUDE (arc S1c): the trust scorecard is the PROD fleet only. The
+             -- single-check detail (TrustDetailSql) is deliberately NOT excluded — a caller asking for one
+             -- monitor by id has already scoped it.
+             AND coalesce(c.environment, 'prod') = 'prod'
            ORDER BY c.name";
 
     // Same row shape as the fleet SQL, scoped to one check (enabled or not — a detail view resolves disabled

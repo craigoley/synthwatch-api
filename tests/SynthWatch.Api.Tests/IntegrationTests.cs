@@ -268,6 +268,72 @@ public class IntegrationTests
         }
     }
 
+    // ★ Pre-prod-arc S1c CONTRACT: a check with environment != 'prod' is EXCLUDED from the prod fleet
+    // rollups (slo / mttr / trust) but still INCLUDED in the env-agnostic infra signals (egress; #187).
+    // The exclude is what protects the prod SLO budget once S3 sets a real pre-prod check.
+    [SkippableFact]
+    public async Task Preprod_check_is_excluded_from_slo_mttr_trust_but_included_in_egress()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // envx-prod: 100 pass, 0 down (budget 1, consumed 0). envx-staging (environment='staging'): 100 runs
+        // with 5 fail — 5 consumed IF wrongly counted — plus a distinctive egress run and resolved incidents.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE p bigint; s bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, slo_target, environment) VALUES ('envx-prod','http','https://p.ex',0.99,'prod') RETURNING id INTO p;
+              INSERT INTO checks (name, kind, target_url, slo_target, environment) VALUES ('envx-staging','http','https://s.ex',0.99,'staging') RETURNING id INTO s;
+              INSERT INTO check_tags (check_id, key, value) VALUES (p,'team','envx'), (s,'team','envx');
+              FOR i IN 1..100 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (p, 'pass', now() - (i || ' minutes')::interval); END LOOP;
+              FOR i IN 1..100 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (s, CASE WHEN i <= 5 THEN 'fail' ELSE 'pass' END, now() - (i || ' minutes')::interval); END LOOP;
+              -- staging run with a distinctive region + egress IP → proves egress is env-AGNOSTIC (still counts it).
+              INSERT INTO runs (check_id, status, started_at, location, egress_ip) VALUES (s, 'pass', now() - interval '10 minutes', 'envx-region', '203.0.113.77');
+              INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures, rca) VALUES
+                (p,'resolved','critical', now()-interval '5 days', now()-interval '5 days'+interval '60 seconds', 2, jsonb_build_object('classification','real-outage')),
+                (p,'resolved','critical', now()-interval '4 days', now()-interval '4 days'+interval '90 seconds', 2, jsonb_build_object('classification','real-outage')),
+                (s,'resolved','critical', now()-interval '3 days', now()-interval '3 days'+interval '90 seconds', 2, jsonb_build_object('classification','real-outage')),
+                (s,'resolved','critical', now()-interval '2 days', now()-interval '2 days'+interval '90 seconds', 2, jsonb_build_object('classification','real-outage'));
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+
+            // ── SLO: only the prod check; the fleet budget is prod-only ──
+            var slo = Assert.IsType<SloReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetSloReport(Request("?window=30d&tag=team:envx"), default)).Value!);
+            Assert.Equal(new[] { "envx-prod" }, slo.Items.Select(i => i.CheckName).ToArray());
+            Assert.DoesNotContain(slo.Items, i => i.CheckName == "envx-staging");
+            // ★ MUST-GO-RED: drop `AND coalesce(c.environment,'prod')='prod'` from GetSloReport and envx-staging's
+            //   5 down runs pollute the fleet → Consumed becomes 5. The exclude keeps the prod SLO budget honest.
+            Assert.Equal(0, slo.Fleet.Consumed);
+
+            // ── MTTR: only the prod check's incidents ──
+            var mttr = Assert.IsType<MttrReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetMttrReport(Request("?window=30d&tag=team:envx"), default)).Value!);
+            Assert.Equal(new[] { "envx-prod" }, mttr.Items.Select(i => i.CheckName).OrderBy(n => n).ToArray());
+
+            // ── Trust (whole enabled fleet, no tag): prod present, staging absent ──
+            var trust = Assert.IsType<TrustReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetTrustReport(Request("?window=30d"), default)).Value!);
+            Assert.Contains(trust.Monitors, m => m.CheckName == "envx-prod");
+            Assert.DoesNotContain(trust.Monitors, m => m.CheckName == "envx-staging");
+
+            // ── Egress (INCLUDE — env-agnostic infra signal, #187): the staging run's region+IP ARE present.
+            //   Excluding pre-prod here would DROP a real allowlist IP — the reason #187 adjudicated it INCLUDE. ──
+            var egress = Assert.IsType<EgressReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetEgressReport(Request("?window=all"), default)).Value!);
+            var region = Assert.Single(egress.Regions, r => r.Location == "envx-region");
+            Assert.Contains(region.Ips, ip => ip.Ip == "203.0.113.77");
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM checks WHERE name IN ('envx-prod','envx-staging');");
+        }
+    }
+
     // ★ GET /reports/mttr — fleet incident analytics. Proves: MTTR excludes OPEN incidents (counts them);
     // mean≠median both present (skewed durations); the fleet mean/median are over the FULL resolved set,
     // NOT mean-of-means / median-of-medians; insufficientData → null (never 0); classification unclassified
