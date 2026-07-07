@@ -3749,7 +3749,7 @@ public class IntegrationTests
         await db.Database.ExecuteSqlRawAsync(
             "INSERT INTO checks (name, kind, target_url) VALUES ('shape-check', 'http', 'https://x.example');");
         var checkId = await db.Checks.Where(c => c.Name == "shape-check").Select(c => c.Id).FirstAsync();
-        await db.Database.ExecuteSqlRawAsync(
+        await db.Database.ExecuteSqlInterpolatedAsync(
             $"INSERT INTO runs (check_id, status, started_at) VALUES ({checkId}, 'pass', now());");
         var runId = await db.Runs.Where(r => r.CheckId == checkId).Select(r => r.Id).FirstAsync();
         const string adminTok = "swt_shape_admin";
@@ -4317,12 +4317,12 @@ public class IntegrationTests
 
     private static async Task CleanupApply(SynthWatch.Api.Data.SynthWatchDbContext db, string src, string[] locs)
     {
-        await db.Database.ExecuteSqlRawAsync(
-            $"DELETE FROM check_locations WHERE check_id IN (SELECT id FROM checks WHERE source_key = '{src}'); " +
-            $"DELETE FROM checks WHERE source_key = '{src}'; " +
-            $"DELETE FROM reconcile_apply_plan WHERE source_key = '{src}';");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $@"DELETE FROM check_locations WHERE check_id IN (SELECT id FROM checks WHERE source_key = {src});
+               DELETE FROM checks WHERE source_key = {src};
+               DELETE FROM reconcile_apply_plan WHERE source_key = {src};");
         foreach (var l in locs)
-            await db.Database.ExecuteSqlRawAsync($"DELETE FROM locations WHERE name = '{l}'");
+            await db.Database.ExecuteSqlInterpolatedAsync($"DELETE FROM locations WHERE name = {l}");
     }
 
     private static ReconcileFunctions ApplyFn(SynthWatch.Api.Data.SynthWatchDbContext db) =>
