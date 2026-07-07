@@ -573,6 +573,7 @@ public class SynthWatchDbContext : DbContext
         {
             e.HasNoKey();
             e.ToView(null);
+            e.Property(x => x.CheckId).HasColumnName("check_id");
             e.Property(x => x.Location).HasColumnName("location");
             e.Property(x => x.Status).HasColumnName("status");
         });

@@ -1018,6 +1018,54 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Check_LIST_grid_locations_rollup_keys_on_assigned_locations_not_runs_history()
+    {
+        // GRID equivalent of the #178 detail fix. GET /checks (CheckSummaryDto.Locations) must key on
+        // check_locations, NOT runs history — the live "check 342 regional 1/3" bug: a decommissioned
+        // location (westus2) whose last run was a FAIL survives as latest-per-location and drags the grid
+        // card to regional-degraded, even though it's no longer assigned and every current run passes.
+        // Seed: 2 ASSIGNED locations (centralus, eastus2) both pass + westus2 UNASSIGNED with a stale FAIL.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url) VALUES ('ploc-grid','http','https://d.example') RETURNING id INTO cid;
+              INSERT INTO check_locations (check_id,location) VALUES (cid,'centralus'),(cid,'eastus2');
+              INSERT INTO runs (check_id,status,started_at,location) VALUES
+                (cid,'pass',now(),'centralus'),
+                (cid,'pass',now(),'eastus2');
+              -- decommissioned westus2: stale FAIL, still in runs history, NOT in check_locations.
+              INSERT INTO runs (check_id,status,started_at,location) VALUES
+                (cid,'fail',now() - interval '2 days','westus2');
+            END $$;
+            """);
+        var id = await db.Checks.Where(c => c.Name == "ploc-grid").Select(c => c.Id).FirstAsync();
+        try
+        {
+            var fn = new ChecksFunctions(db);
+            var list = Assert.IsAssignableFrom<IEnumerable<CheckSummaryDto>>(
+                Assert.IsType<OkObjectResult>(await fn.ListChecks(Request(), default)).Value!).ToList();
+            var summary = Assert.Single(list, c => c.Id == id);
+
+            // Exactly the 2 ASSIGNED locations; the dropped westus2 is ABSENT. Goes RED against the old
+            // runs-keyed GroupBy (westus2 would appear as its stale 'fail').
+            Assert.Equal(new[] { "centralus", "eastus2" }, summary.Locations.Select(l => l.Location).ToArray());
+            Assert.DoesNotContain(summary.Locations, l => l.Location == "westus2");
+
+            // The dashboard's regional-degraded computation (check-card.tsx: locs.length>1 && locDown>0 &&
+            // locDown<locs.length) must read HEALTHY: 0 down, so no "regional 1/3" amber badge.
+            var locDown = summary.Locations.Count(l => l.Status is "fail" or "error");
+            var regional = summary.Locations.Count > 1 && locDown > 0 && locDown < summary.Locations.Count;
+            Assert.Equal(0, locDown);
+            Assert.False(regional);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'ploc-grid';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Narrative_serves_stored_row_with_factpack_and_404s_when_missing()
     {
         RequireDocker();
