@@ -24,9 +24,8 @@ public static class SensitiveRedaction
             return text;
 
         var result = text;
-        foreach (var pattern in patterns)
+        foreach (var pattern in patterns.Where(p => !string.IsNullOrWhiteSpace(p)))
         {
-            if (string.IsNullOrWhiteSpace(pattern)) continue;
             try
             {
                 result = Regex.Replace(result, pattern, Mask, RegexOptions.None, PatternTimeout);

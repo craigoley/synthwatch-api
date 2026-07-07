@@ -40,7 +40,7 @@ public static class StatusPageProjection
                 int degraded = g.Count(c => !IsDownCritical(c) && IsDegraded(c));
                 int up = g.Count(c => c.Status == "pass" && !c.HasOpenIncident);
                 string state = down > 0 ? "down" : degraded > 0 ? "degraded" : up > 0 ? "up" : "unknown";
-                var u = uptime.TryGetValue(g.Key, out var uv) ? uv : (Pct: (decimal?)null, Building: true);
+                var u = uptime.TryGetValue(g.Key, out var uv) ? uv : (Pct: null, Building: true);
                 return new StatusPropertyDto(
                     Name: g.Key,
                     State: state,
