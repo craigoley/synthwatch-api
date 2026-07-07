@@ -88,16 +88,18 @@ public class ChecksFunctions
             .Select(g => g.OrderByDescending(r => r.StartedAt).First())
             .ToListAsync(ct);
         var byCheck = latestPerLocation.GroupBy(r => r.CheckId).ToDictionary(g => g.Key, g => g.ToList());
-        // Overall latest run per check = the most recent across its locations (unchanged semantics).
+        // Overall latest run per check = the most recent across its RUN locations (unchanged semantics).
+        // Keyed on runs (not check_locations) on purpose: it's the freshest observed run, and a dropped
+        // location's stale run is by definition older, so it never wins "most recent" — the overall status
+        // stays correct. Only the per-location ROLLUP below needed re-keying.
         var latestByCheck = byCheck.ToDictionary(
             kv => kv.Key, kv => kv.Value.OrderByDescending(r => r.StartedAt).First());
-        // Per-location rollup: one {location, status} per location, ordered by location name.
-        var rollupByCheck = byCheck.ToDictionary(
-            kv => kv.Key,
-            kv => (IReadOnlyList<LocationStatusDto>)kv.Value
-                .Select(r => new LocationStatusDto(
-                    string.IsNullOrEmpty(r.Location) ? "default" : r.Location, r.Status))
-                .OrderBy(d => d.Location, StringComparer.Ordinal).ToList());
+        // Per-location rollup — drive from check_locations (the ASSIGNED set), NOT runs history, so a location
+        // the check was DROPPED from (stale runs remain, no check_locations row) does NOT appear in the grid,
+        // and an assigned-but-unrun location shows "pending". Batched list equivalent of the #178 detail-side
+        // CheckLocationsRollupAsync (which fixed only GET /checks/{id}); this closes the same phantom on the
+        // grid (e.g. check 342 "regional 1/3" from decommissioned westus2's stale fail). One query, not N.
+        var rollupByCheck = await CheckLocationsRollupBatchAsync(ids, ct);
 
         // Ported lateral-join metrics (p50/p95, runs24h, sparkline, open-incident rollup),
         // one round-trip for all checks. Open-incident count also backs hasOpenIncident.
@@ -310,7 +312,7 @@ public class ChecksFunctions
     private async Task<IReadOnlyList<LocationStatusDto>> CheckLocationsRollupAsync(long checkId, CancellationToken ct)
     {
         var rows = await _db.CheckLocationStatuses.FromSql(
-            $@"SELECT cl.location AS location, r.status AS status
+            $@"SELECT cl.check_id AS check_id, cl.location AS location, r.status AS status
                FROM check_locations cl
                LEFT JOIN LATERAL (
                    SELECT status FROM runs
@@ -324,6 +326,41 @@ public class ChecksFunctions
         return rows
             .Select(x => new LocationStatusDto(x.Location, x.Status ?? LocationStatusDto.Pending))
             .ToList();
+    }
+
+    /// <summary>Batched per-location rollup for the GET /checks grid — the list equivalent of
+    /// <see cref="CheckLocationsRollupAsync"/> (#178, which fixed only the detail path). Drives from
+    /// check_locations (the ASSIGNED set) LEFT JOIN LATERAL each location's latest run, for ALL listed check
+    /// ids in ONE query (not N), so a location a check was DROPPED from (stale runs, no check_locations row)
+    /// is EXCLUDED, and an assigned-but-unrun location is "pending". {ids} binds as a single array parameter
+    /// (`= ANY`). Returns an empty map when nothing is listed (no query issued).</summary>
+    private async Task<Dictionary<long, IReadOnlyList<LocationStatusDto>>> CheckLocationsRollupBatchAsync(
+        List<long> ids, CancellationToken ct)
+    {
+        if (ids.Count == 0)
+            return new Dictionary<long, IReadOnlyList<LocationStatusDto>>();
+
+        var idsArr = ids.ToArray();
+        var rows = await _db.CheckLocationStatuses.FromSql(
+            $@"SELECT cl.check_id AS check_id, cl.location AS location, r.status AS status
+               FROM check_locations cl
+               LEFT JOIN LATERAL (
+                   SELECT status FROM runs
+                   WHERE check_id = cl.check_id AND location = cl.location
+                   ORDER BY started_at DESC
+                   LIMIT 1
+               ) r ON true
+               WHERE cl.check_id = ANY({idsArr})
+               ORDER BY cl.check_id, cl.location").AsNoTracking().ToListAsync(ct);
+
+        return rows
+            .GroupBy(x => x.CheckId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<LocationStatusDto>)g
+                    .Select(x => new LocationStatusDto(x.Location, x.Status ?? LocationStatusDto.Pending))
+                    .OrderBy(d => d.Location, StringComparer.Ordinal)
+                    .ToList());
     }
 
     /// <summary>DELETE /api/checks/{id} — soft delete (enabled=false) by default; ?hard=true removes the row.</summary>

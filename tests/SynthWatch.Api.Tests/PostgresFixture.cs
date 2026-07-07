@@ -35,6 +35,12 @@ public sealed class PostgresFixture : IAsyncLifetime
             VALUES ('seed-http', 'http', 'https://example.com', now() - interval '10 days')
             RETURNING id INTO cid;
 
+          -- Assigned location row — the runner seeds check_locations at check creation, so a real
+          -- check always has one. The grid per-location rollup keys on check_locations (not runs
+          -- history), so the fixture must mirror prod or the rollup reads empty. Runs below default
+          -- to location 'default', matching this row.
+          INSERT INTO check_locations (check_id, location) VALUES (cid, 'default');
+
           -- 25 completed runs in the last 24h: 20 pass, 5 fail (so up=20, completed=25 => 80%).
           FOR i IN 1..25 LOOP
             INSERT INTO runs (check_id, status, started_at, finished_at, duration_ms)
