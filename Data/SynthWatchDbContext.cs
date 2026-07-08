@@ -304,6 +304,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.CertDaysRemaining).HasColumnName("cert_days_remaining");
             e.Property(x => x.RetryCount).HasColumnName("retry_count"); // runner 0048: attempts to verdict
             e.Property(x => x.Location).HasColumnName("location");
+            e.Property(x => x.Sandbox).HasColumnName("sandbox"); // runner 0065: paused-monitor sandbox run
             e.HasOne(x => x.Check).WithMany(c => c.Runs).HasForeignKey(x => x.CheckId);
             e.HasIndex(x => new { x.CheckId, x.StartedAt });
         });
