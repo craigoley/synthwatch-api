@@ -118,9 +118,11 @@ public class ChecksFunctions
 
         var emptyRollup = (IReadOnlyList<LocationStatusDto>)Array.Empty<LocationStatusDto>();
         var emptyTags = (IReadOnlyList<TagDto>)Array.Empty<TagDto>();
-        // request_headers readback is session-only: validation never scans RequestHeaders for secrets (only
-        // Auth is references-only), so anonymous readers get the check WITHOUT them. Field-level gate — the
-        // list itself stays open (status/metrics are the public surface); same floor as SessionReadGate.
+        // request_headers + secret_headers readback is session-only: RequestHeaders is never scanned for
+        // secrets, and secret_headers is runner-owned with no API-side validation — so anonymous readers get
+        // the check WITHOUT either (references though secret_headers is, it's credential-adjacent and the API
+        // can't self-guarantee it's value-free; the cred-mgmt UI is an editor surface). Auth stays open (the
+        // API's own write-validation forbids inline values). Field-level gate; same floor as SessionReadGate.
         var showHeaders = await SessionReadGate.HasWriteSessionAsync(_auth, req, ct);
         var result = checks.Select(c => CheckSummaryDto.From(
             c,
@@ -128,7 +130,7 @@ public class ChecksFunctions
             metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty),
             rollupByCheck.GetValueOrDefault(c.Id, emptyRollup),
             tagsByCheck.GetValueOrDefault(c.Id, emptyTags)))
-            .Select(dto => showHeaders ? dto : dto with { RequestHeaders = null });
+            .Select(dto => showHeaders ? dto : dto with { RequestHeaders = null, SecretHeaders = null });
 
         // Short cache so the dashboard's polling doesn't hit the DB every tick; current status
         // moves run-to-run, so keep it brief (10s). The body is now SESSION-DEPENDENT (request_headers are
@@ -160,9 +162,9 @@ public class ChecksFunctions
 
         var dto = CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct),
             await BuildSloAsync(id, check.SloTarget, ct), await CheckLocationsRollupAsync(id, ct));
-        // request_headers readback is session-only (see ListChecks) — the detail itself stays open.
+        // request_headers + secret_headers readback is session-only (see ListChecks) — the detail stays open.
         if (!await SessionReadGate.HasWriteSessionAsync(_auth, req, ct))
-            dto = dto with { RequestHeaders = null };
+            dto = dto with { RequestHeaders = null, SecretHeaders = null };
         return ApiResults.Ok(dto);
     }
 
