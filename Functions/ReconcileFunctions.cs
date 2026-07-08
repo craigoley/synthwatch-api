@@ -229,16 +229,24 @@ public class ReconcileFunctions
                 {
                 // === 'new' — materialize (unchanged) ===
                 var v = doc?.Statements?.FirstOrDefault()?.Values;
-                if (v is null || v.Count < 9) throw new InvalidOperationException("plan has no materialize values");
+                // ★ POSITIONAL contract with the runner's buildApplyUpsert (synthwatch reconcile.ts) — the values
+                //   order is [source_key, ...GIT_AUTHORITATIVE_COLUMNS, ...SEED_ONLY_COLUMNS, spec_path]:
+                //     0 source_key  1 name  2 kind  3 target_url  4 flow_name  5 sensitive  6 redact_patterns
+                //     7 environment  8 rewrite_from_origin  9 interval_seconds  10 enabled  11 spec_path
+                //   #216 inserted environment(7)/rewrite_from_origin(8), shifting interval 7→9 and spec_path 9→11.
+                //   Keep in lockstep with buildApplyUpsert; Materialize_new_plan_* pins this (must-go-red on desync).
+                if (v is null || v.Count < 12) throw new InvalidOperationException("plan has no materialize values");
                 string src = v[0].GetString()!, name = v[1].GetString()!, kind = v[2].GetString()!,
                        url = v[3].GetString()!, flow = v[4].GetString()!, redact = v[6].GetString()!;
                 bool sensitive = v[5].GetBoolean();
-                int interval = v[7].GetInt32();
-                // ★ spec_path (plan value index 9) — the REAL runtime resolution path for a browser check: the
+                string environment = v[7].GetString()!;                                                    // #216 pos 7
+                string? rewriteFromOrigin = v[8].ValueKind == JsonValueKind.Null ? null : v[8].GetString(); // #216 pos 8
+                int interval = v[9].GetInt32();                                                             // was v[7]
+                // ★ spec_path (plan value index 11) — the REAL runtime resolution path for a browser check: the
                 //   runner fetches + compiles this Git spec. WITHOUT it a browser check falls back to
                 //   loadFlow(flow_name) -> a baked-in dist/checks/<name>.js a manifest monitor never has, so it
-                //   can ONLY fail ("Cannot find module"). Older plans (pre-spec_path) lack v[9] -> null.
-                string? specPath = v.Count > 9 ? v[9].GetString() : null;
+                //   can ONLY fail ("Cannot find module").
+                string? specPath = v[11].ValueKind == JsonValueKind.Null ? null : v[11].GetString();        // was v[9]
                 // ★ FAIL-CLOSED gate: never materialize a browser check with no spec_path — it could only fail.
                 //   Throw -> the txn rolls back, the plan stays 'approved', and the next reconcile recomputes a
                 //   plan that carries spec_path. (The runner's computeApplyPlan blocks this upstream too.)
@@ -250,11 +258,12 @@ public class ReconcileFunctions
                 //   false; ON CONFLICT (the partial index) makes a re-apply idempotent (updates git-auth +
                 //   spec_path, so a row materialized before this fix self-heals from NULL -> the manifest spec).
                 await _db.Database.ExecuteSqlInterpolatedAsync(
-                    $@"INSERT INTO checks (source_key, name, kind, target_url, flow_name, sensitive, redact_patterns, interval_seconds, enabled, spec_path)
-                       VALUES ({src}, {name}, {kind}, {url}, {flow}, {sensitive}, {redact}::jsonb, {interval}, false, {specPath})
+                    $@"INSERT INTO checks (source_key, name, kind, target_url, flow_name, sensitive, redact_patterns, environment, rewrite_from_origin, interval_seconds, enabled, spec_path)
+                       VALUES ({src}, {name}, {kind}, {url}, {flow}, {sensitive}, {redact}::jsonb, {environment}, {rewriteFromOrigin}, {interval}, false, {specPath})
                        ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO UPDATE SET
                          name = EXCLUDED.name, kind = EXCLUDED.kind, target_url = EXCLUDED.target_url,
                          flow_name = EXCLUDED.flow_name, sensitive = EXCLUDED.sensitive, redact_patterns = EXCLUDED.redact_patterns,
+                         environment = EXCLUDED.environment, rewrite_from_origin = EXCLUDED.rewrite_from_origin,
                          spec_path = EXCLUDED.spec_path", ct);
 
                 // The check now exists (same txn/connection) — read its id by the unique source_key to seed locations.
