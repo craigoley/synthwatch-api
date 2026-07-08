@@ -130,7 +130,7 @@ public class ChecksFunctions
             metricsByCheck.GetValueOrDefault(c.Id, CheckMetricsDto.Empty),
             rollupByCheck.GetValueOrDefault(c.Id, emptyRollup),
             tagsByCheck.GetValueOrDefault(c.Id, emptyTags)))
-            .Select(dto => showHeaders ? dto : dto with { RequestHeaders = null, SecretHeaders = null });
+            .Select(dto => showHeaders ? dto : dto with { RequestHeaders = null, SecretHeaders = null, LoginCredentials = null });
 
         // Short cache so the dashboard's polling doesn't hit the DB every tick; current status
         // moves run-to-run, so keep it brief (10s). The body is now SESSION-DEPENDENT (request_headers are
@@ -164,7 +164,7 @@ public class ChecksFunctions
             await BuildSloAsync(id, check.SloTarget, ct), await CheckLocationsRollupAsync(id, ct));
         // request_headers + secret_headers readback is session-only (see ListChecks) — the detail stays open.
         if (!await SessionReadGate.HasWriteSessionAsync(_auth, req, ct))
-            dto = dto with { RequestHeaders = null, SecretHeaders = null };
+            dto = dto with { RequestHeaders = null, SecretHeaders = null, LoginCredentials = null };
         return ApiResults.Ok(dto);
     }
 
