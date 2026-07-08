@@ -4340,6 +4340,44 @@ public class IntegrationTests
         }
     }
 
+    // ★ #216 cross-repo POSITIONAL contract (the seam that had NO test). The runner's buildApplyUpsert emits the
+    // 'new' plan values as [source_key, name, kind, target_url, flow_name, sensitive, redact_patterns,
+    // ENVIRONMENT(7), REWRITE_FROM_ORIGIN(8), interval_seconds(9), enabled(10), spec_path(11)]. #216 inserted
+    // environment/rewrite_from_origin, shifting interval 7→9 and spec_path 9→11. The materialize MUST read those
+    // positions. MUST-GO-RED against the pre-fix reader: v[7].GetInt32() runs on the string 'staging' → throws →
+    // the per-plan txn rolls back → the check never materializes (count=0), so the assertions below fail.
+    [SkippableFact]
+    public async Task Materialize_new_plan_reads_environment_interval_specPath_by_216_positions()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // A STAGING monitor: environment='staging' sits at #216 position 7 (a STRING) — the exact value that makes
+        // the pre-fix reader's v[7].GetInt32() throw → the per-plan txn rolls back → the check never materializes.
+        // Uses the shared MaterializePlan (now #216-ordered), so the whole apply suite pins this contract.
+        var plan = MaterializePlan("mat.spec", "materialize-me", "browser", "https://staging.example", "search-product",
+            sensitive: false, redact: "null", interval: 450, specPath: "monitors/test/materialize.spec.ts",
+            environment: "staging", rewriteFromOrigin: "https://prod.example");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan) VALUES ('mat.spec','new','approved', {plan}::jsonb)");
+        try
+        {
+            Assert.IsType<OkObjectResult>(await ApplyFn(db).ApplyReconcilePlans(JsonRequest(new { }), default));
+
+            // Materialized (pre-fix: the read throws on 'staging' → rolled back → NO row → count 0 → this fails).
+            Assert.Equal(1L, (long)(await ScalarRaw(db, "SELECT count(*) FROM checks WHERE source_key='mat.spec'"))!);
+            // ★ each field read from its #216 position landed correctly.
+            Assert.Equal("staging", (string?)await ScalarRaw(db, "SELECT environment FROM checks WHERE source_key='mat.spec'"));            // pos 7
+            Assert.Equal(450, (int)(await ScalarRaw(db, "SELECT interval_seconds FROM checks WHERE source_key='mat.spec'"))!);             // pos 9
+            Assert.Equal("monitors/test/materialize.spec.ts", (string?)await ScalarRaw(db, "SELECT spec_path FROM checks WHERE source_key='mat.spec'")); // pos 11
+            Assert.Equal("https://prod.example", (string?)await ScalarRaw(db, "SELECT rewrite_from_origin FROM checks WHERE source_key='mat.spec'"));    // pos 8
+            Assert.Equal("applied", (string?)await ScalarRaw(db, "SELECT status FROM reconcile_apply_plan WHERE source_key='mat.spec'"));
+        }
+        finally
+        {
+            await CleanupApply(db, "mat.spec", System.Array.Empty<string>());
+        }
+    }
+
     // The existing fail-safe guards must hold: a BLOCKED plan (redaction strip) can never be approved, and a
     // non-pending plan is a 409 — not a silent re-decision.
     [SkippableFact]
@@ -4421,11 +4459,16 @@ public class IntegrationTests
     // executor's read contract (plan.statements[0].values = [src,name,kind,url,flow,sensitive,redact,interval,
     // enabled(ignored),specPath], ReconcileFunctions.cs:188-216).
 
-    // Build a materialize-plan jsonb matching what computeApplyPlan emits + what the executor reads (v[0..9]).
+    // Build a materialize-plan jsonb matching what the runner's buildApplyUpsert emits + what the executor reads.
+    // ★ #216 producer order: [0 source_key, 1 name, 2 kind, 3 target_url, 4 flow_name, 5 sensitive,
+    //   6 redact_patterns, 7 ENVIRONMENT, 8 REWRITE_FROM_ORIGIN, 9 interval_seconds, 10 enabled(executor ignores,
+    //   hard-codes false), 11 spec_path]. Keep in lockstep with buildApplyUpsert (this helper is the test's copy
+    //   of the positional contract — the reason the desync had no coverage was this helper trailing the producer).
     private static string MaterializePlan(string src, string name, string kind, string url, string flow,
-        bool sensitive, string redact, int interval, string? specPath)
+        bool sensitive, string redact, int interval, string? specPath,
+        string environment = "prod", string? rewriteFromOrigin = null)
     {
-        var values = new object?[] { src, name, kind, url, flow, sensitive, redact, interval, false /*enabled v8 — executor ignores it, hard-codes false*/, specPath };
+        var values = new object?[] { src, name, kind, url, flow, sensitive, redact, environment, rewriteFromOrigin, interval, false, specPath };
         var plan = new { statements = new[] { new { text = "INSERT INTO checks …", values, regions = new[] { "eastus2" } } } };
         return System.Text.Json.JsonSerializer.Serialize(plan);
     }
