@@ -218,6 +218,43 @@ public class ReportsFunctions
     }
 
     /// <summary>
+    /// GET /api/reports/cost — ESTIMATED monthly ACA compute cost per monitor + fleet (recon #220; reproduces
+    /// #229's ~$67/mo). projected = avg_duration_s × (2,592,000/interval) × region_count × rate; measured =
+    /// (7d Σduration_ms/1000) × rate × 30/7. ★ The rate is a CONFIG value (COST_RATE_* env vars, deploy-free),
+    /// ECHOED in the response (rateUsed/rateSource/rateSetDate) so every figure is self-describing — an
+    /// ESTIMATE, not billed truth. Anonymous GET, matching the other /reports (cost is no more sensitive than
+    /// SLO). ★ Pre-prod INCLUDED (unlike SLO's prod-only filter) — a staging monitor is real spend.
+    /// divergence_ratio &gt; 1.5 per check flags retry-amplification / a failing flow.
+    /// </summary>
+    [Function("GetCostReport")]
+    public async Task<IActionResult> GetCostReport(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/cost")] HttpRequest req,
+        CancellationToken ct)
+    {
+        // One row per ENABLED check: region_count from check_locations, avg/Σ duration (float SECONDS) over the
+        // last 7d. Casts pin the CLR types (int region_count, float8 seconds); the $ math is applied in C#.
+        var rows = await _db.CostReport.FromSql(
+            $@"SELECT c.id AS check_id, c.source_key AS source_key, c.name AS check_name, c.kind AS kind,
+                      c.interval_seconds AS interval_seconds,
+                      (SELECT count(*)::int FROM check_locations cl WHERE cl.check_id = c.id) AS region_count,
+                      ((SELECT avg(r.duration_ms) FROM runs r
+                          WHERE r.check_id = c.id AND r.started_at > now() - interval '7 days'
+                            AND r.duration_ms IS NOT NULL) / 1000.0)::float8 AS avg_duration_s,
+                      ((SELECT sum(r.duration_ms) FROM runs r
+                          WHERE r.check_id = c.id AND r.started_at > now() - interval '7 days'
+                            AND r.duration_ms IS NOT NULL) / 1000.0)::float8 AS sum_duration_s_7d
+               FROM checks c
+               WHERE c.enabled
+               ORDER BY c.name").AsNoTracking().ToListAsync(ct);
+
+        var dto = CostReportProjection.Build(
+            rows, CostRate.PerVcpuSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow);
+        req.HttpContext.Response.Headers.CacheControl = "public, max-age=60";
+        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        return ApiResults.Ok(dto);
+    }
+
+    /// <summary>
     /// GET /api/reports/mttr?window=7d|30d|90d&amp;tag=key:value (repeatable, AND) — fleet + per-check incident
     /// analytics: MTTR (mean + median time-to-resolve over RESOLVED incidents), the rca.classification
     /// breakdown (unclassified shown), a detection-lag PROXY (consecutive_failures × interval), and an MTTR
