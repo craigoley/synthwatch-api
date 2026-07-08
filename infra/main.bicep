@@ -90,6 +90,10 @@ param aoaiAccountName string = 'synthwatch-aoai'
 @description('ACS resource the OTP-email sender (AcsEmailSender) uses via DefaultAzureCredential — the MI needs Communication and Email Service Owner.')
 param acsResourceName string = 'synthwatch-acs'
 
+@description('Model-B credential-value encryption key (app setting CRED_ENC_KEY) — base64 of 32 random bytes (AES-256). The api ENCRYPTS secret_headers/login_credentials values before store; the runner DECRYPTS at run time (CredCrypto.cs ↔ runner/crypto.ts). ★ MUST be the SAME key value as the runner job\'s CRED_ENC_KEY (from ~/.synthwatch.env) or the runner cannot decrypt what the api wrote. Secret — supplied at deploy, NEVER committed. Default \'\' → the api fail-CLOSES on encrypt/decrypt until set. Bicep-owned so a bicep redeploy re-asserts it (the code-only deploy.yml never touches app settings).')
+@secure()
+param credEncKey string = ''
+
 var storageAccountName = take(toLower('st${uniqueString(resourceGroup().id, functionAppName)}'), 24)
 var deploymentContainerName = 'app-package'
 
@@ -270,6 +274,13 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'COST_RATE_SET_DATE'
           value: costRateSetDate
+        }
+        {
+          // Model-B credential-value encryption key (CredCrypto.cs). Bicep-owned (value from the @secure
+          // param → re-asserted every bicep deploy; the code-only deploy.yml never touches app settings).
+          // '' when unset → the api fail-CLOSES on encrypt/decrypt. MUST equal the runner's CRED_ENC_KEY.
+          name: 'CRED_ENC_KEY'
+          value: credEncKey
         }
       ]
       // PLATFORM CORS. The Functions host answers the OPTIONS preflight itself (before the worker

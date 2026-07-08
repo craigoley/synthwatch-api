@@ -105,7 +105,7 @@ jobs:
           # --- App settings: WARN (never fail/mutate) if a critical setting is absent ---
           if names="$(az functionapp config appsettings list -g "$RG" -n "$APP" --query "[].name" -o tsv)"; then
             for key in AzureWebJobsStorage__accountName APPLICATIONINSIGHTS_CONNECTION_STRING \
-                       Postgres__Host Postgres__Database Postgres__Username; do
+                       Postgres__Host Postgres__Database Postgres__Username CRED_ENC_KEY; do
               if grep -qxF "$key" <<< "$names"; then echo "  present: $key"
               else echo "::warning::critical app setting MISSING: $key"; fi
             done
