@@ -127,6 +127,7 @@ CREATE TABLE public.checks (
     redact_patterns jsonb,
     environment text NOT NULL DEFAULT 'prod'::text,
     rewrite_from_origin text,
+    redtest_anchor text,
     CONSTRAINT browser_needs_flow CHECK (((kind <> 'browser'::text) OR (flow_name IS NOT NULL))),
     CONSTRAINT checks_environment_vocab CHECK ((environment = ANY (ARRAY['prod'::text, 'staging'::text, 'dev'::text]))),
     CONSTRAINT checks_failure_threshold_check CHECK ((failure_threshold > 0)),
