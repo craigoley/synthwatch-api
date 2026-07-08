@@ -27,7 +27,11 @@ public record RunDto(
     string Location,
     // Attempts to reach the verdict (runner 0048). null for pre-telemetry runs; 1 = clean first try;
     // >1 = settled on retry. pass + retryCount>1 = degrading-but-green. Additive (appended last).
-    int? RetryCount)
+    int? RetryCount,
+    // Sandbox (runner migration 0065): true when this run was a PAUSED monitor's on-demand validation
+    // (sandbox-run-when-paused). Skipped evaluate() (no incident/alert/SLO) but persisted a normal row;
+    // the dashboard badges these so a resumed monitor's history stays honest. Additive (appended last).
+    bool Sandbox)
 {
     public static RunDto From(Run r) => new(
         r.Id, r.CheckId, r.Status, r.StartedAt, r.FinishedAt, r.DurationMs,
@@ -36,7 +40,8 @@ public record RunDto(
         CertDaysRemaining: r.CertDaysRemaining,
         TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace",
         Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location,
-        RetryCount: r.RetryCount);
+        RetryCount: r.RetryCount,
+        Sandbox: r.Sandbox);
 }
 
 public record RunStepDto(

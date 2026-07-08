@@ -53,6 +53,12 @@ public class Run
     // consumer coalesces null/empty -> "default" (RunDto/TimelineEntryDto + the per-location rollups).
     public string? Location { get; set; }
 
+    // Sandbox (runner migration 0065): true when this row was written by a PAUSED monitor's on-demand
+    // validation run (sandbox-run-when-paused). Such runs skip evaluate() (no incident/alert/SLO) but
+    // persist a normal row — this flag keeps them distinguishable in history + the SLO lookback after
+    // the monitor is resumed. DEFAULT false (NOT NULL) → every real run is false.
+    public bool Sandbox { get; set; }
+
     // Navigation (read-mostly).
     public Check? Check { get; set; }
     public List<RunStep> Steps { get; set; } = new();
