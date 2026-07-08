@@ -100,6 +100,57 @@ public class MappingTests
     }
 
     [Fact]
+    public void Check_dtos_project_secret_header_references_never_values()
+    {
+        // Item 1: the cred-mgmt UI reads WHICH env-var-refs a monitor uses. secret_headers is references-only —
+        // { headerName -> ENV_VAR_NAME }, a NAME, never a resolved credential value (the API never reads env).
+        var refs = new Dictionary<string, string>
+        {
+            ["X-Api-Key"] = "WEGMANS_API_KEY_ENV",
+            ["X-Store-Id"] = "WEGMANS_STORE_ID_ENV",
+        };
+        var check = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true, SecretHeaders = refs };
+
+        var summary = CheckSummaryDto.From(check, null, CheckMetricsDto.Empty, Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>());
+        var detail = CheckDetailDto.From(check, Array.Empty<Run>(), Array.Empty<TagDto>());
+
+        foreach (var sh in new[] { summary.SecretHeaders, detail.SecretHeaders })
+        {
+            Assert.NotNull(sh);
+            // the projected map is the stored REFERENCES verbatim — env-var NAMES, not values.
+            Assert.Equal("WEGMANS_API_KEY_ENV", sh!["X-Api-Key"]);
+            Assert.Equal("WEGMANS_STORE_ID_ENV", sh["X-Store-Id"]);
+            // ★ NO credential VALUE anywhere: the map values are exactly the reference names we stored.
+            Assert.Equal(refs, sh);
+        }
+    }
+
+    [Fact]
+    public void Check_dtos_secret_headers_null_when_none()
+    {
+        var check = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true };
+        Assert.Null(CheckSummaryDto.From(check, null, CheckMetricsDto.Empty, Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>()).SecretHeaders);
+        Assert.Null(CheckDetailDto.From(check, Array.Empty<Run>(), Array.Empty<TagDto>()).SecretHeaders);
+    }
+
+    [Fact]
+    public void RunDto_exposes_trace_and_screenshot_with_no_sensitive_filter()
+    {
+        // Item 2: a sensitive monitor's run artifacts are NOT nulled on the API DTO — RunDto.From has no
+        // sensitivity branch; access control lives at the (session-gated) artifact endpoints, not by hiding
+        // the proxy link. (Populated once runner 1b ships; the projection is ready + tolerant of empty now.)
+        var run = new Run
+        {
+            Id = 88, CheckId = 3, Status = "fail",
+            ScreenshotUrl = "https://acct.blob.core.windows.net/synthwatch-artifacts/run-88.png",
+            TraceUrl = "https://acct.blob.core.windows.net/synthwatch-artifacts/traces/run-88.zip",
+        };
+        var dto = RunDto.From(run);
+        Assert.Equal("/api/runs/88/screenshot", dto.ScreenshotUrl);
+        Assert.Equal("/api/runs/88/trace", dto.TraceUrl);
+    }
+
+    [Fact]
     public void IncidentDto_carries_rca()
     {
         var inc = new Incident

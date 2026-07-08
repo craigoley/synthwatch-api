@@ -66,6 +66,13 @@ public class Check
     public string? RequestBody { get; set; }
     public Dictionary<string, string>? Auth { get; set; }
 
+    // Per-monitor SECRET request headers (runner migration 0061; jsonb). REFERENCES ONLY —
+    // { headerName -> ENV_VAR_NAME }; the runner resolves process.env[ENV_VAR_NAME] at request time
+    // (secretHeaders.ts). The resolved VALUE is never persisted/logged/DTO'd/traced (audit #219); the
+    // stored map holds a reference, never a credential. RUNNER-WRITTEN (the API only projects the refs
+    // for the cred-management UI — and gates that readback to a session, see ChecksFunctions).
+    public Dictionary<string, string>? SecretHeaders { get; set; }
+
     // Network checks (dns/tcp/ping): per-kind config (migration 0011; jsonb). Null for other kinds.
     public NetConfig? NetConfig { get; set; }
 

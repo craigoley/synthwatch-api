@@ -3435,8 +3435,9 @@ public class IntegrationTests
             DO $$ BEGIN
               INSERT INTO channels (name, type, config, enabled)
                 VALUES ('readgate-hook','webhook', jsonb_build_object('url','https://hook.example','authHeader','Bearer hook-secret'), true);
-              INSERT INTO checks (name, kind, target_url, request_headers)
-                VALUES ('readgate-check','http','https://h.example', jsonb_build_object('X-Api-Key','hdr-secret'));
+              INSERT INTO checks (name, kind, target_url, request_headers, secret_headers)
+                VALUES ('readgate-check','http','https://h.example', jsonb_build_object('X-Api-Key','hdr-secret'),
+                        jsonb_build_object('X-Api-Key','WEGMANS_API_KEY_ENV'));
               INSERT INTO reconcile_drift (source_key, drift_type, detail, detected_at)
                 VALUES ('readgate.spec','changed', jsonb_build_object('before', jsonb_build_object('u','a'), 'after', jsonb_build_object('u','b')), now());
               INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan, computed_at)
@@ -3467,6 +3468,7 @@ public class IntegrationTests
             Assert.IsType<OkObjectResult>(await reconcile.GetReconcilePlan(AuthReq(), default));
             var openDetail = Assert.IsType<CheckDetailDto>(((OkObjectResult)await checks.GetCheck(AuthReq(), cid, default)).Value);
             Assert.NotNull(openDetail.RequestHeaders);
+            Assert.NotNull(openDetail.SecretHeaders);                    // secret_headers refs shown too (gate inert while enforcement off)
 
             // ── ENFORCEMENT ON → anonymous 401 on channels + reconcile plan/drift (the #154 pattern). ──
             Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "true");
@@ -3490,8 +3492,11 @@ public class IntegrationTests
             // ── FIELD GATE: check detail/list stay open, but request_headers serve ONLY to a session. ──
             var anonDetail = Assert.IsType<CheckDetailDto>(((OkObjectResult)await checks.GetCheck(AuthReq(), cid, default)).Value);
             Assert.Null(anonDetail.RequestHeaders);                      // anonymous: stripped, endpoint still 200
+            Assert.Null(anonDetail.SecretHeaders);                       // secret_headers refs are session-gated too
             var editorDetail = Assert.IsType<CheckDetailDto>(((OkObjectResult)await checks.GetCheck(AuthReq(tok), cid, default)).Value);
             Assert.Equal("hdr-secret", editorDetail.RequestHeaders!["X-Api-Key"]); // session: verbatim
+            // ★ secret_headers to a session = the env-var-NAME reference, NEVER a resolved credential value.
+            Assert.Equal("WEGMANS_API_KEY_ENV", editorDetail.SecretHeaders!["X-Api-Key"]);
             var listReq = AuthReq();
             var anonList = ((IEnumerable<CheckSummaryDto>)((OkObjectResult)await checks.ListChecks(listReq, default)).Value!).ToList();
             Assert.All(anonList, dto => Assert.Null(dto.RequestHeaders)); // list summaries stripped too

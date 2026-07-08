@@ -59,6 +59,10 @@ public record CheckSummaryDto(
     IReadOnlyDictionary<string, string>? RequestHeaders,
     string? RequestBody,
     IReadOnlyDictionary<string, string>? Auth,
+    // Per-monitor secret-header REFERENCES ({ headerName -> ENV_VAR_NAME }, runner 0061) for the cred-mgmt
+    // UI. References only — NEVER a credential value (the value lives in env, resolved runner-side). Session-
+    // gated on readback like RequestHeaders (see ChecksFunctions): null for anonymous/viewer callers.
+    IReadOnlyDictionary<string, string>? SecretHeaders,
     // Network checks (dns/tcp/ping): per-kind config; null for other kinds.
     NetConfig? NetConfig,
     // Multistep API chains: ordered step list; null for non-multistep kinds.
@@ -104,6 +108,7 @@ public record CheckSummaryDto(
         RequestHeaders: c.RequestHeaders,
         RequestBody: c.RequestBody,
         Auth: c.Auth,
+        SecretHeaders: c.SecretHeaders,
         NetConfig: c.NetConfig,
         Steps: c.Steps,
         Locations: locations,
@@ -164,6 +169,9 @@ public record CheckDetailDto(
     IReadOnlyDictionary<string, string>? RequestHeaders,
     string? RequestBody,
     IReadOnlyDictionary<string, string>? Auth,
+    // Per-monitor secret-header REFERENCES for the cred-mgmt UI (runner 0061) — references only, never a
+    // value; session-gated on readback like RequestHeaders (see CheckSummaryDto).
+    IReadOnlyDictionary<string, string>? SecretHeaders,
     NetConfig? NetConfig,
     IReadOnlyList<ChainStep>? Steps,
     // SLO error-budget + burn rate (migration 0016). Null when the check has no slo_target (opt-in).
@@ -200,6 +208,7 @@ public record CheckDetailDto(
         RequestHeaders: c.RequestHeaders,
         RequestBody: c.RequestBody,
         Auth: c.Auth,
+        SecretHeaders: c.SecretHeaders,
         NetConfig: c.NetConfig,
         Steps: c.Steps,
         Slo: slo,
