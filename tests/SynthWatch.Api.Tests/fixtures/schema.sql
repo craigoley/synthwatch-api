@@ -326,6 +326,7 @@ CREATE TABLE public.runs (
     retry_count integer,
     egress_ip text,
     spec_provenance jsonb,
+    sandbox boolean DEFAULT false NOT NULL,
     CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text, 'error'::text, 'infra_error'::text, 'running'::text])))
 );
 

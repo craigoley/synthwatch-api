@@ -40,6 +40,15 @@ public class MappingTests
         Assert.Equal("default", RunDto.From(new Run { Id = 2, CheckId = 1, Status = "pass", Location = "" }).Location);
     }
 
+    [Fact]
+    public void RunDto_surfaces_sandbox_flag()
+    {
+        // sandbox run (paused-monitor on-demand validation) is distinguishable...
+        Assert.True(RunDto.From(new Run { Id = 1, CheckId = 1, Status = "pass", Sandbox = true }).Sandbox);
+        // ...and a normal run defaults false (dashboard renders no badge)
+        Assert.False(RunDto.From(new Run { Id = 2, CheckId = 1, Status = "pass" }).Sandbox);
+    }
+
     [Theory]
     [InlineData("pass", "up")]
     [InlineData("warn", "up")]   // warn counts as up (matches sla_availability)
