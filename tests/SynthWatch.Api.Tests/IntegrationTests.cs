@@ -268,6 +268,57 @@ public class IntegrationTests
         }
     }
 
+    // ★ GET /reports/cost — the real SQL (region_count from check_locations, avg/Σ duration from runs) + EF
+    // keyless mapping + the projection wired end-to-end, and the response wire-shape pinned (contract-first).
+    [SkippableFact]
+    public async Task Cost_report_projects_from_real_runs_regions_and_interval()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // interval 300s (8,640 runs/mo/region), 2 assigned regions, 3 recent runs @ 10,000ms → avg 10s.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name, kind, target_url, enabled, interval_seconds)
+                VALUES ('cost-rep-http','http','https://c.example', true, 300) RETURNING id INTO cid;
+              INSERT INTO check_locations (check_id, location) VALUES (cid,'eastus2'),(cid,'centralus');
+              INSERT INTO runs (check_id, status, started_at, duration_ms, location) VALUES
+                (cid,'pass', now(), 10000, 'eastus2'),
+                (cid,'pass', now(), 10000, 'eastus2'),
+                (cid,'pass', now(), 10000, 'centralus');
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var dto = Assert.IsType<CostReportResponseDto>(
+                Assert.IsType<OkObjectResult>(await reports.GetCostReport(Request(), default)).Value!);
+
+            var c = Assert.Single(dto.Checks, x => x.Name == "cost-rep-http");
+            Assert.Equal(300, c.IntervalSeconds);
+            Assert.Equal(2, c.RegionCount);                          // from check_locations
+            Assert.Equal(10.0, c.AvgDurationS!.Value, 3);            // avg(10000ms)/1000
+            // projected = 10 × (2,592,000/300) × 2 × 0.00003 = $5.18 (default config rate, unset env → default)
+            Assert.Equal(5.18m, c.ProjectedMonthly);
+            Assert.Equal(CostRate.DefaultPerVcpuSecond, dto.RateUsed);   // rate echoed, self-describing
+            Assert.False(string.IsNullOrEmpty(dto.RateSource));
+            Assert.True(dto.TotalProjectedMonthly >= c.ProjectedMonthly);
+
+            // ── ★ wire-shape pin (contract-first — the dashboard builds against this) ──
+            var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+            var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(dto, web)).RootElement;
+            Assert.Equal(
+                new[] { "checks", "generatedAt", "rateSetDate", "rateSource", "rateUsed", "topCostDrivers", "totalMeasuredMonthly", "totalProjectedMonthly" },
+                root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(
+                new[] { "avgDurationS", "checkId", "divergenceFlag", "divergenceRatio", "intervalSeconds", "kind", "measuredMonthly7d", "name", "projectedMonthly", "regionCount", "sourceKey" },
+                root.GetProperty("checks")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'cost-rep-http';"); // CASCADE clears runs/locations
+        }
+    }
+
     // ★ Pre-prod-arc S1c CONTRACT: a check with environment != 'prod' is EXCLUDED from the prod fleet
     // rollups (slo / mttr / trust) but still INCLUDED in the env-agnostic infra signals (egress; #187).
     // The exclude is what protects the prod SLO budget once S3 sets a real pre-prod check.

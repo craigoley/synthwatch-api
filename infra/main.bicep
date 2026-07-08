@@ -70,6 +70,13 @@ param azureOpenAiMaxTokens int = 16000
 @description('Trace AI Insights — reasoning_effort (minimal|low|medium|high). "low" keeps the reasoning-token spend down so the output fits the budget. Empty = omit the field.')
 param azureOpenAiReasoningEffort string = 'low'
 
+@description('GET /reports/cost — $ per vCPU-second (ACA Consumption). CONFIG TUNABLE: change here (or the app setting) to re-price WITHOUT a code deploy. Default 0.00003 reproduces #229 ~$67/mo; cpu=1/mem=2GiB are already folded in (see the runner container resources below). Passed as a string so a decimal survives ARM.')
+param costRatePerVcpuSecond string = '0.00003'
+@description('GET /reports/cost — human source/basis of the rate, ECHOED in the response so the figure is self-describing (an estimate, not billed truth).')
+param costRateSource string = 'ACA Consumption vCPU-second (cpu=1.0 vCPU / mem=2 GiB, main.bicep:528-529)'
+@description('GET /reports/cost — the date the rate was last set (YYYY-MM-DD), ECHOED in the response. Update alongside costRatePerVcpuSecond.')
+param costRateSetDate string = '2026-07-08'
+
 @description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
 param artifactsStorageAccountName string = 'synthwatche24e33105c'
 
@@ -249,6 +256,20 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'AZURE_OPENAI_REASONING_EFFORT'
           value: azureOpenAiReasoningEffort
+        }
+        // GET /reports/cost — the pricing rate + its provenance, all deploy-free tunables (the code reads these
+        // env vars, falling back to the same documented defaults if unset). Echoed in the response.
+        {
+          name: 'COST_RATE_PER_VCPU_SECOND'
+          value: costRatePerVcpuSecond
+        }
+        {
+          name: 'COST_RATE_SOURCE'
+          value: costRateSource
+        }
+        {
+          name: 'COST_RATE_SET_DATE'
+          value: costRateSetDate
         }
       ]
       // PLATFORM CORS. The Functions host answers the OPTIONS preflight itself (before the worker

@@ -26,6 +26,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<SlaAvailabilityRow> SlaAvailability => Set<SlaAvailabilityRow>();
     public DbSet<SloStatusRow> SloStatus => Set<SloStatusRow>();
     public DbSet<SloReportRow> SloReport => Set<SloReportRow>();
+    public DbSet<CostReportRow> CostReport => Set<CostReportRow>();
     public DbSet<MttrIncidentRow> MttrIncidents => Set<MttrIncidentRow>();
     public DbSet<AvailabilitySeriesPointRow> AvailabilitySeries => Set<AvailabilitySeriesPointRow>();
     public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
@@ -407,6 +408,22 @@ public class SynthWatchDbContext : DbContext
         });
 
         // Keyless: GET /reports/slo — per-check budget from LATERAL slo_status(...) + name/kind, raw SQL only.
+        // Keyless: GET /reports/cost — one row per ENABLED check with raw cost inputs (raw SQL only; the
+        // dollar figures are computed in CostReportProjection from the config rate).
+        modelBuilder.Entity<CostReportRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.SourceKey).HasColumnName("source_key");
+            e.Property(x => x.CheckName).HasColumnName("check_name");
+            e.Property(x => x.Kind).HasColumnName("kind");
+            e.Property(x => x.IntervalSeconds).HasColumnName("interval_seconds");
+            e.Property(x => x.RegionCount).HasColumnName("region_count");
+            e.Property(x => x.AvgDurationS).HasColumnName("avg_duration_s");
+            e.Property(x => x.SumDurationS7d).HasColumnName("sum_duration_s_7d");
+        });
+
         modelBuilder.Entity<SloReportRow>(e =>
         {
             e.HasNoKey();
