@@ -2902,6 +2902,38 @@ public class IntegrationTests
         Assert.Equal(503, Assert.IsType<ObjectResult>(result).StatusCode); // clean non-2xx (trigger logged the reason), not an unhandled 500
     }
 
+    // ★ On-demand run for a PAUSED monitor (sandbox). ?sandbox=true bypasses the paused-409 and persists the
+    // run_requests.sandbox flag so the runner can claim + sandbox-run it; WITHOUT the flag a disabled check is
+    // still a 409 (default byte-identical). MUST-GO-RED: if the default 409 regresses, the first assertion fails.
+    [SkippableFact]
+    public async Task Run_now_sandbox_flag_bypasses_paused_409_and_persists_the_flag()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url, enabled) VALUES ('sandbox-run-test','http','https://s.example', false)");
+        var id = await db.Checks.Where(c => c.Name == "sandbox-run-test").Select(c => c.Id).FirstAsync();
+        try
+        {
+            var fn = new ChecksRunFunctions(db, new FakeRunnerJobTrigger());
+
+            // ── default (no flag) on a DISABLED check → still 409, nothing queued. ──
+            Assert.Equal(409, StatusOf(await fn.RunCheckNow(Request(), id, default)));
+            Assert.Equal(0L, (long)(await ScalarRaw(db, $"SELECT count(*) FROM run_requests WHERE check_id={id}"))!);
+
+            // ── ?sandbox=true on the SAME paused check → 202 + a pending run_requests row flagged sandbox=true. ──
+            Assert.Equal(202, StatusOf(await fn.RunCheckNow(Request("?sandbox=true"), id, default)));
+            Assert.Equal(1L, (long)(await ScalarRaw(db, $"SELECT count(*) FROM run_requests WHERE check_id={id} AND status='pending'"))!);
+            Assert.Equal(true, (bool?)await ScalarRaw(db, $"SELECT sandbox FROM run_requests WHERE check_id={id} AND status='pending'"));
+            // ★ the API never resumes the monitor — enabled stays false (only the runner runs it, out-of-band).
+            Assert.Equal(false, (bool?)await ScalarRaw(db, $"SELECT enabled FROM checks WHERE id={id}"));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync($"DELETE FROM checks WHERE id={id}"); // CASCADE clears run_requests
+        }
+    }
+
     // ─── Phase 12 slice 2 — the gate (principal resolution, audit write, fail-closed) ───────────────
 
     [SkippableFact]
