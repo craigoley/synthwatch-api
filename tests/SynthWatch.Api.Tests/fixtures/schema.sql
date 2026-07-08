@@ -117,6 +117,7 @@ CREATE TABLE public.checks (
     request_body text,
     auth jsonb,
     secret_headers jsonb,
+    login_credentials jsonb,
     net_config jsonb,
     steps jsonb,
     source_key text,

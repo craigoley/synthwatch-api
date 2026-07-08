@@ -16,7 +16,7 @@ namespace SynthWatch.Api.Functions;
 public class CredKeyFunctions
 {
     [Function("GetCredKeyFingerprint")]
-    public IActionResult GetCredKeyFingerprint(
+    public static IActionResult GetCredKeyFingerprint(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "cred-key/fingerprint")] HttpRequest req)
     {
         string fingerprint;
