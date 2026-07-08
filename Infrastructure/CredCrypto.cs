@@ -43,6 +43,24 @@ public static class CredCrypto
     /// <summary>Load the key from the process env (the deployed CRED_ENC_KEY secret).</summary>
     public static byte[] LoadKeyFromEnv() => LoadKey(Environment.GetEnvironmentVariable("CRED_ENC_KEY"));
 
+    /// <summary>Domain prefix for the drift-detection fingerprint (kept in lockstep with deploy.sh).</summary>
+    public const string FingerprintDomain = "CRED_ENC_KEY_FP_v1:";
+
+    /// <summary>
+    /// A NON-SECRET fingerprint of the key for deploy-time drift detection (runner deploy.sh compares this to
+    /// the fingerprint of ~/.synthwatch.env's CRED_ENC_KEY — a mismatch means the api + runner keys diverged).
+    /// = first 16 hex of sha256("CRED_ENC_KEY_FP_v1:" + the base64 key STRING). Hashing the string (not decoded
+    /// bytes) keeps bash portable AND catches a whitespace/padding typo (the fat-finger we guard). sha256 of a
+    /// 256-bit key truncated to 64 bits is irreversible + useless to an attacker. FAIL-CLOSED via LoadKey — a
+    /// missing/invalid key throws (the endpoint surfaces that, never a fingerprint of garbage). NEVER the key.
+    /// </summary>
+    public static string Fingerprint(string? credEncKey)
+    {
+        LoadKey(credEncKey); // validate usable (throws fail-closed on absent/non-base64/wrong-length)
+        var hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(FingerprintDomain + credEncKey));
+        return Convert.ToHexString(hash).ToLowerInvariant()[..16];
+    }
+
     /// <summary>
     /// Encrypt <paramref name="plaintext"/> under <paramref name="key"/> → "v1:" + base64(IV || ct || tag).
     /// A fresh random IV each call. <paramref name="ivOverride"/> is TEST-ONLY (deterministic KAT) — never in prod.

@@ -77,6 +77,40 @@ public class CredCryptoTests
         Assert.Throws<InvalidOperationException>(() => CredCrypto.Decrypt("plaintext-no-prefix", Key));
     }
 
+    // ── Fingerprint (deploy-time drift detection; must match deploy.sh's bash computation) ──
+    [Fact]
+    public void Fingerprint_is_stable_and_16_hex()
+    {
+        var fp = CredCrypto.Fingerprint(KeyB64);
+        Assert.Equal(16, fp.Length);
+        Assert.Matches("^[0-9a-f]{16}$", fp);
+        Assert.Equal(fp, CredCrypto.Fingerprint(KeyB64)); // deterministic
+    }
+
+    [Fact]
+    public void Fingerprint_differs_for_a_different_key()
+    {
+        var other = Convert.ToBase64String(Enumerable.Range(1, 32).Select(i => (byte)i).ToArray());
+        Assert.NotEqual(CredCrypto.Fingerprint(KeyB64), CredCrypto.Fingerprint(other));
+    }
+
+    [Fact]
+    public void Fingerprint_known_answer_locks_the_scheme_for_deploy_sh_parity()
+    {
+        // The exact fingerprint of the KAT key. deploy.sh must compute the identical value in bash:
+        //   printf 'CRED_ENC_KEY_FP_v1:%s' "$KEY" | openssl dgst -sha256 -hex | awk '{print $NF}' | cut -c1-16
+        // If this changes, update deploy.sh's expected computation in lockstep.
+        Assert.Equal("99c08cd6f852c7a1", CredCrypto.Fingerprint(KeyB64));
+    }
+
+    [Fact]
+    public void Fingerprint_fail_closed_on_absent_or_invalid_key()
+    {
+        Assert.Throws<InvalidOperationException>(() => CredCrypto.Fingerprint(null));
+        Assert.Throws<InvalidOperationException>(() => CredCrypto.Fingerprint(""));
+        Assert.Throws<InvalidOperationException>(() => CredCrypto.Fingerprint(Convert.ToBase64String(new byte[16])));
+    }
+
     [Fact]
     public void LoadKey_fail_closed_and_never_echoes_the_value()
     {
