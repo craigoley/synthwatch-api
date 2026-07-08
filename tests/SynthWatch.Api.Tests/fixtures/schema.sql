@@ -1053,6 +1053,7 @@ CREATE TABLE public.run_requests (
     status        text        NOT NULL DEFAULT 'pending',
     requested_at  timestamp with time zone NOT NULL DEFAULT now(),
     completed_at  timestamp with time zone,
+    sandbox       boolean     NOT NULL DEFAULT false,
     CONSTRAINT run_requests_status_check CHECK (status IN ('pending', 'done'))
 );
 -- At most one PENDING request per check (the coalesce the API relies on).

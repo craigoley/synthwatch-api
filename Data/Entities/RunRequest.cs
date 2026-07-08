@@ -13,4 +13,10 @@ public class RunRequest
     public string Status { get; set; } = "pending";
     public DateTimeOffset RequestedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
+
+    /// <summary>SANDBOX run (runner migration 0064): when true, the runner may claim + run this request even
+    /// though the check is PAUSED (enabled=false), writing a visible runs row + trace but SKIPPING evaluate()
+    /// (no incident/alert/SLO side-effects) and never flipping enabled. Default false = today's behavior (a
+    /// disabled check is never claimed). The API sets it; the runner honors it (drain/forceClaim + runOne).</summary>
+    public bool Sandbox { get; set; }
 }

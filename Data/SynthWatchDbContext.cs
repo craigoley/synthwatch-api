@@ -144,6 +144,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Status).HasColumnName("status");
             e.Property(x => x.RequestedAt).HasColumnName("requested_at").ValueGeneratedOnAdd();
             e.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            e.Property(x => x.Sandbox).HasColumnName("sandbox"); // runner migration 0064 (DEFAULT false)
         });
 
         modelBuilder.Entity<AlertRoute>(e =>
