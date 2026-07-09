@@ -234,8 +234,18 @@ public class ReportsFunctions
         // The $ math lives ONLY in the shared cost_projection(rate) SQL function (runner 0069) — the SAME
         // function the runner's narrative fact pack calls, so the figures are byte-identical by construction.
         // We pass the CONFIG rate; C# only aggregates (fleet total + topN + order), never re-derives the model.
+        //
+        // ★ round the *_raw columns to 6dp on read. cost_projection returns them UNROUNDED, and PG numeric
+        // division (e.g. 2592000/interval, 30/7) yields scale ~21 (e.g. 5.184000000000000000000). At that
+        // scale the unscaled mantissa is value×10^21, so any check projecting ≳ $79/mo overflows a C# decimal
+        // (96-bit mantissa, max ~7.9e28) → Npgsql "does not fit in a System.Decimal". The runner reads these
+        // as strings (JS), so it never hit this. 6dp is micro-dollar precision — the fleet total sums the raws
+        // then rounds to 2dp, so this is drift-free for every displayed figure while giving ~$8e22 of headroom.
         var rows = await _db.CostReport
-            .FromSql($"SELECT * FROM cost_projection({CostRate.PerVcpuSecond})")
+            .FromSql($@"SELECT check_id, source_key, check_name, kind, interval_seconds, region_count,
+                               avg_duration_s, projected, measured, divergence, divergence_flag,
+                               round(projected_raw, 6) AS projected_raw, round(measured_raw, 6) AS measured_raw
+                        FROM cost_projection({CostRate.PerVcpuSecond})")
             .AsNoTracking().ToListAsync(ct);
 
         var dto = CostReportProjection.Build(
