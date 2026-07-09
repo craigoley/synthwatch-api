@@ -84,6 +84,23 @@ public class MappingTests
     }
 
     [Fact]
+    public void Check_dtos_project_environment_on_both_summary_and_detail()
+    {
+        // A pre-prod monitor surfaces its environment so the dashboard can render/filter env-aware
+        // (runner 0059; non-prod is excluded from the fleet rollups). Projected on BOTH read DTOs.
+        var staging = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Environment = "staging" };
+        Assert.Equal("staging", CheckSummaryDto.From(staging, null, CheckMetricsDto.Empty,
+            Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>()).Environment);
+        Assert.Equal("staging", CheckDetailDto.From(staging, Array.Empty<Run>(), Array.Empty<TagDto>()).Environment);
+
+        // The entity default mirrors the column's NOT NULL DEFAULT 'prod' — a check with no env set is prod.
+        var prod = new Check { Id = 2, Name = "c", Kind = "http", TargetUrl = "https://x" };
+        Assert.Equal("prod", CheckSummaryDto.From(prod, null, CheckMetricsDto.Empty,
+            Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>()).Environment);
+        Assert.Equal("prod", CheckDetailDto.From(prod, Array.Empty<Run>(), Array.Empty<TagDto>()).Environment);
+    }
+
+    [Fact]
     public void CheckSummary_carries_per_location_rollup()
     {
         var check = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true };
