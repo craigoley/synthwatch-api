@@ -102,14 +102,14 @@ public class MappingTests
     [Fact]
     public void Check_dtos_project_secret_header_references_never_values()
     {
-        // Item 1: the cred-mgmt UI reads WHICH env-var-refs a monitor uses. secret_headers is references-only —
-        // { headerName -> ENV_VAR_NAME }, a NAME, never a resolved credential value (the API never reads env).
-        var refs = new Dictionary<string, string>
+        // Item 1: model B — secret_headers stores ENCRYPTED VALUES ({ headerName -> ciphertext }). The
+        // cred-mgmt UI reads WHICH slots are set, MASKED — never the value OR the ciphertext (write-only).
+        var stored = new Dictionary<string, string>
         {
-            ["X-Api-Key"] = "WEGMANS_API_KEY_ENV",
-            ["X-Store-Id"] = "WEGMANS_STORE_ID_ENV",
+            ["X-Api-Key"] = "v1:CIPHERTEXTAAAA",
+            ["X-Store-Id"] = "v1:CIPHERTEXTBBBB",
         };
-        var check = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true, SecretHeaders = refs };
+        var check = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true, SecretHeaders = stored };
 
         var summary = CheckSummaryDto.From(check, null, CheckMetricsDto.Empty, Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>());
         var detail = CheckDetailDto.From(check, Array.Empty<Run>(), Array.Empty<TagDto>());
@@ -117,11 +117,11 @@ public class MappingTests
         foreach (var sh in new[] { summary.SecretHeaders, detail.SecretHeaders })
         {
             Assert.NotNull(sh);
-            // the projected map is the stored REFERENCES verbatim — env-var NAMES, not values.
-            Assert.Equal("WEGMANS_API_KEY_ENV", sh!["X-Api-Key"]);
-            Assert.Equal("WEGMANS_STORE_ID_ENV", sh["X-Store-Id"]);
-            // ★ NO credential VALUE anywhere: the map values are exactly the reference names we stored.
-            Assert.Equal(refs, sh);
+            // MASKED: the keys are visible (so the editor can render rows) but every value is "set".
+            Assert.Equal("set", sh!["X-Api-Key"]);
+            Assert.Equal("set", sh["X-Store-Id"]);
+            // ★ NO ciphertext (or value) anywhere in the projected map.
+            Assert.DoesNotContain(sh.Values, v => v.StartsWith("v1:"));
         }
     }
 

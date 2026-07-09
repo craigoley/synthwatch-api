@@ -6,6 +6,18 @@ using SynthWatch.Api.Infrastructure;
 namespace SynthWatch.Api.Dtos;
 
 /// <summary>
+/// Masks an encrypted credential map for the WRITE-ONLY read DTO: { key -> "set" } — reveals which slots are
+/// configured (so the editor can render the rows), NEVER the value OR the ciphertext. null -> null; empty ->
+/// empty. This is the single choke point that keeps model-B credentials write-only on every read path.
+/// </summary>
+public static class CredMask
+{
+    public const string Set = "set";
+    public static IReadOnlyDictionary<string, string>? Of(IReadOnlyDictionary<string, string>? m) =>
+        m is null ? null : m.ToDictionary(kv => kv.Key, _ => Set);
+}
+
+/// <summary>
 /// One point in a check's recent-run sparkline. Field names (<c>t</c>/<c>d</c>/<c>s</c>) match
 /// the dashboard's <c>SparkPoint</c> shape exactly (ported from the old route's json_agg).
 /// </summary>
@@ -59,10 +71,13 @@ public record CheckSummaryDto(
     IReadOnlyDictionary<string, string>? RequestHeaders,
     string? RequestBody,
     IReadOnlyDictionary<string, string>? Auth,
-    // Per-monitor secret-header REFERENCES ({ headerName -> ENV_VAR_NAME }, runner 0061) for the cred-mgmt
-    // UI. References only — NEVER a credential value (the value lives in env, resolved runner-side). Session-
-    // gated on readback like RequestHeaders (see ChecksFunctions): null for anonymous/viewer callers.
+    // model B: MASKED secret-header slots for the cred-mgmt UI — { headerName -> "set" }, NEVER the value OR
+    // ciphertext (the encrypted value lives in the DB; write-only). Session-gated on readback (see
+    // ChecksFunctions): null for anonymous/viewer callers.
     IReadOnlyDictionary<string, string>? SecretHeaders,
+    // model B: MASKED login-credential slots — { role -> "set" }, NEVER the value OR ciphertext. Write-only,
+    // session-gated like SecretHeaders.
+    IReadOnlyDictionary<string, string>? LoginCredentials,
     // Network checks (dns/tcp/ping): per-kind config; null for other kinds.
     NetConfig? NetConfig,
     // Multistep API chains: ordered step list; null for non-multistep kinds.
@@ -108,7 +123,8 @@ public record CheckSummaryDto(
         RequestHeaders: c.RequestHeaders,
         RequestBody: c.RequestBody,
         Auth: c.Auth,
-        SecretHeaders: c.SecretHeaders,
+        SecretHeaders: CredMask.Of(c.SecretHeaders),
+        LoginCredentials: CredMask.Of(c.LoginCredentials),
         NetConfig: c.NetConfig,
         Steps: c.Steps,
         Locations: locations,
@@ -169,9 +185,11 @@ public record CheckDetailDto(
     IReadOnlyDictionary<string, string>? RequestHeaders,
     string? RequestBody,
     IReadOnlyDictionary<string, string>? Auth,
-    // Per-monitor secret-header REFERENCES for the cred-mgmt UI (runner 0061) — references only, never a
-    // value; session-gated on readback like RequestHeaders (see CheckSummaryDto).
+    // model B: MASKED secret-header slots for the cred-mgmt UI — { headerName -> "set" }, never the value OR
+    // ciphertext (write-only); session-gated on readback like RequestHeaders.
     IReadOnlyDictionary<string, string>? SecretHeaders,
+    // model B: MASKED login-credential slots — { role -> "set" }, never the value OR ciphertext.
+    IReadOnlyDictionary<string, string>? LoginCredentials,
     NetConfig? NetConfig,
     IReadOnlyList<ChainStep>? Steps,
     // SLO error-budget + burn rate (migration 0016). Null when the check has no slo_target (opt-in).
@@ -208,7 +226,8 @@ public record CheckDetailDto(
         RequestHeaders: c.RequestHeaders,
         RequestBody: c.RequestBody,
         Auth: c.Auth,
-        SecretHeaders: c.SecretHeaders,
+        SecretHeaders: CredMask.Of(c.SecretHeaders),
+        LoginCredentials: CredMask.Of(c.LoginCredentials),
         NetConfig: c.NetConfig,
         Steps: c.Steps,
         Slo: slo,

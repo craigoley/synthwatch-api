@@ -66,12 +66,16 @@ public class Check
     public string? RequestBody { get; set; }
     public Dictionary<string, string>? Auth { get; set; }
 
-    // Per-monitor SECRET request headers (runner migration 0061; jsonb). REFERENCES ONLY —
-    // { headerName -> ENV_VAR_NAME }; the runner resolves process.env[ENV_VAR_NAME] at request time
-    // (secretHeaders.ts). The resolved VALUE is never persisted/logged/DTO'd/traced (audit #219); the
-    // stored map holds a reference, never a credential. RUNNER-WRITTEN (the API only projects the refs
-    // for the cred-management UI — and gates that readback to a session, see ChecksFunctions).
+    // Per-monitor SECRET request headers — model B (0068; jsonb). ENCRYPTED VALUES —
+    // { headerName -> CIPHERTEXT ("v1:…", CredCrypto v1) }. The API ENCRYPTS the value on write (editor-
+    // gated, PutCheckCredentials); the runner DECRYPTS at run time (secretHeaders.ts). WRITE-ONLY: the read
+    // DTO returns MASKED ({name -> "set"}), never plaintext OR ciphertext (audit #219).
     public Dictionary<string, string>? SecretHeaders { get; set; }
+
+    // Per-monitor LOGIN CREDENTIALS — model B (0068; jsonb). ENCRYPTED VALUES —
+    // { credentialRole -> CIPHERTEXT }. API encrypts on write; runner decrypts at run time
+    // (loginCredentials.ts) -> the spec's credential(role). WRITE-ONLY read DTO (masked), like SecretHeaders.
+    public Dictionary<string, string>? LoginCredentials { get; set; }
 
     // Network checks (dns/tcp/ping): per-kind config (migration 0011; jsonb). Null for other kinds.
     public NetConfig? NetConfig { get; set; }

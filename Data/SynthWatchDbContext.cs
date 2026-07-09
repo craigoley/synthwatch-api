@@ -274,8 +274,11 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Auth).HasColumnName("auth").HasColumnType("jsonb")
                 .HasConversion(authConv, authCmp);
             var (shConv, shCmp) = JsonbColumn<Dictionary<string, string>?>();
-            e.Property(x => x.SecretHeaders).HasColumnName("secret_headers").HasColumnType("jsonb") // runner 0061; references-only
+            e.Property(x => x.SecretHeaders).HasColumnName("secret_headers").HasColumnType("jsonb") // model B (0068); encrypted values
                 .HasConversion(shConv, shCmp);
+            var (lcConv, lcCmp) = JsonbColumn<Dictionary<string, string>?>();
+            e.Property(x => x.LoginCredentials).HasColumnName("login_credentials").HasColumnType("jsonb") // model B (0068); encrypted values
+                .HasConversion(lcConv, lcCmp);
             var (netConv, netCmp) = JsonbColumn<NetConfig?>();
             e.Property(x => x.NetConfig).HasColumnName("net_config").HasColumnType("jsonb")
                 .HasConversion(netConv, netCmp);
