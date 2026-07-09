@@ -1,90 +1,68 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Infrastructure;
 using Xunit;
 
 namespace SynthWatch.Api.Tests;
 
-/// <summary>Pure cost-model tests (no DB/clock). Pins the confirmed model (recon #220 / #229 ~$67/mo):
-/// projected = avg_s × (2,592,000/interval) × regions × rate; measured = 7d Σs × rate × 30/7; divergence =
-/// measured/projected with a &gt;1.5 flag. Also pins that the RATE is config-driven (changing it changes
-/// the output) and self-describing (echoed).</summary>
+/// <summary>Cost AGGREGATION tests (the $ MODEL now lives in the shared cost_projection(rate) SQL function —
+/// runner 0069 — and is verified end-to-end by the /reports/cost integration test). Build no longer computes
+/// per-check math; it maps the function's already-scored rows and aggregates: fleet total = sum of the RAW
+/// per-check figures then rounded (no per-check rounding drift), sorted by projected desc, topN drivers.
+/// Also pins that the config RATE is echoed self-describing.</summary>
 public class CostReportTests
 {
-    private const decimal Rate = 0.00003m; // the documented default (ACA vCPU-second)
+    private const decimal Rate = 0.00003m;
+
+    // A row as the SQL function returns it: rounded projected/measured for display + the raw for totals.
+    private static CostReportRow Scored(long id, string name, decimal raw, decimal? div = null, bool flag = false) =>
+        new()
+        {
+            CheckId = id, CheckName = name, Kind = "http", IntervalSeconds = 300, RegionCount = 1, AvgDurationS = 10.0,
+            Projected = Math.Round(raw, 2, MidpointRounding.AwayFromZero),
+            Measured = Math.Round(raw, 2, MidpointRounding.AwayFromZero),
+            Divergence = div, DivergenceFlag = flag, ProjectedRaw = raw, MeasuredRaw = raw,
+        };
 
     [Fact]
-    public void Projected_and_measured_follow_the_confirmed_model()
+    public void Fleet_total_sums_the_RAW_per_check_figures_then_rounds_no_drift()
     {
-        // 10s avg, 300s interval (8,640 runs/mo/region), 2 regions, rate 0.00003:
-        //   projected = 10 × 8640 × 2 × 0.00003 = $5.184 → 5.18
-        //   measured  = 40,320 × 0.00003 × 30/7 = $5.184 → 5.18  (ratio 1.0, not divergent)
-        var rows = new List<CostReportRow>
-        {
-            new() { CheckId = 1, SourceKey = "a", CheckName = "A", Kind = "http",
-                    IntervalSeconds = 300, RegionCount = 2, AvgDurationS = 10.0, SumDurationS7d = 40320.0 },
-        };
+        // Two rows whose RAW sum (0.014 + 0.014 = 0.028 → 0.03) differs from summing the ROUNDED per-check
+        // (0.01 + 0.01 = 0.02). Build must sum RAW then round → 0.03.
+        var rows = new List<CostReportRow> { Scored(1, "a", 0.014m), Scored(2, "b", 0.014m) };
         var r = CostReportProjection.Build(rows, Rate, "src", "2026-07-08", DateTimeOffset.UnixEpoch);
-        var a = Assert.Single(r.Checks);
-        Assert.Equal(5.18m, a.ProjectedMonthly);
-        Assert.Equal(5.18m, a.MeasuredMonthly7d);
-        Assert.Equal(1.0m, a.DivergenceRatio);
-        Assert.False(a.DivergenceFlag);
-        Assert.Equal(5.18m, r.TotalProjectedMonthly);
-        Assert.Equal(5.18m, r.TotalMeasuredMonthly);
-        // self-describing: the rate + provenance are echoed verbatim.
+        Assert.Equal(0.03m, r.TotalProjectedMonthly);   // sum RAW (0.028) then round — NOT 0.02
+        Assert.Equal(0.03m, r.TotalMeasuredMonthly);
+    }
+
+    [Fact]
+    public void Checks_sort_by_projected_desc_and_top_drivers_mirror_the_order()
+    {
+        var rows = new List<CostReportRow> { Scored(1, "small", 1.00m), Scored(2, "big", 9.00m), Scored(3, "mid", 5.00m) };
+        var r = CostReportProjection.Build(rows, Rate, "s", "d", DateTimeOffset.UnixEpoch, topN: 2);
+        Assert.Equal(new[] { "big", "mid", "small" }, r.Checks.Select(c => c.Name).ToArray());
+        Assert.Equal(new[] { "big", "mid" }, r.TopCostDrivers.Select(c => c.Name).ToArray()); // topN=2 slice
+        Assert.Equal(3, r.Checks.Count);                                                       // full list unbounded
+    }
+
+    [Fact]
+    public void Divergence_and_flag_pass_through_from_the_function_verbatim()
+    {
+        var rows = new List<CostReportRow> { Scored(1, "x", 5.00m, div: 1.8m, flag: true) };
+        var c = Assert.Single(CostReportProjection.Build(rows, Rate, "s", "d", DateTimeOffset.UnixEpoch).Checks);
+        Assert.Equal(1.8m, c.DivergenceRatio);
+        Assert.True(c.DivergenceFlag);
+    }
+
+    [Fact]
+    public void Rate_and_provenance_are_echoed_self_describing()
+    {
+        var r = CostReportProjection.Build(new List<CostReportRow> { Scored(1, "a", 1m) }, Rate, "src", "2026-07-08", DateTimeOffset.UnixEpoch);
         Assert.Equal(Rate, r.RateUsed);
         Assert.Equal("src", r.RateSource);
         Assert.Equal("2026-07-08", r.RateSetDate);
-    }
-
-    [Fact]
-    public void Divergence_ratio_over_1_5_flags_retry_amplification()
-    {
-        // Same projected ($5.18) but the monitor actually burned ~2× the modeled compute (retries/failing flow).
-        var rows = new List<CostReportRow>
-        {
-            new() { CheckId = 2, CheckName = "B", Kind = "http",
-                    IntervalSeconds = 300, RegionCount = 2, AvgDurationS = 10.0, SumDurationS7d = 80640.0 },
-        };
-        var b = Assert.Single(CostReportProjection.Build(rows, Rate, "s", "d", DateTimeOffset.UnixEpoch).Checks);
-        Assert.True(b.DivergenceRatio > 1.5m, $"ratio was {b.DivergenceRatio}");
-        Assert.True(b.DivergenceFlag);
-    }
-
-    [Fact]
-    public void No_runs_yields_zero_cost_and_null_divergence_never_fabricated()
-    {
-        var rows = new List<CostReportRow>
-        {
-            new() { CheckId = 3, CheckName = "C", Kind = "ssl",
-                    IntervalSeconds = 300, RegionCount = 1, AvgDurationS = null, SumDurationS7d = null },
-        };
-        var c = Assert.Single(CostReportProjection.Build(rows, Rate, "s", "d", DateTimeOffset.UnixEpoch).Checks);
-        Assert.Equal(0m, c.ProjectedMonthly);
-        Assert.Equal(0m, c.MeasuredMonthly7d);
-        Assert.Null(c.DivergenceRatio);   // honest empty, not a fabricated 0.0
-        Assert.False(c.DivergenceFlag);
-    }
-
-    [Fact]
-    public void Rate_is_a_linear_multiplier_and_checks_sort_by_projected_desc()
-    {
-        var rows = new List<CostReportRow>
-        {
-            new() { CheckId = 1, CheckName = "small", Kind = "http",   IntervalSeconds = 300, RegionCount = 1, AvgDurationS = 10.0 },
-            new() { CheckId = 2, CheckName = "big",   Kind = "browser", IntervalSeconds = 60,  RegionCount = 3, AvgDurationS = 20.0 },
-        };
-        var at1x = CostReportProjection.Build(rows, 0.00003m, "s", "d", DateTimeOffset.UnixEpoch);
-        var at2x = CostReportProjection.Build(rows, 0.00006m, "s", "d", DateTimeOffset.UnixEpoch);
-
-        // ★ changing the (config) rate changes the output — doubling the rate doubles projected cost.
-        Assert.Equal(at1x.Checks[0].ProjectedMonthly * 2m, at2x.Checks[0].ProjectedMonthly);
-        Assert.Equal(0.00006m, at2x.RateUsed);
-        // sorted by projected desc — the "big" driver leads, and top drivers mirror it.
-        Assert.Equal("big", at1x.Checks[0].Name);
-        Assert.Equal("big", at1x.TopCostDrivers[0].Name);
     }
 
     [Fact]

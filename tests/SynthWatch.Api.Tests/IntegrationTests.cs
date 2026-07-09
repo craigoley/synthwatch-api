@@ -319,6 +319,48 @@ public class IntegrationTests
         }
     }
 
+    // ★ REGRESSION: cost_projection returns projected_raw/measured_raw UNROUNDED, and a NON-terminating
+    // avg_duration_s (10000,10000,10001 → avg 10.000333…s) casts to a numeric that, times PG's scale-16
+    // division (2,592,000/interval), yields a raw of scale ~34 — e.g. 5.1841727999999827200000000000000000.
+    // Reading that into a C# decimal (max scale 28) throws OverflowException ("does not fit in a System.Decimal"),
+    // 500-ing /reports/cost for basically every real check (clean averages are rare). GetCostReport rounds the
+    // *_raw columns to 6dp on read, so this must return 200 with the figures intact. Must-go-red if the round
+    // is dropped (reverts to SELECT *).
+    [SkippableFact]
+    public async Task Cost_report_does_not_overflow_on_a_high_scale_unrounded_raw()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // interval 300s, 2 regions, runs 10000/10000/10001ms → avg 10.000333…s (a non-terminating float → high-scale numeric).
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name, kind, target_url, enabled, interval_seconds)
+                VALUES ('cost-rep-messyavg','http','https://c.example', true, 300) RETURNING id INTO cid;
+              INSERT INTO check_locations (check_id, location) VALUES (cid,'eastus2'),(cid,'centralus');
+              INSERT INTO runs (check_id, status, started_at, duration_ms, location) VALUES
+                (cid,'pass', now(), 10000, 'eastus2'),
+                (cid,'pass', now(), 10000, 'eastus2'),
+                (cid,'pass', now(), 10001, 'centralus');
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            // The assertion is the call itself: WITHOUT the 6dp round this throws OverflowException before returning.
+            var dto = Assert.IsType<CostReportResponseDto>(
+                Assert.IsType<OkObjectResult>(await reports.GetCostReport(Request(), default)).Value!);
+
+            var c = Assert.Single(dto.Checks, x => x.Name == "cost-rep-messyavg");
+            Assert.Equal(10.000333, c.AvgDurationS!.Value, 3);      // avg(10000,10000,10001)/1000
+            // projected = 10.000333… × (2,592,000/300) × 2 × 0.00003 = 5.18417… → round 2dp = $5.18
+            Assert.Equal(5.18m, c.ProjectedMonthly);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'cost-rep-messyavg';");
+        }
+    }
+
     // ★ Pre-prod-arc S1c CONTRACT: a check with environment != 'prod' is EXCLUDED from the prod fleet
     // rollups (slo / mttr / trust) but still INCLUDED in the env-agnostic infra signals (egress; #187).
     // The exclude is what protects the prod SLO budget once S3 sets a real pre-prod check.

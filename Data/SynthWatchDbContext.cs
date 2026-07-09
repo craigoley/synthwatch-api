@@ -424,7 +424,12 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.IntervalSeconds).HasColumnName("interval_seconds");
             e.Property(x => x.RegionCount).HasColumnName("region_count");
             e.Property(x => x.AvgDurationS).HasColumnName("avg_duration_s");
-            e.Property(x => x.SumDurationS7d).HasColumnName("sum_duration_s_7d");
+            e.Property(x => x.Projected).HasColumnName("projected");
+            e.Property(x => x.Measured).HasColumnName("measured");
+            e.Property(x => x.Divergence).HasColumnName("divergence");
+            e.Property(x => x.DivergenceFlag).HasColumnName("divergence_flag");
+            e.Property(x => x.ProjectedRaw).HasColumnName("projected_raw");
+            e.Property(x => x.MeasuredRaw).HasColumnName("measured_raw");
         });
 
         modelBuilder.Entity<SloReportRow>(e =>

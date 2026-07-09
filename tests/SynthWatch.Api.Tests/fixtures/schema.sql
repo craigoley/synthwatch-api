@@ -652,6 +652,42 @@ AS $function$
 $function$
 ;
 
+-- cost_projection(rate) (0069) — the shared cost model /reports/cost calls (mirrors the runner migration).
+CREATE OR REPLACE FUNCTION public.cost_projection(p_rate numeric)
+ RETURNS TABLE(check_id bigint, source_key text, check_name text, kind text, interval_seconds integer, region_count integer, avg_duration_s double precision, projected numeric, measured numeric, divergence numeric, divergence_flag boolean, projected_raw numeric, measured_raw numeric)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH base AS (
+        SELECT c.id AS check_id, c.source_key, c.name AS check_name, c.kind, c.interval_seconds,
+               (SELECT count(*)::int FROM check_locations cl WHERE cl.check_id = c.id) AS region_count,
+               ((SELECT avg(r.duration_ms) FROM runs r
+                   WHERE r.check_id = c.id AND r.started_at > now() - interval '7 days'
+                     AND r.duration_ms IS NOT NULL) / 1000.0)::float8 AS avg_duration_s,
+               ((SELECT sum(r.duration_ms) FROM runs r
+                   WHERE r.check_id = c.id AND r.started_at > now() - interval '7 days'
+                     AND r.duration_ms IS NOT NULL) / 1000.0)::float8 AS sum_duration_s_7d
+          FROM checks c WHERE c.enabled
+    ),
+    scored AS (
+        SELECT b.*,
+               CASE WHEN b.avg_duration_s IS NOT NULL AND b.interval_seconds > 0
+                    THEN b.avg_duration_s::numeric * (2592000::numeric / b.interval_seconds) * b.region_count * p_rate
+                    ELSE 0 END AS p_raw,
+               CASE WHEN b.sum_duration_s_7d IS NOT NULL
+                    THEN b.sum_duration_s_7d::numeric * p_rate * (30::numeric / 7::numeric)
+                    ELSE 0 END AS m_raw
+          FROM base b
+    )
+    SELECT s.check_id, s.source_key, s.check_name, s.kind, s.interval_seconds, s.region_count, s.avg_duration_s,
+           round(s.p_raw, 2), round(s.m_raw, 2),
+           CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) ELSE NULL END,
+           CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) > 1.5 ELSE false END,
+           s.p_raw, s.m_raw
+      FROM scored s
+$function$
+;
+
 -- slo_burn_status (0055) — the shared location-aware burn STATE (P5 PR2), for the /reports/slo LATERAL join.
 CREATE OR REPLACE FUNCTION public.slo_burn_status(p_check_id bigint)
  RETURNS TABLE(check_id bigint, burn_state text, reported_burn double precision, detail jsonb)

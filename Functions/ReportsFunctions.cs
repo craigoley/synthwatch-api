@@ -231,24 +231,25 @@ public class ReportsFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/cost")] HttpRequest req,
         CancellationToken ct)
     {
-        // One row per ENABLED check: region_count from check_locations, avg/Σ duration (float SECONDS) over the
-        // last 7d. Casts pin the CLR types (int region_count, float8 seconds); the $ math is applied in C#.
-        var rows = await _db.CostReport.FromSql(
-            $@"SELECT c.id AS check_id, c.source_key AS source_key, c.name AS check_name, c.kind AS kind,
-                      c.interval_seconds AS interval_seconds,
-                      (SELECT count(*)::int FROM check_locations cl WHERE cl.check_id = c.id) AS region_count,
-                      ((SELECT avg(r.duration_ms) FROM runs r
-                          WHERE r.check_id = c.id AND r.started_at > now() - interval '7 days'
-                            AND r.duration_ms IS NOT NULL) / 1000.0)::float8 AS avg_duration_s,
-                      ((SELECT sum(r.duration_ms) FROM runs r
-                          WHERE r.check_id = c.id AND r.started_at > now() - interval '7 days'
-                            AND r.duration_ms IS NOT NULL) / 1000.0)::float8 AS sum_duration_s_7d
-               FROM checks c
-               WHERE c.enabled
-               ORDER BY c.name").AsNoTracking().ToListAsync(ct);
+        // The $ math lives ONLY in the shared cost_projection(rate) SQL function (runner 0069) — the SAME
+        // function the runner's narrative fact pack calls, so the figures are byte-identical by construction.
+        // We pass the CONFIG rate; C# only aggregates (fleet total + topN + order), never re-derives the model.
+        //
+        // ★ round the *_raw columns to 6dp on read. cost_projection returns them UNROUNDED, and PG numeric
+        // division (e.g. 2592000/interval, 30/7) yields scale ~21 (e.g. 5.184000000000000000000). At that
+        // scale the unscaled mantissa is value×10^21, so any check projecting ≳ $79/mo overflows a C# decimal
+        // (96-bit mantissa, max ~7.9e28) → Npgsql "does not fit in a System.Decimal". The runner reads these
+        // as strings (JS), so it never hit this. 6dp is micro-dollar precision — the fleet total sums the raws
+        // then rounds to 2dp, so this is drift-free for every displayed figure while giving ~$8e22 of headroom.
+        var rows = await _db.CostReport
+            .FromSql($@"SELECT check_id, source_key, check_name, kind, interval_seconds, region_count,
+                               avg_duration_s, projected, measured, divergence, divergence_flag,
+                               round(projected_raw, 6) AS projected_raw, round(measured_raw, 6) AS measured_raw
+                        FROM cost_projection({CostRate.PerVcpuSecond})")
+            .AsNoTracking().ToListAsync(ct);
 
         var dto = CostReportProjection.Build(
-            rows, CostRate.PerVcpuSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow);
+            rows, CostRate.PerVcpuSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50);
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=60";
         req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(dto);
