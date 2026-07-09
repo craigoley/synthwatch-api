@@ -40,10 +40,14 @@ CREATE FUNCTION public.sla_availability(p_from timestamp with time zone, p_to ti
            ON r.check_id   = c.id
           AND r.started_at >= p_from
           AND r.started_at <  p_to
-    -- MAINTENANCE-WINDOW EXCLUSION (additive anti-join): a run is dropped if it
-    -- falls inside an active window for this check (check_id = c.id) OR a
-    -- fleet-wide window (check_id IS NULL). Runs not covered keep mw.id NULL and
-    -- survive the WHERE; checks with no runs keep their single null-run row.
+          -- SANDBOX EXCLUSION (0070): a paused monitor's on-demand validation persists a runs row but
+          -- skipped evaluate() — not a scheduled health signal, so it must never move availability. In the
+          -- JOIN (not a WHERE) so a check whose only window runs are sandbox keeps its LEFT-JOIN null-run row.
+          AND NOT r.sandbox
+    -- MAINTENANCE-WINDOW EXCLUSION (additive anti-join, mirrors 0004): drop runs
+    -- that fall inside an active window for this check (check_id = c.id) OR a
+    -- fleet-wide window (check_id IS NULL). Uncovered runs keep mw.id NULL and
+    -- survive; checks with no runs keep their single null-run row.
     LEFT JOIN maintenance_windows mw
            ON (mw.check_id = c.id OR mw.check_id IS NULL)
           AND r.started_at >= mw.starts_at
