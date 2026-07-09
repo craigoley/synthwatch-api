@@ -680,10 +680,12 @@ AS $function$
           FROM base b
     )
     SELECT s.check_id, s.source_key, s.check_name, s.kind, s.interval_seconds, s.region_count, s.avg_duration_s,
-           round(s.p_raw, 2), round(s.m_raw, 2),
-           CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) ELSE NULL END,
-           CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) > 1.5 ELSE false END,
-           s.p_raw, s.m_raw
+           round(s.p_raw, 2) AS projected,
+           round(s.m_raw, 2) AS measured,
+           CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) ELSE NULL END AS divergence,
+           CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) > 1.5 ELSE false END AS divergence_flag,
+           s.p_raw AS projected_raw,
+           s.m_raw AS measured_raw
       FROM scored s
 $function$
 ;
