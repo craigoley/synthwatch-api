@@ -39,6 +39,9 @@ public record CheckSummaryDto(
     int TimeoutMs,
     int FailureThreshold,
     string Severity,
+    // Which environment this monitor targets (runner 0059: prod|staging|dev, default prod). Read-only
+    // projection so the dashboard can render/filter env-aware; non-prod is excluded from fleet rollups.
+    string Environment,
     bool Enabled,
     bool LighthouseEnabled,
     DateTimeOffset? LastRunAt,
@@ -102,7 +105,7 @@ public record CheckSummaryDto(
     public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m,
         IReadOnlyList<LocationStatusDto> locations, IReadOnlyList<TagDto> tags) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
-        c.IntervalSeconds, c.TimeoutMs, c.FailureThreshold, c.Severity, c.Enabled,
+        c.IntervalSeconds, c.TimeoutMs, c.FailureThreshold, c.Severity, c.Environment, c.Enabled,
         c.LighthouseEnabled, c.LastRunAt, c.CreatedAt,
         CurrentStatus: !c.Enabled ? "paused" : latest?.Status ?? "unknown",
         CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
@@ -172,6 +175,9 @@ public record CheckDetailDto(
     int TimeoutMs,
     int FailureThreshold,
     string Severity,
+    // Which environment this monitor targets (runner 0059: prod|staging|dev, default prod). Read-only
+    // projection for env-aware dashboard display; non-prod is excluded from fleet rollups.
+    string Environment,
     bool Enabled,
     DateTimeOffset CreatedAt,
     bool LighthouseEnabled,
@@ -220,7 +226,7 @@ public record CheckDetailDto(
         SloDto? slo = null, IReadOnlyList<LocationStatusDto>? locations = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.BodyMustContain, c.IntervalSeconds, c.LastRunAt, c.TimeoutMs, c.FailureThreshold,
-        c.Severity, c.Enabled, c.CreatedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
+        c.Severity, c.Environment, c.Enabled, c.CreatedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
         c.LighthouseFormFactor, c.PerfBudgetLcpMs, c.PerfBudgetTransferBytes, c.CertExpiryWarnDays,
         Assertions: c.Assertions,
         RequestHeaders: c.RequestHeaders,

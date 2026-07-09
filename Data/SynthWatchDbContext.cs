@@ -245,6 +245,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.TimeoutMs).HasColumnName("timeout_ms");
             e.Property(x => x.FailureThreshold).HasColumnName("failure_threshold");
             e.Property(x => x.Severity).HasColumnName("severity");
+            e.Property(x => x.Environment).HasColumnName("environment"); // runner 0059; NOT NULL DEFAULT 'prod'
             e.Property(x => x.Enabled).HasColumnName("enabled");
             e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
             e.Property(x => x.LighthouseEnabled).HasColumnName("lighthouse_enabled");

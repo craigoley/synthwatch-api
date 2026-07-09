@@ -40,6 +40,11 @@ public class Check
     // CHECK: severity IN ('critical','warning')
     public string Severity { get; set; } = "critical";
 
+    // Which environment this monitor targets (runner migration 0059). CHECK IN ('prod','staging','dev'),
+    // NOT NULL DEFAULT 'prod' — so every existing check is 'prod' and the fleet rollups exclude non-prod.
+    // Read-only projection here (env-aware dashboard display); the runner owns writes.
+    public string Environment { get; set; } = "prod";
+
     public bool Enabled { get; set; } = true;
 
     public DateTimeOffset CreatedAt { get; set; }
