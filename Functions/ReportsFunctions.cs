@@ -231,24 +231,15 @@ public class ReportsFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "reports/cost")] HttpRequest req,
         CancellationToken ct)
     {
-        // One row per ENABLED check: region_count from check_locations, avg/Σ duration (float SECONDS) over the
-        // last 7d. Casts pin the CLR types (int region_count, float8 seconds); the $ math is applied in C#.
-        var rows = await _db.CostReport.FromSql(
-            $@"SELECT c.id AS check_id, c.source_key AS source_key, c.name AS check_name, c.kind AS kind,
-                      c.interval_seconds AS interval_seconds,
-                      (SELECT count(*)::int FROM check_locations cl WHERE cl.check_id = c.id) AS region_count,
-                      ((SELECT avg(r.duration_ms) FROM runs r
-                          WHERE r.check_id = c.id AND r.started_at > now() - interval '7 days'
-                            AND r.duration_ms IS NOT NULL) / 1000.0)::float8 AS avg_duration_s,
-                      ((SELECT sum(r.duration_ms) FROM runs r
-                          WHERE r.check_id = c.id AND r.started_at > now() - interval '7 days'
-                            AND r.duration_ms IS NOT NULL) / 1000.0)::float8 AS sum_duration_s_7d
-               FROM checks c
-               WHERE c.enabled
-               ORDER BY c.name").AsNoTracking().ToListAsync(ct);
+        // The $ math lives ONLY in the shared cost_projection(rate) SQL function (runner 0069) — the SAME
+        // function the runner's narrative fact pack calls, so the figures are byte-identical by construction.
+        // We pass the CONFIG rate; C# only aggregates (fleet total + topN + order), never re-derives the model.
+        var rows = await _db.CostReport
+            .FromSql($"SELECT * FROM cost_projection({CostRate.PerVcpuSecond})")
+            .AsNoTracking().ToListAsync(ct);
 
         var dto = CostReportProjection.Build(
-            rows, CostRate.PerVcpuSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow);
+            rows, CostRate.PerVcpuSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50);
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=60";
         req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(dto);
