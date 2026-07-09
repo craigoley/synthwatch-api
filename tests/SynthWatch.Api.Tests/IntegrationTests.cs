@@ -3488,7 +3488,7 @@ public class IntegrationTests
                 VALUES ('readgate-hook','webhook', jsonb_build_object('url','https://hook.example','authHeader','Bearer hook-secret'), true);
               INSERT INTO checks (name, kind, target_url, request_headers, secret_headers)
                 VALUES ('readgate-check','http','https://h.example', jsonb_build_object('X-Api-Key','hdr-secret'),
-                        jsonb_build_object('X-Api-Key','WEGMANS_API_KEY_ENV'));
+                        jsonb_build_object('X-Api-Key','v1:ZmFrZS1jaXBoZXJ0ZXh0LWZvci1yZWFkZ2F0ZQ'));
               INSERT INTO reconcile_drift (source_key, drift_type, detail, detected_at)
                 VALUES ('readgate.spec','changed', jsonb_build_object('before', jsonb_build_object('u','a'), 'after', jsonb_build_object('u','b')), now());
               INSERT INTO reconcile_apply_plan (source_key, drift_type, status, plan, computed_at)
@@ -3546,8 +3546,9 @@ public class IntegrationTests
             Assert.Null(anonDetail.SecretHeaders);                       // secret_headers refs are session-gated too
             var editorDetail = Assert.IsType<CheckDetailDto>(((OkObjectResult)await checks.GetCheck(AuthReq(tok), cid, default)).Value);
             Assert.Equal("hdr-secret", editorDetail.RequestHeaders!["X-Api-Key"]); // session: verbatim
-            // ★ secret_headers to a session = the env-var-NAME reference, NEVER a resolved credential value.
-            Assert.Equal("WEGMANS_API_KEY_ENV", editorDetail.SecretHeaders!["X-Api-Key"]);
+            // ★ model B: secret_headers are encrypted + WRITE-ONLY. A session sees only the MASK ("set" per
+            //   configured slot) — NEVER the value OR the stored ciphertext (CredMask, mirrored by CredMaskTests).
+            Assert.Equal(CredMask.Set, editorDetail.SecretHeaders!["X-Api-Key"]);
             var listReq = AuthReq();
             var anonList = ((IEnumerable<CheckSummaryDto>)((OkObjectResult)await checks.ListChecks(listReq, default)).Value!).ToList();
             Assert.All(anonList, dto => Assert.Null(dto.RequestHeaders)); // list summaries stripped too
