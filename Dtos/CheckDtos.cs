@@ -10,7 +10,7 @@ namespace SynthWatch.Api.Dtos;
 /// configured (so the editor can render the rows), NEVER the value OR the ciphertext. null -> null; empty ->
 /// empty. This is the single choke point that keeps model-B credentials write-only on every read path.
 /// </summary>
-internal static class CredMask
+public static class CredMask
 {
     public const string Set = "set";
     public static IReadOnlyDictionary<string, string>? Of(IReadOnlyDictionary<string, string>? m) =>
