@@ -4919,6 +4919,69 @@ public class IntegrationTests
         }
     }
 
+    [SkippableFact]
+    public async Task SpecCache_reports_the_cached_commit_sha_for_a_git_managed_check()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // A Git-managed check (spec_path set) + its runner-owned spec_cache row at a known commit SHA.
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO checks (name, kind, target_url, flow_name, spec_path)
+              VALUES ('spec-managed', 'browser', 'https://s.example', 'shop-flow', 'monitors/shop.spec.ts');
+            INSERT INTO spec_cache (spec_path, etag, compiled_js, fetched_at)
+              VALUES ('monitors/shop.spec.ts', 'abc1234deadbeef', '/* compiled */', now());
+            """);
+
+        var fn = new SpecCacheFunctions(db);
+        var id = await db.Checks.Where(c => c.Name == "spec-managed").Select(c => c.Id).FirstAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(await fn.GetCheckSpecCache(Request(), id, default));
+        var d = Assert.IsType<SpecCacheDto>(ok.Value!);
+        Assert.True(d.GitManaged);
+        Assert.Equal("monitors/shop.spec.ts", d.SpecPath);
+        Assert.Equal("abc1234deadbeef", d.CachedSha);   // ★ the cached commit SHA is surfaced (staleness observable)
+        Assert.NotNull(d.FetchedAt);
+    }
+
+    [SkippableFact]
+    public async Task SpecCache_is_not_git_managed_for_a_baked_in_check()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url) VALUES ('baked-http', 'http', 'https://s.example');");
+
+        var fn = new SpecCacheFunctions(db);
+        var id = await db.Checks.Where(c => c.Name == "baked-http").Select(c => c.Id).FirstAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(await fn.GetCheckSpecCache(Request(), id, default));
+        var d = Assert.IsType<SpecCacheDto>(ok.Value!);
+        Assert.False(d.GitManaged);   // no spec_path → no runtime-spec cache to report
+        Assert.Null(d.CachedSha);
+        Assert.Null(d.FetchedAt);
+    }
+
+    [SkippableFact]
+    public async Task SpecCache_cachedSha_is_null_when_the_spec_was_never_fetched()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // Git-managed, but NO spec_cache row yet (never run) → GitManaged true, CachedSha null (not a crash / fake).
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO checks (name, kind, target_url, flow_name, spec_path)
+              VALUES ('spec-unfetched', 'browser', 'https://s.example', 'new-flow', 'monitors/new.spec.ts');
+            """);
+
+        var fn = new SpecCacheFunctions(db);
+        var id = await db.Checks.Where(c => c.Name == "spec-unfetched").Select(c => c.Id).FirstAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(await fn.GetCheckSpecCache(Request(), id, default));
+        var d = Assert.IsType<SpecCacheDto>(ok.Value!);
+        Assert.True(d.GitManaged);
+        Assert.Null(d.CachedSha);
+        Assert.Null(d.FetchedAt);
+    }
+
     private static async Task<object?> ScalarRaw(SynthWatch.Api.Data.SynthWatchDbContext db, string sql)
     {
         var conn = (Npgsql.NpgsqlConnection)db.Database.GetDbConnection();
