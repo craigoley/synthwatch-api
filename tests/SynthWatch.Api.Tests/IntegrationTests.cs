@@ -4926,8 +4926,8 @@ public class IntegrationTests
         await using var db = _pg.NewDbContext();
         // A Git-managed check (spec_path set) + its runner-owned spec_cache row at a known commit SHA.
         await db.Database.ExecuteSqlRawAsync("""
-            INSERT INTO checks (name, kind, target_url, spec_path)
-              VALUES ('spec-managed', 'browser', 'https://s.example', 'monitors/shop.spec.ts');
+            INSERT INTO checks (name, kind, target_url, flow_name, spec_path)
+              VALUES ('spec-managed', 'browser', 'https://s.example', 'shop-flow', 'monitors/shop.spec.ts');
             INSERT INTO spec_cache (spec_path, etag, compiled_js, fetched_at)
               VALUES ('monitors/shop.spec.ts', 'abc1234deadbeef', '/* compiled */', now());
             """);
@@ -4968,8 +4968,8 @@ public class IntegrationTests
         await using var db = _pg.NewDbContext();
         // Git-managed, but NO spec_cache row yet (never run) → GitManaged true, CachedSha null (not a crash / fake).
         await db.Database.ExecuteSqlRawAsync("""
-            INSERT INTO checks (name, kind, target_url, spec_path)
-              VALUES ('spec-unfetched', 'browser', 'https://s.example', 'monitors/new.spec.ts');
+            INSERT INTO checks (name, kind, target_url, flow_name, spec_path)
+              VALUES ('spec-unfetched', 'browser', 'https://s.example', 'new-flow', 'monitors/new.spec.ts');
             """);
 
         var fn = new SpecCacheFunctions(db);
