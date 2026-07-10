@@ -38,6 +38,8 @@ public class SynthWatchDbContext : DbContext
     public DbSet<CheckTag> CheckTags => Set<CheckTag>();
     public DbSet<TagRoute> TagRoutes => Set<TagRoute>();
     public DbSet<TestSendRequest> TestSendRequests => Set<TestSendRequest>();
+    // READ-ONLY: the runner-owned spec_cache (the API has SELECT only — never writes it; see 0041 / SpecCacheRow).
+    public DbSet<SpecCacheRow> SpecCache => Set<SpecCacheRow>();
     public DbSet<RunRequest> RunRequests => Set<RunRequest>();
     public DbSet<AvailabilityReportRow> AvailabilityReport => Set<AvailabilityReportRow>();
     public DbSet<AvailabilitySeriesRow> AvailabilityReportSeries => Set<AvailabilitySeriesRow>();
@@ -76,6 +78,16 @@ public class SynthWatchDbContext : DbContext
             e.HasKey(x => x.Name);
             e.Property(x => x.Name).HasColumnName("name");
             e.Property(x => x.Enabled).HasColumnName("enabled");
+        });
+
+        // READ-ONLY map of the runner-owned spec_cache (SELECT only; compiled_js is intentionally NOT mapped).
+        modelBuilder.Entity<SpecCacheRow>(e =>
+        {
+            e.ToTable("spec_cache");
+            e.HasKey(x => x.SpecPath);
+            e.Property(x => x.SpecPath).HasColumnName("spec_path");
+            e.Property(x => x.Etag).HasColumnName("etag");
+            e.Property(x => x.FetchedAt).HasColumnName("fetched_at");
         });
 
         modelBuilder.Entity<CheckLocation>(e =>
