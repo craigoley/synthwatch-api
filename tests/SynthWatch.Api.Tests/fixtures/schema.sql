@@ -1102,3 +1102,17 @@ CREATE TABLE public.run_requests (
 );
 -- At most one PENDING request per check (the coalesce the API relies on).
 CREATE UNIQUE INDEX run_requests_one_pending_per_check ON public.run_requests (check_id) WHERE (status = 'pending');
+
+-- spec_cache (runner migration 0034) — durable runtime-spec cache. The runner (owner synthadmin) is the ONLY
+-- writer; the synthwatch-api role has SELECT only (migration 0041 revokes write — compiled_js is executed at
+-- runner privilege). The API READS it (SpecCacheRow / GET /checks/{id}/spec-cache) to surface the cached
+-- commit + fetched-at. Mirrored here from the runner's 0034 columns so the schema-parity CI job passes.
+CREATE TABLE public.spec_cache (
+    spec_path             text        PRIMARY KEY,
+    etag                  text,
+    source_sha            text,
+    compiled_js           text        NOT NULL,
+    fetched_at            timestamptz NOT NULL DEFAULT now(),
+    last_good_compiled_js text,
+    last_good_at          timestamptz
+);
