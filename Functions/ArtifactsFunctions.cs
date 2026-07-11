@@ -143,8 +143,16 @@ public class ArtifactsFunctions
         // too. Only fall back to re-extracting from the trace zip when the column is empty (legacy/pre-#114 rows).
         if (!string.IsNullOrEmpty(row.TraceSignals))
         {
-            var persisted = System.Text.Json.JsonSerializer.Deserialize<Dtos.TraceSignalsDto>(row.TraceSignals, WebJson);
-            if (persisted is not null) return ApiResults.Ok(persisted);
+            // Guarded like the sibling reader (LocationDiffFunctions.ResolveSignalsAsync): jsonb guarantees
+            // syntactic validity but NOT that the stored shape still matches TraceSignalsDto (a runner-side
+            // schema drift — the very risk TraceSignalsGoldenParityTests exists for — would throw). Honor this
+            // endpoint's "unparseable → never a 500" contract: on drift, fall through to zip re-extraction / 404.
+            try
+            {
+                var persisted = System.Text.Json.JsonSerializer.Deserialize<Dtos.TraceSignalsDto>(row.TraceSignals, WebJson);
+                if (persisted is not null) return ApiResults.Ok(persisted);
+            }
+            catch (System.Text.Json.JsonException) { /* drifted persisted JSON → fall through, never a 500 */ }
         }
         if (string.IsNullOrEmpty(row.TraceUrl)) return ApiResults.NotFound($"No trace for run {id}.");
 
