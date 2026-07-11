@@ -31,7 +31,12 @@ public record RunDto(
     // Sandbox (runner migration 0065): true when this run was a PAUSED monitor's on-demand validation
     // (sandbox-run-when-paused). Skipped evaluate() (no incident/alert/SLO) but persisted a normal row;
     // the dashboard badges these so a resumed monitor's history stays honest. Additive (appended last).
-    bool Sandbox)
+    bool Sandbox,
+    // True when the run has PERSISTED trace_signals (the compact, redacted network/console summary — #114),
+    // INDEPENDENT of TraceUrl. A sensitive monitor's GREEN run stores no downloadable trace (TraceUrl null,
+    // by B10 design) but DOES persist trace_signals — so the dashboard can surface "trace data available"
+    // (the redacted summary via GET /api/runs/{id}/trace-signals) instead of reading as "no trace".
+    bool HasTraceSignals)
 {
     public static RunDto From(Run r) => new(
         r.Id, r.CheckId, r.Status, r.StartedAt, r.FinishedAt, r.DurationMs,
@@ -41,7 +46,8 @@ public record RunDto(
         TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace",
         Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location,
         RetryCount: r.RetryCount,
-        Sandbox: r.Sandbox);
+        Sandbox: r.Sandbox,
+        HasTraceSignals: !string.IsNullOrEmpty(r.TraceSignals));
 }
 
 public record RunStepDto(
@@ -119,13 +125,16 @@ public record TimelineEntryDto(
     string? FailedStep,
     string? ScreenshotUrl,
     string? TraceUrl,
-    string Location)
+    string Location,
+    // Persisted trace_signals present (redacted summary), independent of TraceUrl — see RunDto.HasTraceSignals.
+    bool HasTraceSignals)
 {
     public static TimelineEntryDto From(Run r) => new(
         r.Id, r.Status, r.StartedAt, r.DurationMs, r.HttpStatus, r.ErrorMessage, r.FailedStep,
         ScreenshotUrl: string.IsNullOrEmpty(r.ScreenshotUrl) ? null : $"/api/runs/{r.Id}/screenshot",
         TraceUrl: string.IsNullOrEmpty(r.TraceUrl) ? null : $"/api/runs/{r.Id}/trace",
-        Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location);
+        Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location,
+        HasTraceSignals: !string.IsNullOrEmpty(r.TraceSignals));
 }
 
 /// <summary>A prior incident on the same check (recurrence history; excludes the current one).</summary>

@@ -29,6 +29,11 @@ public class ArtifactsFunctions
     private readonly IArtifactReader _artifacts;
     private readonly IAuthPrincipal _auth;
 
+    // Deserialize the persisted trace_signals (runner-written camelCase JSON) into the same DTO FromZip returns,
+    // so both the persisted and re-extracted paths serialize identically to the client.
+    private static readonly System.Text.Json.JsonSerializerOptions WebJson =
+        new(System.Text.Json.JsonSerializerDefaults.Web);
+
     public ArtifactsFunctions(SynthWatchDbContext db, IArtifactReader artifacts, IAuthPrincipal auth)
     {
         _db = db;
@@ -126,10 +131,21 @@ public class ArtifactsFunctions
         if (await RequireSessionAsync(req, ct) is { } denied) return denied;
         var row = await _db.Runs.AsNoTracking()
             .Where(r => r.Id == id)
-            .Select(r => new { r.TraceUrl, Target = r.Check!.TargetUrl })
+            .Select(r => new { r.TraceUrl, r.TraceSignals, Target = r.Check!.TargetUrl })
             .FirstOrDefaultAsync(ct);
 
         if (row is null) return ApiResults.NotFound($"Run {id} not found.");
+
+        // ★ Prefer the PERSISTED trace_signals (runner-extracted at capture, #114 — and ALREADY REDACTED for a
+        // sensitive monitor). It's available even when there is no downloadable trace_url: a sensitive monitor's
+        // GREEN run stores no zip (B10) but does persist signals. Serving it here means such a run shows its
+        // redacted summary instead of 404ing as "no trace" — and it avoids a blob download for every other run
+        // too. Only fall back to re-extracting from the trace zip when the column is empty (legacy/pre-#114 rows).
+        if (!string.IsNullOrEmpty(row.TraceSignals))
+        {
+            var persisted = System.Text.Json.JsonSerializer.Deserialize<Dtos.TraceSignalsDto>(row.TraceSignals, WebJson);
+            if (persisted is not null) return ApiResults.Ok(persisted);
+        }
         if (string.IsNullOrEmpty(row.TraceUrl)) return ApiResults.NotFound($"No trace for run {id}.");
 
         var targetHost = !string.IsNullOrEmpty(row.Target) && Uri.TryCreate(row.Target, UriKind.Absolute, out var tu)
