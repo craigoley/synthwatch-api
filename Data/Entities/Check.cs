@@ -55,6 +55,11 @@ public class Check
     // never writes it (in neither git-write allow-list → survives every apply, like tags).
     public DateTimeOffset? ArchivedAt { get; set; }
 
+    // Git-removal purge clock (runner migration 0072). NULL = present in the manifest; a timestamp =
+    // git-removed (absent) — the 90-day purge clock. RECONCILE-OWNED (the runner writes it; the api only
+    // READS it to render "removed — purging in N days"). Distinct from ArchivedAt/Enabled/pause.
+    public DateTimeOffset? RemovedAt { get; set; }
+
     public bool LighthouseEnabled { get; set; }
 
     public int? LighthouseIntervalSeconds { get; set; }

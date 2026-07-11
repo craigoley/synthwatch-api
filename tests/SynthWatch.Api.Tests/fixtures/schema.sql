@@ -106,6 +106,7 @@ CREATE TABLE public.checks (
     enabled boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     archived_at timestamp with time zone,
+    removed_at timestamp with time zone,
     lighthouse_enabled boolean DEFAULT false NOT NULL,
     lighthouse_interval_seconds integer,
     lighthouse_form_factor text DEFAULT 'desktop'::text NOT NULL,

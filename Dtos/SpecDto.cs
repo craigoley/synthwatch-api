@@ -38,6 +38,8 @@ public record SpecCatalogItemDto(
     // Reversible archive (0071): set => the check is archived. Coverage (specs/page.tsx coverageOf) shows
     // "Archived" when this is non-null, taking precedence over active/paused. null on an unmonitored spec.
     [property: JsonPropertyName("archivedAt")] DateTimeOffset? ArchivedAt,
+    // Git-removal (0072): non-null => the check is git-removed, purging in N days (coverage = "removed").
+    [property: JsonPropertyName("removedAt")] DateTimeOffset? RemovedAt,
     [property: JsonPropertyName("health")] SpecHealthDto? Health);
 
 /// <summary>

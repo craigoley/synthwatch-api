@@ -129,6 +129,31 @@ public class MappingTests
     }
 
     [Fact]
+    public void Removed_surfaces_on_dtos_and_takes_precedence_over_archived_and_paused()
+    {
+        // A GIT-REMOVED check (removed_at set) surfaces RemovedAt on both read DTOs and reads CurrentStatus
+        // = "removed" — even when ALSO archived + paused: removal (purging) supersedes archive (edge-case a).
+        var removed = new Check
+        {
+            Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x",
+            Enabled = false, ArchivedAt = DateTimeOffset.UtcNow, RemovedAt = DateTimeOffset.UtcNow,
+        };
+        var summary = CheckSummaryDto.From(removed, new Run { Id = 1, CheckId = 1, Status = "pass" },
+            CheckMetricsDto.Empty, Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>());
+        Assert.NotNull(summary.RemovedAt);
+        Assert.Equal("removed", summary.CurrentStatus);        // removed, not "archived"/"paused"/"pass"
+        Assert.Equal(RunStatus.HealthPaused, summary.CurrentHealth);
+        var detail = CheckDetailDto.From(removed, Array.Empty<Run>(), Array.Empty<TagDto>());
+        Assert.NotNull(detail.RemovedAt);
+        Assert.Equal("removed", detail.CurrentStatus);
+
+        // An active check has RemovedAt null (unchanged).
+        var active = new Check { Id = 2, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true };
+        Assert.Null(CheckSummaryDto.From(active, null, CheckMetricsDto.Empty,
+            Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>()).RemovedAt);
+    }
+
+    [Fact]
     public void ApplyPatch_archive_sets_and_clears_archived_at_without_touching_enabled()
     {
         var check = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true };
