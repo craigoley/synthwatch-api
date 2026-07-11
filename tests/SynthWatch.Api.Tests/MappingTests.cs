@@ -49,6 +49,19 @@ public class MappingTests
         Assert.False(RunDto.From(new Run { Id = 2, CheckId = 1, Status = "pass" }).Sandbox);
     }
 
+    [Fact]
+    public void RunDto_HasTraceSignals_is_independent_of_TraceUrl()
+    {
+        // ★ The sensitive-green-run case: NO downloadable trace (TraceUrl null, by B10 design) but the
+        // redacted trace_signals ARE persisted → the dashboard can still surface the summary as "has trace".
+        var dto = RunDto.From(new Run { Id = 1, CheckId = 1, Status = "pass", TraceUrl = null, TraceSignals = "{\"network\":{}}" });
+        Assert.True(dto.HasTraceSignals);
+        Assert.Null(dto.TraceUrl);
+        // No signals persisted → false (a run that genuinely has no trace data).
+        Assert.False(RunDto.From(new Run { Id = 2, CheckId = 1, Status = "pass", TraceSignals = null }).HasTraceSignals);
+        Assert.False(RunDto.From(new Run { Id = 3, CheckId = 1, Status = "pass", TraceSignals = "" }).HasTraceSignals);
+    }
+
     [Theory]
     [InlineData("pass", "up")]
     [InlineData("warn", "up")]   // warn counts as up (matches sla_availability)
