@@ -114,7 +114,11 @@ public static partial class TraceExtractor
             TotalRequests: reqs.Count,
             WireKb: reqs.Sum(r => r.Wire) / 1024,
             ThirdPartyCount: reqs.Count(r => r.Third),
-            Failed: reqs.Where(r => r.Status >= 400).Take(FailedCap).Select(Slim).ToList(),
+            // FAILED = HTTP errors (>= 400) AND ABORTS (<= 0). Playwright records an aborted/blocked/
+            // interrupted request as a resource-snapshot whose response.status is -1 (or 0 when there's no
+            // response) — previously dropped, yet an abort is often MORE diagnostic than a 4xx. The status
+            // itself tags an abort (<= 0) vs an http error (>= 400) for a consumer. (Mirrors traceSignals.ts.)
+            Failed: reqs.Where(r => r.Status >= 400 || r.Status <= 0).Take(FailedCap).Select(Slim).ToList(),
             Slowest: reqs.OrderByDescending(r => r.Time).Take(TopN).Select(Slim).ToList(),
             Largest: reqs.OrderByDescending(r => r.Size).Take(TopN).Select(Slim).ToList(),
             // uncompressed: TEXT assets only, no content-encoding, over the size floor.
@@ -141,14 +145,37 @@ public static partial class TraceExtractor
             using (doc)
             {
                 var root = doc.RootElement;
-                if (!root.TryGetProperty("type", out var t) || t.GetString() != "console") continue;
+                var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
 
-                var level = root.TryGetProperty("messageType", out var mt) ? mt.GetString() ?? "log" : "log";
-                var text = (root.TryGetProperty("text", out var tx) ? tx.GetString() ?? "" : "").Trim();
-                var loc = root.TryGetProperty("location", out var l) && l.ValueKind == JsonValueKind.Object
-                    ? Str(l, "url") : "";
+                // Two event shapes carry an error signal, BOTH in trace.trace (already in-hand):
+                //   • {type:"console", messageType, text, location:{url}} — a console error/warning.
+                //   • {type:"event", method:"pageError", params:{error:{error:{message}}, location:{url}}} — an
+                //     UNCAUGHT page exception (previously invisible unless the site ALSO console-logged it).
+                //     Captured as level="pageerror" (a distinct category in the SAME messages array).
+                string level, text, loc;
+                if (type == "console")
+                {
+                    level = root.TryGetProperty("messageType", out var mt) ? mt.GetString() ?? "log" : "log";
+                    text = (root.TryGetProperty("text", out var tx) ? tx.GetString() ?? "" : "").Trim();
+                    loc = root.TryGetProperty("location", out var l) && l.ValueKind == JsonValueKind.Object
+                        ? Str(l, "url") : "";
+                    if (level != "error" && level != "warning") { droppedLevel++; continue; }  // info/log chatter
+                }
+                else if (type == "event" && root.TryGetProperty("method", out var me) && me.GetString() == "pageError")
+                {
+                    var prm = root.TryGetProperty("params", out var p) && p.ValueKind == JsonValueKind.Object ? p : default;
+                    var eWrap = prm.ValueKind == JsonValueKind.Object && prm.TryGetProperty("error", out var e1)
+                        && e1.ValueKind == JsonValueKind.Object ? e1 : default;
+                    var err = eWrap.ValueKind == JsonValueKind.Object && eWrap.TryGetProperty("error", out var e2)
+                        && e2.ValueKind == JsonValueKind.Object ? e2 : default;
+                    level = "pageerror";
+                    text = (err.ValueKind == JsonValueKind.Object ? Str(err, "message") : "").Trim();
+                    loc = prm.ValueKind == JsonValueKind.Object && prm.TryGetProperty("location", out var lc)
+                        && lc.ValueKind == JsonValueKind.Object ? Str(lc, "url") : "";
+                    if (text.Length == 0) continue;                                            // no message → no signal
+                }
+                else continue;
 
-                if (level != "error" && level != "warning") { droppedLevel++; continue; }     // info/log chatter
                 if (ExtensionNoise().IsMatch(text) || ExtensionNoise().IsMatch(loc)) { droppedExt++; continue; }
 
                 var key = level + "|" + (text.Length > 80 ? text[..80] : text);
@@ -160,14 +187,16 @@ public static partial class TraceExtractor
                     Text: text.Length > 200 ? text[..200] : text));
             }
         }
-        // Bound the list, keeping the most relevant: the site's own errors first, then warnings/third-party.
-        // OrderBy is stable, so first-seen order is preserved within each priority tier.
+        // Bound the list, keeping the most relevant: the site's own errors/pageerrors first, then warnings/
+        // third-party. OrderBy is stable, so first-seen order is preserved within each priority tier. `kept`
+        // holds ONLY error/warning/pageerror (info was excluded up front), so an error is never dropped for an
+        // info log; DroppedError records how many of these preserved messages the cap still truncated (visible).
         var bounded = kept
-            .OrderByDescending(m => m.Level == "error")
+            .OrderByDescending(m => m.Level == "error" || m.Level == "pageerror")
             .ThenByDescending(m => m.Origin == "site")
             .Take(MaxConsoleMessages)
             .ToList();
-        return new ConsoleSummaryDto(bounded, droppedLevel, droppedExt);
+        return new ConsoleSummaryDto(bounded, droppedLevel, droppedExt, kept.Count - bounded.Count);
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────

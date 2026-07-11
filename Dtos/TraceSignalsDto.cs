@@ -42,7 +42,10 @@ public sealed record NetworkSummaryDto(
 public sealed record ConsoleMessageDto(string Level, string Origin, string Text);
 
 public sealed record ConsoleSummaryDto(
-    IReadOnlyList<ConsoleMessageDto> Messages, int DroppedInfoLog, int DroppedExtensionNoise)
+    // ★ DroppedError = error-class messages (error/warning/pageerror) dropped by the MaxConsoleMessages cap.
+    // info/log chatter is excluded up front (DroppedInfoLog) so an error is NEVER dropped for an info log;
+    // this makes the remaining truncation (errors beyond the cap) HONEST instead of silent.
+    IReadOnlyList<ConsoleMessageDto> Messages, int DroppedInfoLog, int DroppedExtensionNoise, int DroppedError)
 {
-    public static readonly ConsoleSummaryDto Empty = new([], 0, 0);
+    public static readonly ConsoleSummaryDto Empty = new([], 0, 0, 0);
 }
