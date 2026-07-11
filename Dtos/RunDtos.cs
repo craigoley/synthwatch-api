@@ -146,6 +146,10 @@ public record IncidentDetailDto(
     long CheckId,
     string? CheckName,
     string? CheckKind,
+    // The associated check's deployment environment (runner 0059: prod|staging|dev, default prod). Serializes
+    // as `environment` — the platform-wide env field the dashboard's envOf()/<EnvBadge> read. Nullable: null
+    // when the check is gone (LEFT-join tolerance), same as CheckName/CheckKind.
+    string? Environment,
     string Status,
     string Severity,
     DateTimeOffset OpenedAt,
