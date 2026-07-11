@@ -46,8 +46,11 @@ public record CheckSummaryDto(
     bool LighthouseEnabled,
     DateTimeOffset? LastRunAt,
     DateTimeOffset CreatedAt,
+    // Reversible archive (0071): null = active; set = archived (stops running, re-activatable). Dashboard-
+    // owned; the dashboard renders the "archived" badge/coverage from this. DISTINCT from Enabled/pause.
+    DateTimeOffset? ArchivedAt,
     // Derived. CurrentStatus is the latest run's raw status (pass|warn|fail|error|running, or
-    // paused/unknown); CurrentHealth is that status classified into up|down|running (matching
+    // paused/archived/unknown); CurrentHealth is that status classified into up|down|running (matching
     // sla_availability()), plus paused/unknown — so consumers don't re-derive up/down.
     string CurrentStatus,
     string CurrentHealth,
@@ -106,9 +109,10 @@ public record CheckSummaryDto(
         IReadOnlyList<LocationStatusDto> locations, IReadOnlyList<TagDto> tags) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.IntervalSeconds, c.TimeoutMs, c.FailureThreshold, c.Severity, c.Environment, c.Enabled,
-        c.LighthouseEnabled, c.LastRunAt, c.CreatedAt,
-        CurrentStatus: !c.Enabled ? "paused" : latest?.Status ?? "unknown",
-        CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
+        c.LighthouseEnabled, c.LastRunAt, c.CreatedAt, c.ArchivedAt,
+        // Archived takes precedence over paused (both stop runs; archived is the deliberate retire).
+        CurrentStatus: c.ArchivedAt is not null ? "archived" : !c.Enabled ? "paused" : latest?.Status ?? "unknown",
+        CurrentHealth: c.ArchivedAt is not null || !c.Enabled ? RunStatus.HealthPaused
             : latest is null ? RunStatus.HealthUnknown : RunStatus.Classify(latest.Status),
         LastRunId: latest?.Id,
         LastDurationMs: latest?.DurationMs,
@@ -180,6 +184,8 @@ public record CheckDetailDto(
     string Environment,
     bool Enabled,
     DateTimeOffset CreatedAt,
+    // Reversible archive (0071): null = active; set = archived. Dashboard-owned; distinct from Enabled/pause.
+    DateTimeOffset? ArchivedAt,
     bool LighthouseEnabled,
     int? LighthouseIntervalSeconds,
     string LighthouseFormFactor,
@@ -226,7 +232,7 @@ public record CheckDetailDto(
         SloDto? slo = null, IReadOnlyList<LocationStatusDto>? locations = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.BodyMustContain, c.IntervalSeconds, c.LastRunAt, c.TimeoutMs, c.FailureThreshold,
-        c.Severity, c.Environment, c.Enabled, c.CreatedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
+        c.Severity, c.Environment, c.Enabled, c.CreatedAt, c.ArchivedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
         c.LighthouseFormFactor, c.PerfBudgetLcpMs, c.PerfBudgetTransferBytes, c.CertExpiryWarnDays,
         Assertions: c.Assertions,
         RequestHeaders: c.RequestHeaders,
@@ -237,8 +243,8 @@ public record CheckDetailDto(
         NetConfig: c.NetConfig,
         Steps: c.Steps,
         Slo: slo,
-        CurrentStatus: !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
-        CurrentHealth: !c.Enabled ? RunStatus.HealthPaused
+        CurrentStatus: c.ArchivedAt is not null ? "archived" : !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
+        CurrentHealth: c.ArchivedAt is not null || !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
         RecentRuns: recentRuns.Select(RunDto.From).ToList(),
         Locations: locations ?? Array.Empty<LocationStatusDto>(),
@@ -314,6 +320,10 @@ public class UpdateCheckRequest
     public int? FailureThreshold { get; set; }
     public string? Severity { get; set; }
     public bool? Enabled { get; set; }
+    // Reversible archive (0071): true -> set archived_at=now() (stops running, shows archived); false ->
+    // clear it (re-activate - the prior enabled/paused state resumes). Omitted -> unchanged. DISTINCT from
+    // Enabled/pause; mirrors the Enabled partial-update pattern.
+    public bool? Archived { get; set; }
     public bool? LighthouseEnabled { get; set; }
     public int? LighthouseIntervalSeconds { get; set; }
     public string? LighthouseFormFactor { get; set; }

@@ -49,6 +49,12 @@ public class Check
 
     public DateTimeOffset CreatedAt { get; set; }
 
+    // Reversible, dashboard-owned ARCHIVE (runner migration 0071). NULL = active; a timestamp = archived
+    // (the monitor stops running + shows "archived", re-activatable). DISTINCT from Enabled/pause. The api
+    // sets/clears it (PATCH { archived }); the runner excludes archived checks from execution; reconcile
+    // never writes it (in neither git-write allow-list → survives every apply, like tags).
+    public DateTimeOffset? ArchivedAt { get; set; }
+
     public bool LighthouseEnabled { get; set; }
 
     public int? LighthouseIntervalSeconds { get; set; }

@@ -38,7 +38,7 @@ public class SpecsFunctions
                  s.source_key, s.name, s.spec_path, s.kind, s.target, s.suggested_interval_seconds,
                  s.tags::text AS tags, s.description, s.enabled_by_default, s.runnable,
                  s.not_runnable_reason, s.probed_at,
-                 c.id AS check_id, c.name AS check_name, c.enabled,
+                 c.id AS check_id, c.name AS check_name, c.enabled, c.archived_at,
                  lr.status AS current_status, lr.started_at AS last_run_at,
                  stats.p95_ms,
                  oi.open_incident_count
@@ -71,7 +71,7 @@ public class SpecsFunctions
             return new SpecCatalogItemDto(
                 r.SourceKey, r.Name, r.SpecPath, r.Kind, r.Target, r.SuggestedIntervalSeconds,
                 SafeStringList(r.Tags), r.Description, r.EnabledByDefault, r.Runnable, r.NotRunnableReason,
-                monitored, r.CheckId, r.CheckName, r.Enabled, health);
+                monitored, r.CheckId, r.CheckName, r.Enabled, r.ArchivedAt, health);
         }).ToList();
 
         // The latest probe time = when the last reconcile populated the catalog; null when empty.

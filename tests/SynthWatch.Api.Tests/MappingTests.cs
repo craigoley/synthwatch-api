@@ -2,6 +2,7 @@ using System.Text.Json;
 using SynthWatch.Api.Data;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
+using SynthWatch.Api.Infrastructure;
 using Xunit;
 
 namespace SynthWatch.Api.Tests;
@@ -98,6 +99,55 @@ public class MappingTests
         Assert.Equal("prod", CheckSummaryDto.From(prod, null, CheckMetricsDto.Empty,
             Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>()).Environment);
         Assert.Equal("prod", CheckDetailDto.From(prod, Array.Empty<Run>(), Array.Empty<TagDto>()).Environment);
+    }
+
+    [Fact]
+    public void Archive_surfaces_on_dtos_and_takes_precedence_over_paused_in_status()
+    {
+        // An ARCHIVED check (archived_at set) surfaces ArchivedAt on both read DTOs and reads CurrentStatus
+        // = "archived" — even when ALSO paused (enabled=false): archive is the deliberate retire, so it wins.
+        var archived = new Check
+        {
+            Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x",
+            Enabled = false, ArchivedAt = DateTimeOffset.UtcNow,
+        };
+        var summary = CheckSummaryDto.From(archived, new Run { Id = 1, CheckId = 1, Status = "pass" },
+            CheckMetricsDto.Empty, Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>());
+        Assert.NotNull(summary.ArchivedAt);
+        Assert.Equal("archived", summary.CurrentStatus);       // archived, not "paused" or "pass"
+        Assert.Equal(RunStatus.HealthPaused, summary.CurrentHealth);
+        var detail = CheckDetailDto.From(archived, Array.Empty<Run>(), Array.Empty<TagDto>());
+        Assert.NotNull(detail.ArchivedAt);
+        Assert.Equal("archived", detail.CurrentStatus);
+
+        // An ACTIVE check (archived_at null) is unchanged — ArchivedAt null, status from the run.
+        var active = new Check { Id = 2, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true };
+        var activeDto = CheckSummaryDto.From(active, new Run { Id = 2, CheckId = 2, Status = "pass" },
+            CheckMetricsDto.Empty, Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>());
+        Assert.Null(activeDto.ArchivedAt);
+        Assert.Equal("pass", activeDto.CurrentStatus);
+    }
+
+    [Fact]
+    public void ApplyPatch_archive_sets_and_clears_archived_at_without_touching_enabled()
+    {
+        var check = new Check { Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x", Enabled = true };
+
+        // { archived: true } stamps archived_at, leaves enabled alone (archive ≠ pause).
+        var errs = CheckValidation.ApplyPatch(new UpdateCheckRequest { Archived = true }, check);
+        Assert.Empty(errs);
+        Assert.NotNull(check.ArchivedAt);
+        Assert.True(check.Enabled); // pause state untouched, so re-activation restores it
+
+        // { archived: false } clears it (re-activate); still doesn't touch enabled.
+        CheckValidation.ApplyPatch(new UpdateCheckRequest { Archived = false }, check);
+        Assert.Null(check.ArchivedAt);
+        Assert.True(check.Enabled);
+
+        // Omitted → unchanged (a partial patch that only edits the name must not un-archive).
+        check.ArchivedAt = DateTimeOffset.UtcNow;
+        CheckValidation.ApplyPatch(new UpdateCheckRequest { Name = "renamed" }, check);
+        Assert.NotNull(check.ArchivedAt);
     }
 
     [Fact]
