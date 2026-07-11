@@ -2082,6 +2082,51 @@ public class IntegrationTests
         }
     }
 
+    // Incident detail projects the associated check's environment (runner 0059) so the dashboard can render
+    // <EnvBadge> on incident detail like every other surface (#237 finish). A prod check surfaces "prod"; a
+    // staging check surfaces "staging" — the non-prod case is the whole point of the badge.
+    [SkippableFact]
+    public async Task Incident_detail_projects_check_environment()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE pc bigint; sc bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url)
+                VALUES ('inc-env-prod', 'http', 'https://p.example') RETURNING id INTO pc;
+              INSERT INTO checks (name, kind, target_url, environment)
+                VALUES ('inc-env-staging', 'http', 'https://s.example', 'staging') RETURNING id INTO sc;
+              INSERT INTO incidents (check_id, status, severity, opened_at, consecutive_failures)
+                VALUES (pc, 'open', 'critical', now() - interval '5 min', 1);
+              INSERT INTO incidents (check_id, status, severity, opened_at, consecutive_failures)
+                VALUES (sc, 'open', 'warning', now() - interval '5 min', 1);
+            END $$;
+            """);
+        try
+        {
+            var fn = new IncidentsFunctions(db);
+            var prodCid = await db.Checks.Where(c => c.Name == "inc-env-prod").Select(c => c.Id).FirstAsync();
+            var stagingCid = await db.Checks.Where(c => c.Name == "inc-env-staging").Select(c => c.Id).FirstAsync();
+            var prodInc = await db.Incidents.Where(i => i.CheckId == prodCid).Select(i => i.Id).FirstAsync();
+            var stagingInc = await db.Incidents.Where(i => i.CheckId == stagingCid).Select(i => i.Id).FirstAsync();
+
+            var prod = Assert.IsType<IncidentDetailDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetIncident(Request(), prodInc, default)).Value!);
+            Assert.Equal("prod", prod.Environment);            // default column value surfaces
+
+            var staging = Assert.IsType<IncidentDetailDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetIncident(Request(), stagingInc, default)).Value!);
+            Assert.Equal("staging", staging.Environment);      // ★ non-prod surfaces — what drives the badge
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM checks WHERE name IN ('inc-env-prod','inc-env-staging');"); // cascades incidents
+        }
+    }
+
     // Deploy-proximity annotation on the incident detail. ALL rows are synthetic (no live examples exist —
     // capture started 2026-07-01 and every real incident predates it). Proves: inside-window deploys are
     // returned with the correct SIGNED offset; outside-window excluded; a www deploy matches an APEX-host check

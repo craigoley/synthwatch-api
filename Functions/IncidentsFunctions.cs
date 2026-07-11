@@ -118,7 +118,7 @@ public class IncidentsFunctions
         // LEFT-join equivalent: the check may be gone (don't drop the incident).
         var check = await _db.Checks.AsNoTracking()
             .Where(c => c.Id == inc.CheckId)
-            .Select(c => new { c.Name, c.Kind, c.TargetUrl })
+            .Select(c => new { c.Name, c.Kind, c.TargetUrl, c.Environment })
             .FirstOrDefaultAsync(ct);
 
         var to = inc.ResolvedAt ?? DateTimeOffset.UtcNow;
@@ -178,7 +178,7 @@ public class IncidentsFunctions
         var nearbyDeploys = await NearbyDeploysAsync(check?.TargetUrl, inc.OpenedAt, ct);
 
         var detail = new IncidentDetailDto(
-            inc.Id, inc.CheckId, check?.Name, check?.Kind, inc.Status, inc.Severity,
+            inc.Id, inc.CheckId, check?.Name, check?.Kind, check?.Environment, inc.Status, inc.Severity,
             inc.OpenedAt, inc.ResolvedAt,
             DurationSeconds: inc.ResolvedAt is null ? null : (inc.ResolvedAt.Value - inc.OpenedAt).TotalSeconds,
             inc.ConsecutiveFailures, inc.Summary, inc.Rca, perLocation, timeline, recurrence, nearbyDeploys,
