@@ -261,6 +261,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Enabled).HasColumnName("enabled");
             e.Property(x => x.CreatedAt).HasColumnName("created_at").ValueGeneratedOnAdd();
             e.Property(x => x.ArchivedAt).HasColumnName("archived_at"); // reversible archive (0071); NULL = active
+            e.Property(x => x.RemovedAt).HasColumnName("removed_at"); // git-removal purge clock (0072); NULL = present in git
             e.Property(x => x.LighthouseEnabled).HasColumnName("lighthouse_enabled");
             e.Property(x => x.LighthouseIntervalSeconds).HasColumnName("lighthouse_interval_seconds");
             e.Property(x => x.LighthouseFormFactor).HasColumnName("lighthouse_form_factor");
@@ -755,6 +756,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.CheckName).HasColumnName("check_name");
             e.Property(x => x.Enabled).HasColumnName("enabled");
             e.Property(x => x.ArchivedAt).HasColumnName("archived_at"); // reversible archive (0071)
+            e.Property(x => x.RemovedAt).HasColumnName("removed_at"); // git-removal purge clock (0072)
             e.Property(x => x.CurrentStatus).HasColumnName("current_status");
             e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
             e.Property(x => x.P95Ms).HasColumnName("p95_ms");

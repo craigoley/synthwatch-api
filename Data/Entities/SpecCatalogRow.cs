@@ -6,8 +6,8 @@ namespace SynthWatch.Api.Data.Entities;
 /// The reconcile job owns spec_catalog (one row per manifest spec, full reload each run, incl. the
 /// runnability probe); the API only SERVES this read-only — no reconcile, no writes, no GitHub fetch.
 ///
-/// Coverage is derived downstream from (CheckId, Enabled, ArchivedAt): CheckId null => Unmonitored; else
-/// ArchivedAt set => Archived; else Enabled => Active, !Enabled => Paused. Health columns
+/// Coverage is derived downstream from (CheckId, Enabled, ArchivedAt, RemovedAt): CheckId null => Unmonitored;
+/// else RemovedAt set => Removed (pending purge); ArchivedAt set => Archived; else Enabled => Active, !Enabled => Paused. Health columns
 /// (CurrentStatus/P95Ms/OpenIncidentCount/LastRunAt) are NULL
 /// for an unmonitored spec (no check). Tags is jsonb read as TEXT (cast ::text) and deserialized here.
 /// </summary>
@@ -32,6 +32,7 @@ public class SpecCatalogRow
     public string? CheckName { get; set; }
     public bool? Enabled { get; set; }
     public DateTimeOffset? ArchivedAt { get; set; }
+    public DateTimeOffset? RemovedAt { get; set; }
 
     // ── health for monitored specs (NULL when unmonitored) ──
     public string? CurrentStatus { get; set; }

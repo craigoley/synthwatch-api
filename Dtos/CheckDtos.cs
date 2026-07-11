@@ -49,6 +49,8 @@ public record CheckSummaryDto(
     // Reversible archive (0071): null = active; set = archived (stops running, re-activatable). Dashboard-
     // owned; the dashboard renders the "archived" badge/coverage from this. DISTINCT from Enabled/pause.
     DateTimeOffset? ArchivedAt,
+    // Git-removal purge clock (0072): non-null => git-removed, purging in N days. Read-only (reconcile-owned).
+    DateTimeOffset? RemovedAt,
     // Derived. CurrentStatus is the latest run's raw status (pass|warn|fail|error|running, or
     // paused/archived/unknown); CurrentHealth is that status classified into up|down|running (matching
     // sla_availability()), plus paused/unknown — so consumers don't re-derive up/down.
@@ -109,10 +111,11 @@ public record CheckSummaryDto(
         IReadOnlyList<LocationStatusDto> locations, IReadOnlyList<TagDto> tags) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.IntervalSeconds, c.TimeoutMs, c.FailureThreshold, c.Severity, c.Environment, c.Enabled,
-        c.LighthouseEnabled, c.LastRunAt, c.CreatedAt, c.ArchivedAt,
+        c.LighthouseEnabled, c.LastRunAt, c.CreatedAt, c.ArchivedAt, c.RemovedAt,
         // Archived takes precedence over paused (both stop runs; archived is the deliberate retire).
-        CurrentStatus: c.ArchivedAt is not null ? "archived" : !c.Enabled ? "paused" : latest?.Status ?? "unknown",
-        CurrentHealth: c.ArchivedAt is not null || !c.Enabled ? RunStatus.HealthPaused
+        // Removed (git-removed, purging) takes precedence over archived over paused.
+        CurrentStatus: c.RemovedAt is not null ? "removed" : c.ArchivedAt is not null ? "archived" : !c.Enabled ? "paused" : latest?.Status ?? "unknown",
+        CurrentHealth: c.RemovedAt is not null || c.ArchivedAt is not null || !c.Enabled ? RunStatus.HealthPaused
             : latest is null ? RunStatus.HealthUnknown : RunStatus.Classify(latest.Status),
         LastRunId: latest?.Id,
         LastDurationMs: latest?.DurationMs,
@@ -186,6 +189,8 @@ public record CheckDetailDto(
     DateTimeOffset CreatedAt,
     // Reversible archive (0071): null = active; set = archived. Dashboard-owned; distinct from Enabled/pause.
     DateTimeOffset? ArchivedAt,
+    // Git-removal purge clock (0072): non-null => git-removed, purging in N days. Read-only (reconcile-owned).
+    DateTimeOffset? RemovedAt,
     bool LighthouseEnabled,
     int? LighthouseIntervalSeconds,
     string LighthouseFormFactor,
@@ -232,7 +237,7 @@ public record CheckDetailDto(
         SloDto? slo = null, IReadOnlyList<LocationStatusDto>? locations = null) => new(
         c.Id, c.Name, c.Kind, c.TargetUrl, c.FlowName, c.Method, c.ExpectedStatus,
         c.BodyMustContain, c.IntervalSeconds, c.LastRunAt, c.TimeoutMs, c.FailureThreshold,
-        c.Severity, c.Environment, c.Enabled, c.CreatedAt, c.ArchivedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
+        c.Severity, c.Environment, c.Enabled, c.CreatedAt, c.ArchivedAt, c.RemovedAt, c.LighthouseEnabled, c.LighthouseIntervalSeconds,
         c.LighthouseFormFactor, c.PerfBudgetLcpMs, c.PerfBudgetTransferBytes, c.CertExpiryWarnDays,
         Assertions: c.Assertions,
         RequestHeaders: c.RequestHeaders,
@@ -243,8 +248,8 @@ public record CheckDetailDto(
         NetConfig: c.NetConfig,
         Steps: c.Steps,
         Slo: slo,
-        CurrentStatus: c.ArchivedAt is not null ? "archived" : !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
-        CurrentHealth: c.ArchivedAt is not null || !c.Enabled ? RunStatus.HealthPaused
+        CurrentStatus: c.RemovedAt is not null ? "removed" : c.ArchivedAt is not null ? "archived" : !c.Enabled ? "paused" : recentRuns.Count > 0 ? recentRuns[0].Status : "unknown",
+        CurrentHealth: c.RemovedAt is not null || c.ArchivedAt is not null || !c.Enabled ? RunStatus.HealthPaused
             : recentRuns.Count > 0 ? RunStatus.Classify(recentRuns[0].Status) : RunStatus.HealthUnknown,
         RecentRuns: recentRuns.Select(RunDto.From).ToList(),
         Locations: locations ?? Array.Empty<LocationStatusDto>(),
