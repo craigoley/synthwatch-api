@@ -38,8 +38,11 @@ public sealed record NetworkSummaryDto(
     public static readonly NetworkSummaryDto Empty = new(0, 0, 0, [], [], [], [], [], []);
 }
 
-/// <summary>A kept console message: error/warning only, extension-noise filtered, tagged site vs third-party.</summary>
-public sealed record ConsoleMessageDto(string Level, string Origin, string Text);
+/// <summary>A kept console message: error/warning only, extension-noise filtered, tagged site vs third-party.
+/// SourceHost (Error-diff P1) = the host of the RESOURCE the error is about (from the first URL in the text,
+/// else the logging frame) — it drives Origin (via the first-party allowlist) and is part of the per-error
+/// diff fingerprint (TraceSignalsDiff). "" when no host is derivable.</summary>
+public sealed record ConsoleMessageDto(string Level, string Origin, string SourceHost, string Text);
 
 public sealed record ConsoleSummaryDto(
     // ★ DroppedError = error-class messages (error/warning/pageerror) dropped by the MaxConsoleMessages cap.

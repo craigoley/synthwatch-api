@@ -15,7 +15,7 @@ public class LocationDiffInsightTests
     private static TraceDiffDto SampleDiff() => new(
         "this run (eastus2, fail)", "the monitor's last-known-good baseline",
         new DiffConsole(
-            OnlyInA: [new DiffConsoleLine("error", "site", "REGION-ONLY: connect ECONNREFUSED api-east")],
+            OnlyInA: [new DiffConsoleLine("error", "site", "api-east.wegmans.com", "REGION-ONLY: connect ECONNREFUSED api-east")],
             OnlyInB: [], Shared: 12),
         new DiffNetwork(512, 502, 16864, 16908, 273, 266, 1, 0,
             FailedHostsOnlyInA: ["east-fail.com"], FailedHostsOnlyInB: [],

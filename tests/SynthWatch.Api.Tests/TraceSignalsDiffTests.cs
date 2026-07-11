@@ -20,7 +20,8 @@ public class TraceSignalsDiffTests
                 TopThirdParties: thirdParties ?? [], Mutations: []),
             new ConsoleSummaryDto(console ?? [], 0, 0, 0));
 
-    private static ConsoleMessageDto Err(string text, string origin = "site") => new("error", origin, text);
+    private static ConsoleMessageDto Err(string text, string origin = "site", string sourceHost = "") =>
+        new("error", origin, sourceHost, text);
 
     [Fact]
     public void Canonicalize_strips_per_run_ids_query_and_timestamps()
@@ -59,6 +60,23 @@ public class TraceSignalsDiffTests
         Assert.Equal("eastus2", d.LabelA);
         Assert.Equal(1, d.Console.Shared);
         Assert.Empty(d.Console.OnlyInB);
+    }
+
+    [Fact] // ★ Error-diff P1: the per-error fingerprint now includes origin + sourceHost.
+    public void Console_diff_fingerprint_distinguishes_by_source_host_and_origin()
+    {
+        // Identical level + text, but a different resource host + origin (the same message text emitted about a
+        // third-party resource in A vs a first-party one in B). Under the OLD {level|canonical(text)} signature
+        // these were "shared"; the {level|origin|sourceHost|canonical(text)} fingerprint makes them DISTINCT.
+        var a = Signals(console: [Err("load failed", origin: "third-party", sourceHost: "di.rlcdn.com")]);
+        var b = Signals(console: [Err("load failed", origin: "site", sourceHost: "api.wegmans.cloud")]);
+        var d = TraceSignalsDiff.Diff(a, b, "A", "B");
+        Assert.Equal(0, d.Console.Shared);
+        var onlyA = Assert.Single(d.Console.OnlyInA);
+        var onlyB = Assert.Single(d.Console.OnlyInB);
+        Assert.Equal("di.rlcdn.com", onlyA.SourceHost);   // the corrected sourceHost rides into the representative
+        Assert.Equal("third-party", onlyA.Origin);
+        Assert.Equal("api.wegmans.cloud", onlyB.SourceHost);
     }
 
     [Fact]

@@ -40,14 +40,18 @@ public static partial class TraceSignalsDiff
     }
 
     // First occurrence of each signature wins as the representative line.
+    // ★ Error-diff P1: the per-error fingerprint is {level, origin, sourceHost, canonical(text)} — not just
+    // {level, canonical(text)}. So the SAME text emitted at a different origin (a resource that moved
+    // first-party↔third-party) or from a different resource host is a DISTINCT signature, and the corrected
+    // origin/sourceHost ride into the diff representative line.
     private static Dictionary<string, DiffConsoleLine> GroupBySignature(IReadOnlyList<ConsoleMessageDto> msgs)
     {
         var map = new Dictionary<string, DiffConsoleLine>(StringComparer.Ordinal);
         foreach (var m in msgs)
         {
-            var sig = m.Level + "|" + Canonicalize(m.Text);
+            var sig = m.Level + "|" + m.Origin + "|" + m.SourceHost + "|" + Canonicalize(m.Text);
             if (!map.ContainsKey(sig))
-                map[sig] = new DiffConsoleLine(m.Level, m.Origin, m.Text);
+                map[sig] = new DiffConsoleLine(m.Level, m.Origin, m.SourceHost, m.Text);
         }
         return map;
     }

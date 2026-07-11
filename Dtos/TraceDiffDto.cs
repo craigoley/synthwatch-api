@@ -1,7 +1,8 @@
 namespace SynthWatch.Api.Dtos;
 
-/// <summary>A console line in a diff (level + site/third-party origin + a representative text).</summary>
-public sealed record DiffConsoleLine(string Level, string Origin, string Text);
+/// <summary>A console line in a diff (level + site/third-party origin + resource sourceHost + a
+/// representative text). Error-diff P1 added SourceHost — part of the per-error fingerprint.</summary>
+public sealed record DiffConsoleLine(string Level, string Origin, string SourceHost, string Text);
 
 /// <summary>What differs in the console between two runs' signals — after CANONICALIZATION (per-run ids /
 /// query strings / timestamps stripped), so the SAME error with different ids counts as shared, not different.</summary>
