@@ -35,6 +35,9 @@ public record SpecCatalogItemDto(
     [property: JsonPropertyName("checkId")] long? CheckId,
     [property: JsonPropertyName("checkName")] string? CheckName,
     [property: JsonPropertyName("enabled")] bool? Enabled,
+    // Reversible archive (0071): set => the check is archived. Coverage (specs/page.tsx coverageOf) shows
+    // "Archived" when this is non-null, taking precedence over active/paused. null on an unmonitored spec.
+    [property: JsonPropertyName("archivedAt")] DateTimeOffset? ArchivedAt,
     [property: JsonPropertyName("health")] SpecHealthDto? Health);
 
 /// <summary>

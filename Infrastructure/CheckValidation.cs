@@ -189,6 +189,10 @@ public static class CheckValidation
         }
         if (req.Enabled is { } en)
             check.Enabled = en;
+        // Reversible archive (0071): true → stamp archived_at=now(); false → clear it (re-activate). DISTINCT
+        // from Enabled/pause — clearing archive leaves Enabled untouched, so the prior state resumes.
+        if (req.Archived is { } ar)
+            check.ArchivedAt = ar ? DateTimeOffset.UtcNow : null;
         if (req.LighthouseEnabled is { } le)
             check.LighthouseEnabled = le;
         if (req.LighthouseIntervalSeconds is { } lis)
