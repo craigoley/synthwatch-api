@@ -18,7 +18,7 @@ public class TraceSignalsDiffTests
             new NetworkSummaryDto(totalReqs, wireKb, thirdPartyCount,
                 Failed: failed ?? [], Slowest: [], Largest: [], Uncompressed: [],
                 TopThirdParties: thirdParties ?? [], Mutations: []),
-            new ConsoleSummaryDto(console ?? [], 0, 0));
+            new ConsoleSummaryDto(console ?? [], 0, 0, 0));
 
     private static ConsoleMessageDto Err(string text, string origin = "site") => new("error", origin, text);
 
