@@ -2097,7 +2097,7 @@ public class IntegrationTests
               INSERT INTO checks (name, kind, target_url)
                 VALUES ('inc-env-prod', 'http', 'https://p.example') RETURNING id INTO pc;
               INSERT INTO checks (name, kind, target_url, environment)
-                VALUES ('inc-env-staging', 'browser', 'https://s.example', 'staging') RETURNING id INTO sc;
+                VALUES ('inc-env-staging', 'http', 'https://s.example', 'staging') RETURNING id INTO sc;
               INSERT INTO incidents (check_id, status, severity, opened_at, consecutive_failures)
                 VALUES (pc, 'open', 'critical', now() - interval '5 min', 1);
               INSERT INTO incidents (check_id, status, severity, opened_at, consecutive_failures)
