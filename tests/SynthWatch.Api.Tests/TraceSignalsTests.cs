@@ -86,6 +86,42 @@ public class TraceSignalsTests
         Assert.True(c.Messages.Count <= 40, $"expected ≤40 kept, got {c.Messages.Count}");
     }
 
+    // ── Error-diff P1: resource-host classification (console) ────────────────────────────────────────────
+    // origin is keyed off the host of the RESOURCE the error is ABOUT (parsed from the first URL in the text),
+    // not the frame that logged it — and against the Wegmans first-party allowlist, not the exact target host.
+
+    [Fact] // ★ MUST-GO-RED: a CSP refusal of a third-party resource LOGGED BY the site frame is third-party
+    public void Console_csp_third_party_resource_logged_by_site_frame_is_third_party()
+    {
+        // Reported BY the page (location.url = the site) but ABOUT a third-party resource. The OLD frame-based
+        // rule mislabelled this origin:'site'; the resource-host rule reads di.rlcdn.com out of the text.
+        const string nd = """{"type":"console","messageType":"error","text":"Refused to load the script 'https://di.rlcdn.com/tag.js' because it violates the Content Security Policy directive","location":{"url":"https://www.wegmans.com/"}}""";
+        var c = TraceExtractor.ExtractConsole(S(nd), Target);
+        var m = Assert.Single(c.Messages);
+        Assert.Equal("third-party", m.Origin);        // NOT 'site' — the resource, not the logging frame
+        Assert.Equal("di.rlcdn.com", m.SourceHost);
+    }
+
+    [Fact] // ★ MUST-GO-RED: a *.wegmans.cloud resource error is first-party (old exact-host marked it third-party)
+    public void Console_wegmans_cloud_resource_is_first_party()
+    {
+        const string nd = """{"type":"console","messageType":"error","text":"GET https://api.wegmans.cloud/v1/cart 500 (Internal Server Error)","location":{"url":"https://www.wegmans.com/cart"}}""";
+        var c = TraceExtractor.ExtractConsole(S(nd), Target);
+        var m = Assert.Single(c.Messages);
+        Assert.Equal("site", m.Origin);               // .wegmans.cloud is first-party
+        Assert.Equal("api.wegmans.cloud", m.SourceHost);
+    }
+
+    [Fact]
+    public void Console_source_host_falls_back_to_the_logging_frame_when_text_has_no_url()
+    {
+        const string nd = """{"type":"console","messageType":"error","text":"component:Cart:helpers Invalid state","location":{"url":"https://images.wegmans.com/x.js"}}""";
+        var c = TraceExtractor.ExtractConsole(S(nd), Target);
+        var m = Assert.Single(c.Messages);
+        Assert.Equal("images.wegmans.com", m.SourceHost);   // frame host (no URL in text)
+        Assert.Equal("site", m.Origin);                     // first-party sibling subdomain
+    }
+
     [Fact]
     public void Network_summary_counts_top_n_and_third_party_grouping()
     {
@@ -93,21 +129,42 @@ public class TraceSignalsTests
 
         Assert.Equal(5, n.TotalRequests);                                   // the context-options line is skipped
         Assert.Equal((43165 + 50000 + 2205000 + 500 + 0) / 1024, n.WireKb);
-        Assert.Equal(3, n.ThirdPartyCount);                                 // 2× images.wegmans.com + the blob: (no host)
+        // ★ Error-diff P1: images.wegmans.com is a SIBLING subdomain of the target (www.wegmans.com) →
+        // FIRST-party under the Wegmans allowlist. The old exact-target-host rule wrongly counted it
+        // third-party; now only the host-less blob: resource (no host → third-party) remains.
+        Assert.Equal(1, n.ThirdPartyCount);
 
-        Assert.Equal(404, Assert.Single(n.Failed).Status);                  // the one 4xx
+        var failed = Assert.Single(n.Failed);
+        Assert.Equal(404, failed.Status);                                   // the one 4xx
+        Assert.False(failed.ThirdParty);                                    // images.wegmans.com — now first-party
         Assert.Equal(1499, n.Slowest[0].TimeMs);                            // blob script is slowest
         Assert.Equal(2205000, n.Largest[0].Size);                          // hero image is largest
+        Assert.False(n.Largest[0].ThirdParty);                             // images.wegmans.com — now first-party
 
         // uncompressed = TEXT assets with no content-encoding over the floor → only big.js (the gzip'd doc + the
         // image + the tiny blob are excluded).
         var u = Assert.Single(n.Uncompressed);
         Assert.Contains("big.js", u.Url);
 
-        // third-party grouping is by real origin (the host-less blob: is excluded from the breakdown).
+        // blob: has no host → excluded from grouping; images.wegmans.com is first-party → not grouped.
+        Assert.Empty(n.TopThirdParties);
+    }
+
+    // ★ Error-diff P1: grouping still works for a GENUINE third-party host (bot.emplifi.io — not Wegmans),
+    // so the allowlist fix narrows what counts as third-party without breaking the third-party rollup.
+    [Fact]
+    public void Network_third_party_grouping_groups_a_real_third_party_host()
+    {
+        var nd = string.Join('\n',
+            """{"type":"resource-snapshot","snapshot":{"_resourceType":"document","time":10,"timings":{"wait":5},"request":{"url":"https://www.wegmans.com/","method":"GET"},"response":{"status":200,"_transferSize":1000,"content":{"size":500}}}}""",
+            """{"type":"resource-snapshot","snapshot":{"_resourceType":"script","time":20,"timings":{"wait":5},"request":{"url":"https://bot.emplifi.io/a.js","method":"GET"},"response":{"status":200,"_transferSize":40000,"content":{"size":40000}}}}""",
+            """{"type":"resource-snapshot","snapshot":{"_resourceType":"script","time":30,"timings":{"wait":5},"request":{"url":"https://bot.emplifi.io/b.js","method":"GET"},"response":{"status":200,"_transferSize":8000,"content":{"size":8000}}}}""");
+        var n = TraceExtractor.ExtractNetwork(S(nd), Target);
+        Assert.Equal(2, n.ThirdPartyCount);                                 // both emplifi scripts
         var tp = Assert.Single(n.TopThirdParties);
-        Assert.Equal("images.wegmans.com", tp.Host);
+        Assert.Equal("bot.emplifi.io", tp.Host);
         Assert.Equal(2, tp.Count);
+        Assert.Equal((40000 + 8000) / 1024, tp.Kb);
     }
 
     [Fact]

@@ -24,6 +24,11 @@ public static partial class TraceExtractor
         RegexOptions.IgnoreCase)]
     private static partial Regex ExtensionNoise();
 
+    // ★ Error-diff P1: the first http(s)/ws(s) URL in an error's text — captures the authority up to the
+    // first path/query/fragment/quote/space. Mirrors runner traceSignals.ts resourceHostFromText's regex.
+    [GeneratedRegex(@"(?:https?|wss?)://([^\s/'""?#)]+)", RegexOptions.IgnoreCase)]
+    private static partial Regex ResourceUrl();
+
     // Assets where missing compression is a real concern (a big image isn't "uncompressed", just large).
     private static readonly HashSet<string> TextTypes = new(StringComparer.Ordinal)
         { "script", "stylesheet", "document", "fetch", "xhr" };
@@ -98,7 +103,7 @@ public static partial class TraceExtractor
                     Size: Long(content, "size"),
                     Wire: Long(resp, "_transferSize"),
                     Enc: Header(resp, "content-encoding"),
-                    Third: !IsSite(HostOf(url), targetHost),
+                    Third: !FirstPartyHosts.IsFirstParty(HostOf(url), targetHost),
                     Method: Str(req, "method")));
             }
         }
@@ -181,9 +186,15 @@ public static partial class TraceExtractor
                 var key = level + "|" + (text.Length > 80 ? text[..80] : text);
                 if (!seen.Add(key)) continue;                                                  // dedupe repeats
 
+                // ★ Error-diff P1: classify by the RESOURCE the error is ABOUT, not the frame that logged it.
+                // Prefer the host of the first URL in the error text (a CSP refusal / failed load / websocket
+                // names its resource); fall back to the logging frame's host when the text carries none.
+                var sourceHost = ResourceHostFromText(text);
+                if (sourceHost.Length == 0) sourceHost = HostOf(loc);
                 kept.Add(new ConsoleMessageDto(
                     Level: level,
-                    Origin: IsSite(HostOf(loc), targetHost) ? "site" : "third-party",
+                    Origin: FirstPartyHosts.IsFirstParty(sourceHost, targetHost) ? "site" : "third-party",
+                    SourceHost: sourceHost,
                     Text: text.Length > 200 ? text[..200] : text));
             }
         }
@@ -223,10 +234,21 @@ public static partial class TraceExtractor
         return Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "";
     }
 
-    private static bool IsSite(string host, string? target) =>
-        !string.IsNullOrEmpty(target) && host.Length > 0 &&
-        (host.Equals(target, StringComparison.OrdinalIgnoreCase) ||
-         host.EndsWith("." + target, StringComparison.OrdinalIgnoreCase));
+    // ★ Error-diff P1: the host of the first URL embedded in an error's text (the resource the error is
+    // ABOUT). Matches http(s)/ws(s) and captures the authority up to the first path/query/fragment/quote/
+    // space; then strips userinfo + port. "" when the text carries no URL. FAITHFUL-PORTED — keep
+    // byte-identical to the runner traceSignals.ts resourceHostFromText (same regex + strip steps).
+    private static string ResourceHostFromText(string text)
+    {
+        var m = ResourceUrl().Match(text);
+        if (!m.Success) return "";
+        var auth = m.Groups[1].Value;
+        var at = auth.LastIndexOf('@');           // strip userinfo (user:pass@host)
+        if (at >= 0) auth = auth[(at + 1)..];
+        var colon = auth.IndexOf(':');            // strip port
+        if (colon >= 0) auth = auth[..colon];
+        return auth.ToLowerInvariant();
+    }
 
     private static string Str(JsonElement e, string name) =>
         e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String

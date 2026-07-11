@@ -15,7 +15,7 @@ public class AiInsightsTests
             Failed: [], Slowest: [], Largest: [], Uncompressed: [],
             TopThirdParties: [new ThirdPartyDto("images.wegmans.com", 70, 6663)], Mutations: []),
         Console: new ConsoleSummaryDto(
-            Messages: [new ConsoleMessageDto("error", "site", "SiteHeaderSearch: Invalid discovery pages storage data")],
+            Messages: [new ConsoleMessageDto("error", "site", "www.wegmans.com", "SiteHeaderSearch: Invalid discovery pages storage data")],
             DroppedInfoLog: 72, DroppedExtensionNoise: 0, DroppedError: 0));
 
     [Fact]
