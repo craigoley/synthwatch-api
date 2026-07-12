@@ -68,8 +68,10 @@ public class ErrorDiffFunctions
             id, target.Id, target.StartedAt, target.Location,
             ToSignals(target), baselineRuns.Select(ToSignals).ToList());
 
-        req.HttpContext.Response.Headers.CacheControl = "public, max-age=15";
-        req.HttpContext.Response.Headers["Vary"] = "Origin";
+        // Session-gated forensic data → NEVER publicly cacheable (a shared cache keyed on Origin, not
+        // Authorization, could serve the authed 200 to a later anonymous caller — CWE-525). Matches the
+        // sibling reconcile/trace-signals reads.
+        req.HttpContext.Response.Headers.CacheControl = "no-store";
         return ApiResults.Ok(dto);
     }
 
