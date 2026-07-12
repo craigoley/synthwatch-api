@@ -612,6 +612,22 @@ ALTER TABLE ONLY public.runs
 
 
 --
+-- Name: runs runs_confirmation_of_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.runs
+    ADD CONSTRAINT runs_confirmation_of_run_id_fkey FOREIGN KEY (confirmation_of_run_id) REFERENCES public.runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: runs runs_superseded_by_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.runs
+    ADD CONSTRAINT runs_superseded_by_run_id_fkey FOREIGN KEY (superseded_by_run_id) REFERENCES public.runs(id) ON DELETE SET NULL;
+
+
+--
 -- PostgreSQL database dump complete
 --
 
