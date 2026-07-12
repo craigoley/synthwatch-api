@@ -20,6 +20,9 @@ public static partial class ErrorDiff
     /// <summary>Baseline size (N) — last-N SETTLED runs. Named so the anti-flap window is one obvious knob.</summary>
     public const int BaselineRuns = 4;
 
+    /// <summary>Shared empty mute set — the default when a caller passes no mutes (older callers + unit tests).</summary>
+    private static readonly IReadOnlySet<string> EmptyFingerprints = new HashSet<string>(StringComparer.Ordinal);
+
     [GeneratedRegex(@"content security policy|violates the following.*directive|refused to (load|execute|apply|connect|frame)",
         RegexOptions.IgnoreCase)]
     private static partial Regex CspText();
@@ -30,8 +33,13 @@ public static partial class ErrorDiff
 
     public static ErrorDiffDto Compute(
         long checkId, long runId, DateTimeOffset runStartedAt, string? location,
-        RunSignals target, IReadOnlyList<RunSignals> baseline)
+        RunSignals target, IReadOnlyList<RunSignals> baseline,
+        // ★ P4 MUTE: fingerprints the operator has muted for this check. A would-be-NEW error whose fingerprint is
+        // here is diverted to the Muted bucket instead of New (never silently dropped). Pure — just a set; the DB
+        // load happens in the endpoint. Null/empty = no mutes (older callers + the unit tests are unaffected).
+        IReadOnlySet<string>? mutedFingerprints = null)
     {
+        var muted = mutedFingerprints ?? EmptyFingerprints;
         var thisRun = Fingerprint(target.Signals);
 
         // Baseline = the UNION of fingerprints across ALL baseline runs (anti-flap). Keep a representative item
@@ -49,10 +57,13 @@ public static partial class ErrorDiff
 
         var @new = new List<ErrorItemDto>();
         var persistent = new List<ErrorItemDto>();
+        var mutedItems = new List<ErrorItemDto>();
         foreach (var (fp, item) in thisRun)
         {
             if (baselineFps.Contains(fp))
-                persistent.Add(item);
+                persistent.Add(item);            // already known (in the baseline union) — mute doesn't touch it
+            else if (muted.Contains(fp))
+                mutedItems.Add(item with { FirstSeenRunId = runId }); // would-be-NEW, but muted → out of New
             else
                 @new.Add(item with { FirstSeenRunId = runId }); // debuts THIS run
         }
@@ -66,11 +77,13 @@ public static partial class ErrorDiff
         @new.Sort(Rank);
         persistent.Sort(Rank);
         resolved.Sort(Rank);
+        mutedItems.Sort(Rank);
 
         var counts = new ErrorDiffCountsDto(
             NewFirstParty: CountFp(@new, first: true), NewThirdParty: CountFp(@new, first: false),
             PersistentFirstParty: CountFp(persistent, first: true), PersistentThirdParty: CountFp(persistent, first: false),
-            ResolvedFirstParty: CountFp(resolved, first: true), ResolvedThirdParty: CountFp(resolved, first: false));
+            ResolvedFirstParty: CountFp(resolved, first: true), ResolvedThirdParty: CountFp(resolved, first: false),
+            Muted: mutedItems.Count);
 
         var truncated = target.Truncated || baseline.Any(b => b.Truncated);
 
@@ -78,7 +91,8 @@ public static partial class ErrorDiff
             checkId, runId, runStartedAt, location,
             BaselineRunIds: baseline.Select(b => b.RunId).ToList(),
             New: @new, Persistent: persistent, Resolved: resolved,
-            Counts: counts, Truncated: truncated, BaselineRunCount: baseline.Count);
+            Counts: counts, Truncated: truncated, BaselineRunCount: baseline.Count,
+            Muted: mutedItems);
     }
 
     /// <summary>True when a run's console set was truncated by the cap (errors beyond it were dropped).</summary>

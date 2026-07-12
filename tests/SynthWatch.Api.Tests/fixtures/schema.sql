@@ -1099,6 +1099,19 @@ CREATE TABLE public.deploys (
 );
 CREATE INDEX deploys_host_time_idx ON public.deploys (target_host, deployed_at DESC);
 
+-- error_mutes (migration 0076) — per-check, per-fingerprint mute for the error-diff NEW bucket (error-diff P4).
+-- The API has SELECT/INSERT/DELETE CRUD; a muted fingerprint moves out of new[] into muted[]. check_id ON DELETE
+-- CASCADE. UNIQUE(check_id, fingerprint). Added to the snapshot so the mute endpoints + error-diff filter test.
+CREATE TABLE public.error_mutes (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    check_id     bigint NOT NULL REFERENCES public.checks(id) ON DELETE CASCADE,
+    fingerprint  text NOT NULL,
+    muted_at     timestamp with time zone NOT NULL DEFAULT now(),
+    muted_by     text,
+    note         text,
+    CONSTRAINT error_mutes_check_fingerprint_key UNIQUE (check_id, fingerprint)
+);
+
 -- red_tests (migration 0057) — §D1 red-test capture. The API reads it for the trust scorecard.
 CREATE TABLE public.red_tests (
     id         bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -22,7 +22,12 @@ public sealed record ErrorDiffDto(
     // so the UI must be able to say so rather than imply completeness.
     bool Truncated,
     // N actually used (may be < the configured baseline size on a young check / after a location change).
-    int BaselineRunCount);
+    int BaselineRunCount,
+    // ★ P4 MUTE (never silently drop): errors that WOULD be NEW but the operator has muted for this check. They
+    // are REMOVED from New (so the panel stays must-go-red for real regressions) and surfaced HERE instead — the
+    // UI shows a collapsed "N muted" disclosure with an unmute action. A muted error that is instead PERSISTENT
+    // stays in Persistent (mute only intercepts the would-be-NEW signal). Default [] (no mutes / older callers).
+    IReadOnlyList<ErrorItemDto>? Muted = null);
 
 /// <summary>One error in the diff — a stable per-error identity + its classification and severity.</summary>
 public sealed record ErrorItemDto(
@@ -45,12 +50,28 @@ public sealed record ErrorItemDto(
     // abort(3) > csp/warning(2) > ANY third-party(1). The consumer sorts NEW by this.
     int Severity,
     string SeverityLabel,
-    // set to RunId for a NEW error (it debuts this run — cheap); null otherwise. Full first-seen history +
-    // "first seen after deploy &lt;sha&gt;" correlation is P4.
-    long? FirstSeenRunId);
+    // set to RunId for a NEW error (it debuts this run — cheap); null otherwise. Full first-seen history is future.
+    long? FirstSeenRunId,
+    // ★ P4 DEPLOY CORRELATION: the deploy (if any) that landed in the window between the previous settled run
+    // (which LACKED this fingerprint) and this run — i.e. the deploy this NEW error first appeared after. Null
+    // when no deploy landed in that window, when the check has no prior baseline run to bound the window, or when
+    // the deploys table isn't populated. Set only on NEW items (a would-be-NEW error's debut) — never causation,
+    // a correlation the UI renders as "first seen after deploy abc1234 · 2h ago". Default null (older callers).
+    FirstSeenAfterDeployDto? FirstSeenAfterDeploy = null);
+
+/// <summary>The deploy a NEW error first appeared after (P4 correlation) — the marker the runner auto-detected
+/// on the check's host, inside the inter-run window. sha is empty for a non-SHA marker (etag/sentry-release);
+/// deployedAt is the deploy's own time (not detection time). Correlation, never causation.</summary>
+public sealed record FirstSeenAfterDeployDto(
+    string Sha,
+    System.DateTimeOffset DeployedAt,
+    string TargetHost);
 
 /// <summary>First/third-party splits per bucket, so the UI can render e.g. "3 new — and 7 third-party".</summary>
 public sealed record ErrorDiffCountsDto(
     int NewFirstParty, int NewThirdParty,
     int PersistentFirstParty, int PersistentThirdParty,
-    int ResolvedFirstParty, int ResolvedThirdParty);
+    int ResolvedFirstParty, int ResolvedThirdParty,
+    // ★ P4: errors muted for this check that would otherwise be NEW (surfaced in the Muted bucket, not New).
+    // Default 0 so existing positional constructions in ErrorDiff.Compute stay valid until updated.
+    int Muted = 0);

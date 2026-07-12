@@ -3706,6 +3706,105 @@ public class IntegrationTests
         }
     }
 
+    // Error-diff P4: mute lifecycle + deploy correlation over a real DB. A NEW error carries the deploy that
+    // landed between the previous run and this one (firstSeenAfterDeploy); muting it moves it OUT of new[] into
+    // muted[] (never silently dropped); unmuting brings it back. Exercises the full mute CRUD + the diff filter.
+    [SkippableFact]
+    public async Task Error_mute_lifecycle_and_deploy_correlation()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+
+        // A console-error-only trace_signals (empty text = a clean run with no console errors).
+        static string ConSig(string text) =>
+            "{\"targetHost\":\"www.wegmans.com\",\"network\":{\"totalRequests\":0,\"wireKb\":0,\"thirdPartyCount\":0,"
+            + "\"failed\":[],\"slowest\":[],\"largest\":[],\"uncompressed\":[],\"topThirdParties\":[],\"mutations\":[]},"
+            + "\"console\":{\"messages\":[" + (text.Length == 0 ? "" :
+                "{\"level\":\"error\",\"origin\":\"site\",\"sourceHost\":\"www.wegmans.com\",\"text\":\"" + text + "\"}")
+            + "],\"droppedInfoLog\":0,\"droppedExtensionNoise\":0,\"droppedError\":0}}";
+
+        var edTok = "errmute-ed-tok";
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url, flow_name) VALUES ('errmute', 'browser', 'https://www.wegmans.com', 'shop');");
+        // baseline (10 min ago, clean) — bounds the deploy-correlation window's lower edge.
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO runs (check_id, status, started_at, location, trace_signals) " +
+            "SELECT id, 'pass', now() - interval '10 min', 'eastus2', {0}::jsonb FROM checks WHERE name='errmute';", ConSig(""));
+        // target (1 min ago): a NEW console error 'boom'.
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO runs (check_id, status, started_at, location, trace_signals) " +
+            "SELECT id, 'pass', now() - interval '1 min', 'eastus2', {0}::jsonb FROM checks WHERE name='errmute';", ConSig("boom"));
+        // a deploy 5 min ago on the same host — inside (baseline, target] → the correlation for 'boom'.
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO deploys (target_host, sha, fingerprint, is_sha, source, deployed_at) " +
+            "VALUES ('www.wegmans.com', 'abc1234', 'sha:abc1234', true, 'sentry-release', now() - interval '5 min');");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO editors (email, added_by) VALUES ('ed@errmute.test','system');");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(edTok)}, 'ed@errmute.test', now() + interval '1 hour');");
+
+        var checkId = await db.Checks.Where(c => c.Name == "errmute").Select(c => c.Id).FirstAsync();
+        var diff = new ErrorDiffFunctions(db, new AuthPrincipalService(db));
+        var mutes = new ErrorMutesFunctions(db, new AuthPrincipalService(db));
+        var prior = Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED");
+        try
+        {
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "true");
+
+            // ── 1. 'boom' is NEW and carries the deploy that landed before this run. ──
+            var d1 = Assert.IsType<ErrorDiffDto>(Assert.IsType<OkObjectResult>(
+                await diff.GetCheckErrorDiff(AuthReq(edTok), checkId, default)).Value!);
+            var boom = Assert.Single(d1.New, e => e.Message.Contains("boom"));
+            Assert.NotNull(boom.FirstSeenAfterDeploy);
+            Assert.Equal("abc1234", boom.FirstSeenAfterDeploy!.Sha);
+            Assert.Equal("www.wegmans.com", boom.FirstSeenAfterDeploy.TargetHost);
+            Assert.Equal(0, d1.Counts.Muted);
+
+            // ── 2. mute it (idempotent: a second mute is a no-op 200, not a 500). ──
+            var created = Assert.IsType<ObjectResult>(
+                await mutes.MuteCheckError(AuthJsonReq(edTok, new { fingerprint = boom.Fingerprint, note = "known noisy" }), checkId, default));
+            Assert.Equal(201, created.StatusCode);
+            Assert.IsType<OkObjectResult>(
+                await mutes.MuteCheckError(AuthJsonReq(edTok, new { fingerprint = boom.Fingerprint }), checkId, default)); // dup → 200
+
+            // ── 3. now 'boom' is OUT of new[] and IN muted[] (never silently dropped). ──
+            var d2 = Assert.IsType<ErrorDiffDto>(Assert.IsType<OkObjectResult>(
+                await diff.GetCheckErrorDiff(AuthReq(edTok), checkId, default)).Value!);
+            Assert.DoesNotContain(d2.New, e => e.Message.Contains("boom"));
+            Assert.Contains(d2.Muted!, e => e.Message.Contains("boom"));
+            Assert.Equal(1, d2.Counts.Muted);
+
+            // ── 4. the mute is listed (with its note). ──
+            var listed = Assert.IsType<ErrorMutesResponse>(Assert.IsType<OkObjectResult>(
+                await mutes.GetCheckErrorMutes(AuthReq(edTok), checkId, default)).Value!);
+            var m = Assert.Single(listed.Mutes);
+            Assert.Equal(boom.Fingerprint, m.Fingerprint);
+            Assert.Equal("known noisy", m.Note);
+
+            // ── 5. unmute (query-string fingerprint; idempotent NoContent). ──
+            Assert.IsType<NoContentResult>(
+                await mutes.UnmuteCheckError(Request($"?fingerprint={Uri.EscapeDataString(boom.Fingerprint)}"), checkId, default));
+            Assert.IsType<NoContentResult>(
+                await mutes.UnmuteCheckError(Request($"?fingerprint={Uri.EscapeDataString(boom.Fingerprint)}"), checkId, default)); // again → still 204
+
+            // ── 6. 'boom' is back in new[] (mute removed). ──
+            var d3 = Assert.IsType<ErrorDiffDto>(Assert.IsType<OkObjectResult>(
+                await diff.GetCheckErrorDiff(AuthReq(edTok), checkId, default)).Value!);
+            Assert.Contains(d3.New, e => e.Message.Contains("boom"));
+            Assert.Equal(0, d3.Counts.Muted);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", prior);
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email = 'ed@errmute.test'; DELETE FROM editors WHERE email = 'ed@errmute.test'; " +
+                "DELETE FROM deploys WHERE target_host = 'www.wegmans.com' AND sha = 'abc1234'; " +
+                "DELETE FROM error_mutes WHERE check_id IN (SELECT id FROM checks WHERE name='errmute'); " +
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name='errmute'); " +
+                "DELETE FROM checks WHERE name='errmute';");
+        }
+    }
+
     [SkippableFact]
     public async Task Incident_timeline_is_capped_newest_first_with_totalRuns_and_truncated()
     {

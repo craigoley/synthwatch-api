@@ -145,6 +145,14 @@
         "neededBy": "POST/PUT/DELETE /api/env-domain-map (env PR-3 map management page). GRANT in runner migration 0075."
       },
       {
+        "table": "error_mutes",
+        "privileges": [
+          "INSERT",
+          "DELETE"
+        ],
+        "neededBy": "POST/DELETE /api/checks/{id}/error-mutes (error-diff P4 mute/unmute). No UPDATE — notes set at mute time. GRANT in runner migration 0076."
+      },
+      {
         "table": "checks",
         "privileges": [
           "INSERT",
