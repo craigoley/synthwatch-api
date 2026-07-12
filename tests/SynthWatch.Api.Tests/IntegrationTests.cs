@@ -2383,7 +2383,7 @@ public class IntegrationTests
     {
         RequireDocker();
         await using var db = _pg.NewDbContext();
-        var fn = new ArtifactsFunctions(db, new ArtifactReader(new DefaultAzureCredential(), NullLogger<ArtifactReader>.Instance), new AuthPrincipalService(db));
+        var fn = new ArtifactsFunctions(db, new ArtifactReader(new DefaultAzureCredential(), NullLogger<ArtifactReader>.Instance), new FakeBlobSasMinter(), new AuthPrincipalService(db));
         var runId = await db.Runs.Where(r => r.TraceUrl == null).Select(r => r.Id).FirstAsync();
         var result = await fn.GetRunTrace(Request(), runId, default);
         Assert.IsType<NotFoundObjectResult>(result); // no trace_url -> 404 before any blob call
@@ -3272,6 +3272,16 @@ public class IntegrationTests
         public Task<ArtifactBlob> OpenStreamAsync(string? url, string artifact, long id, CancellationToken ct) => Task.FromResult(result);
     }
 
+    // Stubs the SAS minter (the real one needs Azure to fetch a user-delegation key). Default: an Ok SAS for a
+    // resolvable url, Missing for a null one — so the endpoint's gate/404/200 paths are all drivable offline.
+    private sealed class FakeBlobSasMinter : IBlobSasMinter
+    {
+        public Task<BlobSasResult> MintReadSasAsync(string? blobUrl, CancellationToken ct) =>
+            Task.FromResult(string.IsNullOrEmpty(blobUrl)
+                ? BlobSasResult.Missing
+                : BlobSasResult.Of(blobUrl + "?sv=2024&sp=r&sig=fake", DateTimeOffset.UtcNow.AddMinutes(2)));
+    }
+
     // URL-aware reader returning a FRESH readable stream per call, keyed by a URL substring — needed once the
     // failing run is also extracted from its own zip (zip-first), so one reader serves run zip AND baseline zip.
     private sealed class FakeZipReader(params (string urlContains, byte[] zip)[] zips) : IArtifactReader
@@ -3399,7 +3409,7 @@ public class IntegrationTests
         try
         {
             var runId = await db.Runs.Where(r => r.Check!.Name == "sig-unavail").Select(r => r.Id).FirstAsync();
-            var fn = new ArtifactsFunctions(db, new FakeArtifactReader(ArtifactBlob.Unavailable), new AuthPrincipalService(db));
+            var fn = new ArtifactsFunctions(db, new FakeArtifactReader(ArtifactBlob.Unavailable), new FakeBlobSasMinter(), new AuthPrincipalService(db));
             var result = await fn.GetTraceSignals(Request(), runId, default);
             Assert.Equal(503, Assert.IsType<ObjectResult>(result).StatusCode); // clean 503, NOT an unhandled 500
         }
@@ -3450,6 +3460,7 @@ public class IntegrationTests
         var fn = new ArtifactsFunctions(
             db,
             new FakeZipReader(("traces/trace.zip", zip), ("shots/shot.png", png), ("success-latest", zip)),
+            new FakeBlobSasMinter(),
             new AuthPrincipalService(db));
 
         var prior = Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED");
@@ -3459,20 +3470,25 @@ public class IntegrationTests
             //    anonymous GET reaches the handler and streams the artifact — proving the gate is what closes it. ──
             Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "false");
             Assert.IsType<FileStreamResult>(await fn.GetRunTrace(AuthReq(), rid, default));
+            Assert.IsType<OkObjectResult>(await fn.GetRunTraceSas(AuthReq(), rid, default)); // SAS mint open too
 
             // ── ENFORCEMENT ON → every anonymous forensic GET is 401 (the fix). ★ The sensitive monitor's
-            //    trace is NOT anonymously retrievable — the specific data B10 exists to protect. ──
+            //    trace is NOT anonymously retrievable — the specific data B10 exists to protect. The SAS-mint
+            //    endpoints ride the SAME gate: an anonymous caller can never mint a SAS to bypass it. ──
             Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "true");
             Assert.IsType<UnauthorizedObjectResult>(await fn.GetRunTrace(AuthReq(), rid, default));
             Assert.IsType<UnauthorizedObjectResult>(await fn.GetCheckSuccessTrace(AuthReq(), cid, default));
             Assert.IsType<UnauthorizedObjectResult>(await fn.GetRunScreenshot(AuthReq(), rid, default));
             Assert.IsType<UnauthorizedObjectResult>(await fn.GetTraceSignals(AuthReq(), rid, default));
+            Assert.IsType<UnauthorizedObjectResult>(await fn.GetRunTraceSas(AuthReq(), rid, default));        // ★ must-go-red
+            Assert.IsType<UnauthorizedObjectResult>(await fn.GetCheckSuccessTraceSas(AuthReq(), cid, default)); // ★ must-go-red
 
             // ── ★ ROLE FLOOR: a still-valid session whose role has been REVOKED (now anonymous) is 403 —
             //    a removed editor loses forensic access at the same instant they lose write access (mirrors the
             //    write-gate), never "can't write but can still pull sensitive traces". ──
             Assert.Equal(403, StatusOf(await fn.GetRunTrace(AuthReq(ghostTok), rid, default)));
             Assert.Equal(403, StatusOf(await fn.GetTraceSignals(AuthReq(ghostTok), rid, default)));
+            Assert.Equal(403, StatusOf(await fn.GetRunTraceSas(AuthReq(ghostTok), rid, default))); // revoked editor: no SAS
 
             // ── authenticated (a logged-in EDITOR, NOT admin — the gate is not admin-only) → passes the gate,
             //    serves the artifact: traces/screenshot stream (FileStreamResult), signals are 200 JSON. ──
@@ -3480,6 +3496,12 @@ public class IntegrationTests
             Assert.IsType<FileStreamResult>(await fn.GetCheckSuccessTrace(AuthReq(tok), cid, default));
             Assert.IsType<FileStreamResult>(await fn.GetRunScreenshot(AuthReq(tok), rid, default));
             Assert.IsType<OkObjectResult>(await fn.GetTraceSignals(AuthReq(tok), rid, default));
+            // ── authed → the SAS endpoints mint: 200 with a TraceSasDto (url + expiry). ──
+            var sasOk = Assert.IsType<OkObjectResult>(await fn.GetRunTraceSas(AuthReq(tok), rid, default));
+            var sasDto = Assert.IsType<TraceSasDto>(sasOk.Value!);
+            Assert.Contains("sp=r", sasDto.Url);                       // read-only SAS URL
+            Assert.True(sasDto.ExpiresAt > DateTimeOffset.UtcNow);     // future expiry
+            Assert.IsType<OkObjectResult>(await fn.GetCheckSuccessTraceSas(AuthReq(tok), cid, default));
         }
         finally
         {

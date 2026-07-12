@@ -27,6 +27,7 @@ public class ArtifactsFunctions
 {
     private readonly SynthWatchDbContext _db;
     private readonly IArtifactReader _artifacts;
+    private readonly IBlobSasMinter _sasMinter;
     private readonly IAuthPrincipal _auth;
 
     // Deserialize the persisted trace_signals (runner-written camelCase JSON) into the same DTO FromZip returns,
@@ -34,10 +35,11 @@ public class ArtifactsFunctions
     private static readonly System.Text.Json.JsonSerializerOptions WebJson =
         new(System.Text.Json.JsonSerializerDefaults.Web);
 
-    public ArtifactsFunctions(SynthWatchDbContext db, IArtifactReader artifacts, IAuthPrincipal auth)
+    public ArtifactsFunctions(SynthWatchDbContext db, IArtifactReader artifacts, IBlobSasMinter sasMinter, IAuthPrincipal auth)
     {
         _db = db;
         _artifacts = artifacts;
+        _sasMinter = sasMinter;
         _auth = auth;
     }
 
@@ -76,6 +78,61 @@ public class ArtifactsFunctions
             .Where(r => r.Id == id).Select(r => r.TraceUrl).FirstOrDefaultAsync(ct);
         return await ProxyAsync(req, id, $"run {id}", url, "trace", "application/zip",
             $"attachment; filename=\"trace-run-{id}.zip\"", ct);
+    }
+
+    /// <summary>
+    /// GET /api/runs/{id}/trace-sas — mint a SHORT-TTL, READ-ONLY, SINGLE-BLOB user-delegation SAS for the
+    /// run's trace zip and return its URL as JSON, so the browser fetches the (up to 124 MB+) blob DIRECTLY —
+    /// off the Vercel serverless proxy that terminates a streamed multi-tens-of-MB transfer at its ~15 s
+    /// maxDuration. This is the PRIMARY trace path; /trace stays as a same-model streaming fallback. Behind the
+    /// SAME <see cref="RequireSessionAsync"/> forensic gate as /trace — no session, no SAS. 404 semantics match
+    /// /trace (no run / no trace_url → 404); the caller can never mint a SAS for a run the gate denies.
+    /// </summary>
+    [Function("GetRunTraceSas")]
+    public async Task<IActionResult> GetRunTraceSas(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "runs/{id:long}/trace-sas")] HttpRequest req,
+        long id,
+        CancellationToken ct)
+    {
+        if (await RequireSessionAsync(req, ct) is { } denied) return denied;
+        var url = await _db.Runs.AsNoTracking()
+            .Where(r => r.Id == id).Select(r => r.TraceUrl).FirstOrDefaultAsync(ct);
+        return await MintTraceSasAsync(req, $"run {id}", url, "trace", ct);
+    }
+
+    /// <summary>
+    /// GET /api/checks/{id}/success-trace-sas — the per-MONITOR mirror of /runs/{id}/trace-sas: a short-TTL
+    /// read-only single-blob SAS for the check's last-known-good success-trace zip. Same gate, same scope, same
+    /// 404-until-baseline semantics as /checks/{id}/success-trace.
+    /// </summary>
+    [Function("GetCheckSuccessTraceSas")]
+    public async Task<IActionResult> GetCheckSuccessTraceSas(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "checks/{id:long}/success-trace-sas")] HttpRequest req,
+        long id,
+        CancellationToken ct)
+    {
+        if (await RequireSessionAsync(req, ct) is { } denied) return denied;
+        var url = await _db.Checks.AsNoTracking()
+            .Where(c => c.Id == id).Select(c => c.SuccessTraceUrl).FirstOrDefaultAsync(ct);
+        return await MintTraceSasAsync(req, $"monitor {id}", url, "success trace", ct);
+    }
+
+    /// <summary>Mint a read SAS for a resolved artifact blob url and return it as JSON (no-store — it's a
+    /// short-lived credential). 404 for a missing url/host, a clean 503 for a delegation/signing error.</summary>
+    private async Task<IActionResult> MintTraceSasAsync(
+        HttpRequest req, string subject, string? blobUrl, string artifact, CancellationToken ct)
+    {
+        var sas = await _sasMinter.MintReadSasAsync(blobUrl, ct);
+        switch (sas.Status)
+        {
+            case SasStatus.Missing:
+                return ApiResults.NotFound($"No {artifact} for {subject}.");
+            case SasStatus.Unavailable:
+                return ApiResults.ServiceUnavailable($"the {artifact} for {subject} is temporarily unavailable.");
+            default:
+                req.HttpContext.Response.Headers.CacheControl = "no-store"; // never cache a bearer-in-URL
+                return ApiResults.Ok(new Dtos.TraceSasDto(sas.Url!, sas.ExpiresOn!.Value));
+        }
     }
 
     /// <summary>

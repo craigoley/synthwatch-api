@@ -34,6 +34,11 @@ builder.Services.AddSingleton<Azure.Core.TokenCredential>(_ => new Azure.Identit
 // 404/non-404 classification. Shared by the artifact proxy (ArtifactsFunctions) and the AI-insights endpoint.
 builder.Services.AddSingleton<SynthWatch.Api.Infrastructure.IArtifactReader, SynthWatch.Api.Infrastructure.ArtifactReader>();
 
+// Mints short-TTL, read-only, single-blob user-delegation SAS URLs so the browser fetches large traces
+// (124 MB+) DIRECTLY from Blob instead of streaming through the Vercel serverless proxy (which cuts off at
+// its ~15 s maxDuration). Uses the SAME DefaultAzureCredential (the MI needs Storage Blob Delegator).
+builder.Services.AddSingleton<SynthWatch.Api.Infrastructure.IBlobSasMinter, SynthWatch.Api.Infrastructure.BlobSasMinter>();
+
 // Auth (Phase 12 slice 1): OTP / access-request emails send via ACS using the SAME managed-identity
 // credential (preferred; connection-string fallback) — see AcsEmailSender. This slice is purely additive:
 // it mints/verifies sessions, but NOTHING enforces them yet (the authz gate is slice 2).

@@ -189,6 +189,11 @@ public record IncidentDetailDto(
 /// incident because detection lags reality). <c>Sha</c> is empty unless <c>IsSha</c>; otherwise
 /// <c>Fingerprint</c> is the human label. (Plain record → camelCase JSON, matching this file's convention.)
 /// </summary>
+/// <summary>A short-lived, read-only, single-blob SAS URL for a trace zip — the browser fetches the blob
+/// DIRECTLY (off the Vercel + API byte path). <see cref="Url"/> carries a bearer credential for its TTL; the
+/// response is <c>Cache-Control: no-store</c>. <see cref="ExpiresAt"/> lets the client re-mint before it lapses.</summary>
+public record TraceSasDto(string Url, DateTimeOffset ExpiresAt);
+
 public record NearbyDeployDto(
     DateTimeOffset DetectedAt,
     string Source,
