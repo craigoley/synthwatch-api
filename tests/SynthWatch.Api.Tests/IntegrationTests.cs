@@ -587,6 +587,31 @@ public class IntegrationTests
         Assert.Equal("proven-live", TrustReportProjection.DeriveChip(ProvenLive(99), asOf)); // ★ 99 retried passes → STILL proven-live
     }
 
+    // ★ Confirmation-retry P2: flapRate feeds the flaky chip, but ONLY as a repeated pattern — ≥ 2 transient
+    // failures AND ≥ 10% of scheduled runs. Both guards stop a low-volume window's single flap flipping the
+    // chip. Zero flaps must never change an existing chip (null-safe, like the canary at 1 flap).
+    [Fact]
+    public void Trust_flap_rate_feeds_flaky_only_as_a_repeated_pattern()
+    {
+        var asOf = new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero);
+        // Otherwise proven-live: fresh green, zero retries, no noise. Only the flap fields vary.
+        TrustMonitorRow Row(long flaps, long scheduled) => new()
+        {
+            CheckId = 1, CheckName = "x", IntervalSeconds = 300,
+            RunCount = scheduled, RetryCount = 0, LastGreenAt = asOf.AddSeconds(-30),
+            FlapCount = flaps, ScheduledCount = scheduled,
+        };
+
+        // FlapRate: honest ratio, null on an empty denominator (never a fake 0).
+        Assert.Equal(0.0423m, TrustReportProjection.FlapRate(6, 142));
+        Assert.Null(TrustReportProjection.FlapRate(0, 0));
+
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(Row(0, 100), asOf)); // 0 flaps → unchanged
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(Row(1, 8), asOf));   // 1 flap (12.5%) → count guard: NOT flaky
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(Row(3, 100), asOf)); // 3 flaps but 3% → rate guard: NOT flaky
+        Assert.Equal("flaky", TrustReportProjection.DeriveChip(Row(2, 8), asOf));         // 2 flaps @ 25% → flaky-by-flap
+    }
+
     // ★ THE COEXISTENCE PROOF (end-to-end) + must-go-red: a monitor with retried PASSES at a retry RATE below
     // ProvenLiveMaxRetryRate stays proven-live AND surfaces retriedPasses > 0 — the "degrading-but-green" early
     // warning is an ANNOTATION on a healthy monitor, never a demotion (the #152 class must not recur). Also
@@ -813,6 +838,50 @@ public class IntegrationTests
                 "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'trust-%'); " +
                 "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'trust-%'); " +
                 "DELETE FROM checks WHERE name LIKE 'trust-%';");
+        }
+    }
+
+    // ★ Confirmation-retry P2: the flap metric counts a SUPERSEDED TRANSIENT (a failure whose fresh
+    // confirmation passed → excluded from health) but NOT a CONFIRMED failure, and the denominator excludes
+    // sandbox runs. Mirrors canary 395's real pair: 952597→952601 (transient, counts) vs 952633 (confirmed,
+    // does not). This proves the flap query the P1 suppression stays untouched.
+    [SkippableFact]
+    public async Task Trust_flap_rate_counts_superseded_transients_not_confirmed_failures()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint; ra bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, flow_name) VALUES ('trust-flap','browser','https://fl.ex','shop') RETURNING id INTO cid;
+              -- TRANSIENT: original A fails, confirmation B passes → A superseded (counts as a flap).
+              INSERT INTO runs (check_id, status, started_at) VALUES (cid, 'error', now() - interval '10 min') RETURNING id INTO ra;
+              INSERT INTO runs (check_id, status, started_at, confirmation_of_run_id) VALUES (cid, 'pass', now() - interval '10 min' + interval '3 seconds', ra);
+              UPDATE runs SET superseded_by_run_id = (SELECT id FROM runs WHERE confirmation_of_run_id = ra) WHERE id = ra;
+              -- CONFIRMED failure: C fails and is NOT superseded → must NOT count as a flap.
+              INSERT INTO runs (check_id, status, started_at) VALUES (cid, 'error', now() - interval '5 min');
+              -- a SANDBOX run → excluded from the scheduled denominator.
+              INSERT INTO runs (check_id, status, started_at, sandbox) VALUES (cid, 'pass', now() - interval '4 min', true);
+              -- 6 normal scheduled passes.
+              FOR i IN 1..6 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (cid, 'pass', now() - (i || ' minutes')::interval); END LOOP;
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var checkId = await db.Checks.Where(c => c.Name == "trust-flap").Select(c => c.Id).FirstAsync();
+            var detail = Assert.IsType<TrustMonitorDetailDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetTrustMonitorDetail(Request("?window=30d"), checkId, default)).Value!);
+            var mon = detail.Monitor;
+
+            Assert.Equal(1, mon.FlapCount);          // ★ only the superseded transient (A) — NOT the confirmed fail (C)
+            Assert.Equal(9, mon.ScheduledCount);     // 10 runs total − 1 sandbox
+            Assert.Equal(Math.Round(1m / 9m, 4), mon.FlapRate); // 0.1111
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'trust-flap';");
         }
     }
 

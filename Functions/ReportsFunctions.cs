@@ -431,6 +431,8 @@ public class ReportsFunctions
                   rc.last_green_at AS last_green_at,
                   coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
                   coalesce(rc.retried_passes, 0) AS retried_passes,
+                  coalesce(rc.flap_count, 0) AS flap_count,
+                  coalesce(rc.scheduled_count, 0) AS scheduled_count,
                   coalesce(ic.total, 0) AS incident_total,
                   coalesce(ic.real_outage, 0) AS real_outage,
                   coalesce(ic.flaky_transient, 0) AS flaky_transient,
@@ -448,6 +450,12 @@ public class ReportsFunctions
                       -- DISPLAY-ONLY annotation — NEVER an input to DeriveChip (the #152 class must not recur).
                       -- Counted over the SAME window as retry_count.
                       count(*) FILTER (WHERE r.status IN ('pass','warn') AND r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retried_passes,
+                      -- ★ Flakiness surfaced (confirmation-retry P2, migration 0077): a superseded TRANSIENT — a
+                      -- scheduled failure whose fresh confirmation PASSED, so it was excluded from health signal.
+                      -- Counting it (÷ non-sandbox runs = flap rate) turns a silently-self-healed failure into a
+                      -- VISIBLE, measured signal. Same window; same index scan (free — one more FILTER on rc's rows).
+                      count(*) FILTER (WHERE r.superseded_by_run_id IS NOT NULL)::bigint AS flap_count,
+                      count(*) FILTER (WHERE NOT r.sandbox)::bigint AS scheduled_count,
                       max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
                FROM runs r
                WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')
@@ -495,6 +503,8 @@ public class ReportsFunctions
                   rc.last_green_at AS last_green_at,
                   coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
                   coalesce(rc.retried_passes, 0) AS retried_passes,
+                  coalesce(rc.flap_count, 0) AS flap_count,
+                  coalesce(rc.scheduled_count, 0) AS scheduled_count,
                   coalesce(ic.total, 0) AS incident_total,
                   coalesce(ic.real_outage, 0) AS real_outage,
                   coalesce(ic.flaky_transient, 0) AS flaky_transient,
@@ -512,6 +522,12 @@ public class ReportsFunctions
                       -- DISPLAY-ONLY annotation — NEVER an input to DeriveChip (the #152 class must not recur).
                       -- Counted over the SAME window as retry_count.
                       count(*) FILTER (WHERE r.status IN ('pass','warn') AND r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retried_passes,
+                      -- ★ Flakiness surfaced (confirmation-retry P2, migration 0077): a superseded TRANSIENT — a
+                      -- scheduled failure whose fresh confirmation PASSED, so it was excluded from health signal.
+                      -- Counting it (÷ non-sandbox runs = flap rate) turns a silently-self-healed failure into a
+                      -- VISIBLE, measured signal. Same window; same index scan (free — one more FILTER on rc's rows).
+                      count(*) FILTER (WHERE r.superseded_by_run_id IS NOT NULL)::bigint AS flap_count,
+                      count(*) FILTER (WHERE NOT r.sandbox)::bigint AS scheduled_count,
                       max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
                FROM runs r
                WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')
