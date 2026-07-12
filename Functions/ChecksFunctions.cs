@@ -84,6 +84,12 @@ public class ChecksFunctions
         // by taking the most recent across a check's locations, the overall latest run.
         var latestPerLocation = await _db.Runs.AsNoTracking()
             .Where(r => ids.Contains(r.CheckId))
+            // ★ CONFIRMATION-RETRY (runner 0077): a SUPERSEDED transient (its confirmation passed) is not the
+            // current truth — the confirmation is — so it must not drive current_status (multi-location: a
+            // superseded fail at one location would otherwise linger as that location's status). It stays
+            // VISIBLE in run history; only current-status derivation excludes it. (Awaiting failures are NOT
+            // excluded here — operators see an in-flight failure; only the public status page waits.)
+            .Where(r => r.SupersededByRunId == null)
             .GroupBy(r => new { r.CheckId, r.Location })
             .Select(g => g.OrderByDescending(r => r.StartedAt).First())
             .ToListAsync(ct);
@@ -355,6 +361,9 @@ public class ChecksFunctions
                LEFT JOIN LATERAL (
                    SELECT status FROM runs
                    WHERE check_id = cl.check_id AND location = cl.location
+                     -- ★ CONFIRMATION-RETRY (runner 0077): a superseded transient is not the current per-location
+                     -- truth (its confirmation passed); exclude it from current-status derivation (still visible in history).
+                     AND superseded_by_run_id IS NULL
                    ORDER BY started_at DESC
                    LIMIT 1
                ) r ON true
@@ -385,6 +394,9 @@ public class ChecksFunctions
                LEFT JOIN LATERAL (
                    SELECT status FROM runs
                    WHERE check_id = cl.check_id AND location = cl.location
+                     -- ★ CONFIRMATION-RETRY (runner 0077): a superseded transient is not the current per-location
+                     -- truth (its confirmation passed); exclude it from current-status derivation (still visible in history).
+                     AND superseded_by_run_id IS NULL
                    ORDER BY started_at DESC
                    LIMIT 1
                ) r ON true

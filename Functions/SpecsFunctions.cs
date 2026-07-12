@@ -47,6 +47,8 @@ public class SpecsFunctions
                LEFT JOIN LATERAL (
                  SELECT r.status, r.started_at FROM runs r
                  WHERE r.check_id = c.id
+                   -- ★ CONFIRMATION-RETRY (runner 0077): exclude a superseded transient from current-status.
+                   AND r.superseded_by_run_id IS NULL
                  ORDER BY r.started_at DESC LIMIT 1
                ) lr ON c.id IS NOT NULL
                LEFT JOIN LATERAL (

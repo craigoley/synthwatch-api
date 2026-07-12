@@ -59,6 +59,13 @@ public class Run
     // the monitor is resumed. DEFAULT false (NOT NULL) → every real run is false.
     public bool Sandbox { get; set; }
 
+    // Confirmation-retry (runner migration 0077). ConfirmationOfRunId: set on a CONFIRMATION run, points at the
+    // original it confirms. SupersededByRunId: set on the ORIGINAL when its confirmation PASSED (⇒ it was a
+    // transient); the read-side health filters exclude runs where this IS NOT NULL. Both nullable (most runs
+    // have neither). Runner-written only — the API never writes runs.
+    public long? ConfirmationOfRunId { get; set; }
+    public long? SupersededByRunId { get; set; }
+
     // Navigation (read-mostly).
     public Check? Check { get; set; }
     public List<RunStep> Steps { get; set; } = new();

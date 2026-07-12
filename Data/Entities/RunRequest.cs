@@ -19,4 +19,9 @@ public class RunRequest
     /// (no incident/alert/SLO side-effects) and never flipping enabled. Default false = today's behavior (a
     /// disabled check is never claimed). The API sets it; the runner honors it (drain/forceClaim + runOne).</summary>
     public bool Sandbox { get; set; }
+
+    /// <summary>CONFIRMATION run (runner migration 0077): true → the runner drains it as the confirmation that
+    /// OWNS a failed browser/multistep check's verdict (fresh execution). Per-request flavor flag (mirror
+    /// Sandbox); the API sets it false (its on-demand "Run now" is never a confirmation). DEFAULT false.</summary>
+    public bool Confirmation { get; set; }
 }

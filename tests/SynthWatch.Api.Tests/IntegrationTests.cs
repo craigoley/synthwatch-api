@@ -4583,6 +4583,82 @@ public class IntegrationTests
         }
     }
 
+    // ★ CONFIRMATION-RETRY (runner 0077, D8) MUST-GO-RED: the PUBLIC status page must NOT cry wolf on an
+    // AWAITING failure (a failed browser run whose confirmation is still pending). It shows the last CONFIRMED
+    // verdict (pass), not the unconfirmed fail. Without the awaiting exclusion in the StatusFunctions LATERAL,
+    // the latest run (the fail) flips the property to "down".
+    [SkippableFact]
+    public async Task Status_page_waits_for_an_awaiting_confirmation_and_hides_a_superseded_transient()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE ca bigint; cs bigint; rf bigint; rc bigint;
+            BEGIN
+              -- (1) AWAITING: a healthy check whose latest run FAILED and a confirmation is pending.
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-cfm-awaiting','browser','https://cfma.ex','critical') RETURNING id INTO ca;
+              INSERT INTO check_tags (check_id, key, value) VALUES (ca,'area','st-cfm-awaiting');
+              INSERT INTO runs (check_id,status,started_at) VALUES (ca,'pass', now()-interval '10 minutes');
+              INSERT INTO runs (check_id,status,started_at) VALUES (ca,'fail', now());  -- awaiting original (latest)
+              INSERT INTO run_requests (check_id, confirmation, status) VALUES (ca, true, 'pending');
+              -- (2) SUPERSEDED: a transient fail whose confirmation PASSED (the confirmation is the newest run).
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-cfm-super','browser','https://cfms.ex','critical') RETURNING id INTO cs;
+              INSERT INTO check_tags (check_id, key, value) VALUES (cs,'area','st-cfm-super');
+              INSERT INTO runs (check_id,status,started_at) VALUES (cs,'fail', now()-interval '3 minutes') RETURNING id INTO rf;
+              INSERT INTO runs (check_id,status,started_at,confirmation_of_run_id) VALUES (cs,'pass', now()-interval '2 minutes', rf) RETURNING id INTO rc;
+              UPDATE runs SET superseded_by_run_id = rc WHERE id = rf;
+            END $$;
+            """);
+        try
+        {
+            var dto = Assert.IsType<StatusPageDto>(Assert.IsType<OkObjectResult>(
+                await new StatusFunctions(db).GetStatus(Request(), default)).Value!);
+            var props = dto.Properties.ToDictionary(p => p.Name);
+            Assert.Equal("up", props["st-cfm-awaiting"].State); // ★ not "down" — the page waits for confirmation
+            Assert.Equal("up", props["st-cfm-super"].State);    // the superseded transient is not the current truth
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'st-cfm-%'); " +
+                "DELETE FROM checks WHERE name LIKE 'st-cfm-%';");
+        }
+    }
+
+    // ★ CONFIRMATION-RETRY (runner 0077, D3) MUST-GO-RED: a SUPERSEDED transient must NOT count as a down run in
+    // sla_availability or slo_status — else availability craters / the error budget burns on a self-resolving blip.
+    [SkippableFact]
+    public async Task Sla_and_slo_exclude_a_superseded_transient()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cid bigint; rc bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, slo_target) VALUES ('cfm-slo','browser','https://cfmslo.ex', 0.99) RETURNING id INTO cid;
+              INSERT INTO runs (check_id,status,started_at) VALUES (cid,'pass', now()-interval '5 minutes') RETURNING id INTO rc;
+              -- a transient fail, superseded by the passing confirmation → excluded from down_runs
+              INSERT INTO runs (check_id,status,started_at,superseded_by_run_id) VALUES (cid,'fail', now()-interval '6 minutes', rc);
+            END $$;
+            """);
+        try
+        {
+            var id = await db.Checks.Where(c => c.Name == "cfm-slo").Select(c => c.Id).FirstAsync();
+            var slaDown = await db.Database.SqlQuery<long>(
+                $"SELECT down_runs AS \"Value\" FROM sla_availability(now() - interval '1 hour', now()) WHERE check_id = {id}").SingleAsync();
+            Assert.Equal(0, slaDown); // ★ the superseded transient is NOT counted as down
+            var sloDown = await db.Database.SqlQuery<long>(
+                $"SELECT down_runs AS \"Value\" FROM slo_status({id}, now() - interval '1 hour', now())").SingleAsync();
+            Assert.Equal(0, sloDown); // ★ nor does it burn the error budget
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'cfm-slo';");
+        }
+    }
+
     // ★ GET /reports/deploys — the deploy-marker overlay source (deploy-markers v1). Proves: host-scoped;
     // a git-sha marker exposes its sha, a non-sha (etag) marker exposes NULL sha + is_sha=false (honest);
     // window filtering; host required (400); and the wire shape.
