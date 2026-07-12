@@ -3566,7 +3566,8 @@ public class IntegrationTests
             var ok = Assert.IsType<OkObjectResult>(await fn.GetCheckErrorDiff(AuthReq(edTok), checkId, default));
             var d = Assert.IsType<ErrorDiffDto>(ok.Value!);
             Assert.Contains(d.New, e => e.Message.Contains("alpha"));        // debuts in the target run → NEW
-            Assert.Equal(checkId, d.New.First(e => e.Message.Contains("alpha")).FirstSeenRunId);
+            Assert.Equal(d.RunId, d.New.First(e => e.Message.Contains("alpha")).FirstSeenRunId); // firstSeen = the target RUN
+            Assert.Equal(checkId, d.CheckId);
             Assert.Contains(d.Persistent, e => e.Kind == "net-5xx");         // /api/x 500 in every run → PERSISTENT
             Assert.Contains(d.Resolved, e => e.Message.Contains("gamma"));   // only in an older baseline run → RESOLVED
             Assert.DoesNotContain(d.New, e => e.Kind == "net-5xx");
