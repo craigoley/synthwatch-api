@@ -44,6 +44,13 @@ public class StatusFunctions
                    -- operator grid/run-history don't apply the awaiting exclusion).
                    SELECT r.status FROM runs r
                     WHERE r.check_id = c.id
+                      -- ★ LAST SETTLED run (mirrors the dashboard lastSettledStatus, #255): an in-flight
+                      -- (running) run is NOT a verdict, so peel back to the most-recent settled run. A failing
+                      -- check then stays DOWN while re-running (running matches none of IsDownCritical/
+                      -- IsDegraded/up, so without this it flips to the unknown bucket every in-flight run). No
+                      -- settled run ever (all running) then no row then COALESCE(...,unknown) = the ONE
+                      -- legitimate no-data.
+                      AND r.status <> 'running'
                       AND r.superseded_by_run_id IS NULL
                       AND NOT (r.status IN ('fail','error')
                                AND r.confirmation_of_run_id IS NULL

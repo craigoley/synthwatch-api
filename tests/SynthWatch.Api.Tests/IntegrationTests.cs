@@ -4696,6 +4696,62 @@ public class IntegrationTests
         }
     }
 
+    // ★ MUST-GO-RED (the intra-page contradiction, mirrors the dashboard's lastSettledStatus / #255): the
+    // status projection must reflect the last SETTLED run, not an in-flight 'running' one. Without the
+    // `status <> 'running'` exclusion the latest run's 'running' matches none of IsDownCritical/IsDegraded/up,
+    // so a DOWN property silently drops to "unknown" during every re-check (while the dashboard component row
+    // still reads "Down") — and a healthy one blinks to "unknown". Also covers the stranded run: a check stuck
+    // at 'running' shows its last settled verdict (down STAYS down — never fake-green), and a never-settled
+    // check is the ONE legitimate "unknown".
+    [SkippableFact]
+    public async Task Status_page_uses_last_settled_run_not_an_in_flight_running_run()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE cd bigint; cu bigint; cn bigint;
+            BEGIN
+              -- (1) DOWN while re-running: last SETTLED run FAILED, latest run is 'running', NO open incident.
+              --     Old SQL -> latest 'running' -> "unknown". Fixed -> peel back to the fail -> "down".
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-run-down','http','https://rd.ex','critical') RETURNING id INTO cd;
+              INSERT INTO check_tags (check_id, key, value) VALUES (cd,'area','st-run-down');
+              INSERT INTO runs (check_id,status,started_at) VALUES (cd,'fail', now()-interval '2 minutes');
+              INSERT INTO runs (check_id,status,started_at) VALUES (cd,'running', now());
+              -- (2) UP while re-running: last SETTLED run PASSED, latest 'running' -> "up" (no blink to unknown).
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-run-up','http','https://ru.ex','critical') RETURNING id INTO cu;
+              INSERT INTO check_tags (check_id, key, value) VALUES (cu,'area','st-run-up');
+              INSERT INTO runs (check_id,status,started_at) VALUES (cu,'pass', now()-interval '2 minutes');
+              INSERT INTO runs (check_id,status,started_at) VALUES (cu,'running', now());
+              -- (3) NEVER settled: ALL runs 'running' (brand-new monitor mid-first-run) -> no settled row -> "unknown".
+              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-run-new','http','https://rn.ex','critical') RETURNING id INTO cn;
+              INSERT INTO check_tags (check_id, key, value) VALUES (cn,'area','st-run-new');
+              INSERT INTO runs (check_id,status,started_at) VALUES (cn,'running', now()-interval '1 minute');
+              INSERT INTO runs (check_id,status,started_at) VALUES (cn,'running', now());
+            END $$;
+            """);
+        try
+        {
+            var dto = Assert.IsType<StatusPageDto>(Assert.IsType<OkObjectResult>(
+                await new StatusFunctions(db).GetStatus(Request(), default)).Value!);
+            var props = dto.Properties.ToDictionary(p => p.Name);
+
+            // ★ the fix: a down property STAYS down while re-running (old SQL -> "unknown" = the bug).
+            Assert.Equal("down", props["st-run-down"].State);
+            Assert.True(props["st-run-down"].DownCount >= 1);
+            // a healthy property STAYS up while re-running (no blink to unknown).
+            Assert.Equal("up", props["st-run-up"].State);
+            // the ONE legitimate unknown: nothing has ever settled.
+            Assert.Equal("unknown", props["st-run-new"].State);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'st-run-%'); " +
+                "DELETE FROM checks WHERE name LIKE 'st-run-%';");
+        }
+    }
+
     // ★ CONFIRMATION-RETRY (runner 0077, D3) MUST-GO-RED: a SUPERSEDED transient must NOT count as a down run in
     // sla_availability or slo_status — else availability craters / the error budget burns on a self-resolving blip.
     [SkippableFact]
