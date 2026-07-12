@@ -186,6 +186,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.RequestedAt).HasColumnName("requested_at").ValueGeneratedOnAdd();
             e.Property(x => x.CompletedAt).HasColumnName("completed_at");
             e.Property(x => x.Sandbox).HasColumnName("sandbox"); // runner migration 0064 (DEFAULT false)
+            e.Property(x => x.Confirmation).HasColumnName("confirmation"); // runner migration 0077 (DEFAULT false)
         });
 
         modelBuilder.Entity<AlertRoute>(e =>
@@ -356,6 +357,8 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.RetryCount).HasColumnName("retry_count"); // runner 0048: attempts to verdict
             e.Property(x => x.Location).HasColumnName("location");
             e.Property(x => x.Sandbox).HasColumnName("sandbox"); // runner 0065: paused-monitor sandbox run
+            e.Property(x => x.ConfirmationOfRunId).HasColumnName("confirmation_of_run_id"); // runner 0077
+            e.Property(x => x.SupersededByRunId).HasColumnName("superseded_by_run_id"); // runner 0077
             e.HasOne(x => x.Check).WithMany(c => c.Runs).HasForeignKey(x => x.CheckId);
             e.HasIndex(x => new { x.CheckId, x.StartedAt });
         });

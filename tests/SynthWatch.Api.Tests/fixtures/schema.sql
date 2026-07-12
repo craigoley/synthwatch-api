@@ -44,6 +44,8 @@ CREATE FUNCTION public.sla_availability(p_from timestamp with time zone, p_to ti
           -- skipped evaluate() — not a scheduled health signal, so it must never move availability. In the
           -- JOIN (not a WHERE) so a check whose only window runs are sandbox keeps its LEFT-JOIN null-run row.
           AND NOT r.sandbox
+          -- SUPERSEDED-TRANSIENT EXCLUSION (0077): a failed run whose confirmation PASSED was transient.
+          AND r.superseded_by_run_id IS NULL
     -- MAINTENANCE-WINDOW EXCLUSION (additive anti-join, mirrors 0004): drop runs
     -- that fall inside an active window for this check (check_id = c.id) OR a
     -- fleet-wide window (check_id IS NULL). Uncovered runs keep mw.id NULL and
@@ -336,6 +338,9 @@ CREATE TABLE public.runs (
     egress_ip text,
     spec_provenance jsonb,
     sandbox boolean DEFAULT false NOT NULL,
+    -- Confirmation-retry (runner migration 0077). Kept in sync with the runner schema for the parity gate.
+    confirmation_of_run_id bigint,
+    superseded_by_run_id bigint,
     CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text, 'error'::text, 'infra_error'::text, 'running'::text])))
 );
 
@@ -629,6 +634,8 @@ AS $function$
                ON r.check_id   = c.id
               AND r.started_at >= p_from
               AND r.started_at <  p_to
+              -- SUPERSEDED-TRANSIENT EXCLUSION (0077): a confirmed-transient failure must not burn the budget.
+              AND r.superseded_by_run_id IS NULL
         -- Maintenance-window anti-join (mirrors sla_availability): drop runs inside
         -- an active window for this check OR a fleet-wide window.
         LEFT JOIN maintenance_windows mw
@@ -1134,6 +1141,7 @@ CREATE TABLE public.run_requests (
     requested_at  timestamp with time zone NOT NULL DEFAULT now(),
     completed_at  timestamp with time zone,
     sandbox       boolean     NOT NULL DEFAULT false,
+    confirmation  boolean     NOT NULL DEFAULT false, -- runner migration 0077
     CONSTRAINT run_requests_status_check CHECK (status IN ('pending', 'done'))
 );
 -- At most one PENDING request per check (the coalesce the API relies on).

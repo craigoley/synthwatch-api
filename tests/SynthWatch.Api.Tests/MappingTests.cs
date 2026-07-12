@@ -51,6 +51,20 @@ public class MappingTests
     }
 
     [Fact]
+    public void RunDto_surfaces_confirmation_linkage()
+    {
+        // confirmation-retry (0077): a confirmation run points at its original; a superseded transient points at
+        // the confirmation that resolved it. A normal run has neither (null).
+        var confirmation = RunDto.From(new Run { Id = 10, CheckId = 1, Status = "pass", ConfirmationOfRunId = 9 });
+        Assert.Equal(9, confirmation.ConfirmationOfRunId);
+        var transient = RunDto.From(new Run { Id = 9, CheckId = 1, Status = "fail", SupersededByRunId = 10 });
+        Assert.Equal(10, transient.SupersededByRunId);
+        var normal = RunDto.From(new Run { Id = 2, CheckId = 1, Status = "pass" });
+        Assert.Null(normal.ConfirmationOfRunId);
+        Assert.Null(normal.SupersededByRunId);
+    }
+
+    [Fact]
     public void RunDto_HasTraceSignals_is_independent_of_TraceUrl()
     {
         // ★ The sensitive-green-run case: NO downloadable trace (TraceUrl null, by B10 design) but the

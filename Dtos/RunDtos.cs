@@ -36,7 +36,13 @@ public record RunDto(
     // INDEPENDENT of TraceUrl. A sensitive monitor's GREEN run stores no downloadable trace (TraceUrl null,
     // by B10 design) but DOES persist trace_signals — so the dashboard can surface "trace data available"
     // (the redacted summary via GET /api/runs/{id}/trace-signals) instead of reading as "no trace".
-    bool HasTraceSignals)
+    bool HasTraceSignals,
+    // Confirmation-retry (runner 0077). ConfirmationOfRunId: set when THIS run is a confirmation of an earlier
+    // failed run (the id it confirms). SupersededByRunId: set when this run was a TRANSIENT failure whose
+    // confirmation PASSED — it stays VISIBLE in history but is excluded from health signal. Both null for a
+    // normal run. Additive (appended last); the P2 flaky UI reads them. camelCase → confirmationOfRunId/supersededByRunId.
+    long? ConfirmationOfRunId,
+    long? SupersededByRunId)
 {
     public static RunDto From(Run r) => new(
         r.Id, r.CheckId, r.Status, r.StartedAt, r.FinishedAt, r.DurationMs,
@@ -47,7 +53,9 @@ public record RunDto(
         Location: string.IsNullOrEmpty(r.Location) ? "default" : r.Location,
         RetryCount: r.RetryCount,
         Sandbox: r.Sandbox,
-        HasTraceSignals: !string.IsNullOrEmpty(r.TraceSignals));
+        HasTraceSignals: !string.IsNullOrEmpty(r.TraceSignals),
+        ConfirmationOfRunId: r.ConfirmationOfRunId,
+        SupersededByRunId: r.SupersededByRunId);
 }
 
 public record RunStepDto(

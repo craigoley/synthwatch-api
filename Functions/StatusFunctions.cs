@@ -36,7 +36,20 @@ public class StatusFunctions
                FROM checks c
                JOIN check_tags t ON t.check_id = c.id AND t.key = 'area'
                LEFT JOIN LATERAL (
-                   SELECT r.status FROM runs r WHERE r.check_id = c.id ORDER BY r.started_at DESC LIMIT 1
+                   -- ★ CONFIRMATION-RETRY (runner 0077, D8): the PUBLIC status page must not cry wolf on a blip
+                   -- that self-resolves in ~90s. Exclude (a) a SUPERSEDED transient (its confirmation PASSED —
+                   -- it was never a real outage) and (b) an AWAITING original (a failed browser/multistep run
+                   -- whose confirmation is still pending) — during the confirmation window the page shows the
+                   -- last CONFIRMED verdict, not the unconfirmed failure. Operators still see the run (the
+                   -- operator grid/run-history don't apply the awaiting exclusion).
+                   SELECT r.status FROM runs r
+                    WHERE r.check_id = c.id
+                      AND r.superseded_by_run_id IS NULL
+                      AND NOT (r.status IN ('fail','error')
+                               AND r.confirmation_of_run_id IS NULL
+                               AND EXISTS (SELECT 1 FROM run_requests rr
+                                            WHERE rr.check_id = c.id AND rr.confirmation AND rr.status = 'pending'))
+                    ORDER BY r.started_at DESC LIMIT 1
                ) l ON true
                WHERE c.enabled").AsNoTracking().ToListAsync(ct);
 
