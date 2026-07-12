@@ -3514,6 +3514,76 @@ public class IntegrationTests
         }
     }
 
+    // Error-diff (P2): the endpoint is behind the forensic session gate (401 unauth — must-go-red), and over a
+    // real DB it computes NEW / PERSISTENT / RESOLVED vs a same-location last-N settled baseline from persisted
+    // trace_signals. Sandbox runs are INCLUDED (a paused monitor's on-demand captures are the only signals it has).
+    [SkippableFact]
+    public async Task Error_diff_is_session_gated_and_computes_new_persistent_resolved()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+
+        static string Sig(string consoleText, int status)
+        {
+            var failed = status == 0 ? ""
+                : "{\"url\":\"https://www.wegmans.com/api/x\",\"status\":" + status
+                  + ",\"resourceType\":\"fetch\",\"timeMs\":0,\"waitMs\":0,\"size\":0,\"wire\":0,\"encoding\":\"\",\"thirdParty\":false}";
+            var msg = consoleText.Length == 0 ? ""
+                : "{\"level\":\"error\",\"origin\":\"site\",\"sourceHost\":\"www.wegmans.com\",\"text\":\"" + consoleText + "\"}";
+            return "{\"targetHost\":\"www.wegmans.com\",\"network\":{\"totalRequests\":1,\"wireKb\":1,\"thirdPartyCount\":0,\"failed\":["
+                + failed + "],\"slowest\":[],\"largest\":[],\"uncompressed\":[],\"topThirdParties\":[],\"mutations\":[]},"
+                + "\"console\":{\"messages\":[" + msg + "],\"droppedInfoLog\":0,\"droppedExtensionNoise\":0,\"droppedError\":0}}";
+        }
+
+        var edTok = "errdiff-ed-tok";
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url, flow_name) VALUES ('errdiff', 'browser', 'https://www.wegmans.com', 'shop');");
+        // baseline B2 (oldest): net-500 + console 'gamma'; baseline B1: net-500; target T: net-500 + console 'alpha'.
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO runs (check_id, status, started_at, location, trace_signals) " +
+            "SELECT id, 'pass', now() - interval '20 min', 'eastus2', {0}::jsonb FROM checks WHERE name='errdiff';", Sig("gamma failed", 500));
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO runs (check_id, status, started_at, location, trace_signals) " +
+            "SELECT id, 'pass', now() - interval '10 min', 'eastus2', {0}::jsonb FROM checks WHERE name='errdiff';", Sig("", 500));
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO runs (check_id, status, started_at, location, trace_signals) " +
+            "SELECT id, 'pass', now() - interval '1 min', 'eastus2', {0}::jsonb FROM checks WHERE name='errdiff';", Sig("alpha failed", 500));
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO editors (email, added_by) VALUES ('ed@errdiff.test','system');");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO sessions (token_hash, email, expires_at) VALUES ({AuthTokens.Sha256Hex(edTok)}, 'ed@errdiff.test', now() + interval '1 hour');");
+
+        var checkId = await db.Checks.Where(c => c.Name == "errdiff").Select(c => c.Id).FirstAsync();
+        var fn = new ErrorDiffFunctions(db, new AuthPrincipalService(db));
+        var prior = Environment.GetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED");
+        try
+        {
+            // ── ★ must-go-red: enforcement ON, no session → 401 (the endpoint surfaces forensic error text). ──
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", "true");
+            Assert.IsType<UnauthorizedObjectResult>(await fn.GetCheckErrorDiff(AuthReq(), checkId, default));
+
+            // ── authed editor → 200 with the computed diff. ──
+            var ok = Assert.IsType<OkObjectResult>(await fn.GetCheckErrorDiff(AuthReq(edTok), checkId, default));
+            var d = Assert.IsType<ErrorDiffDto>(ok.Value!);
+            Assert.Contains(d.New, e => e.Message.Contains("alpha"));        // debuts in the target run → NEW
+            Assert.Equal(d.RunId, d.New.First(e => e.Message.Contains("alpha")).FirstSeenRunId); // firstSeen = the target RUN
+            Assert.Equal(checkId, d.CheckId);
+            Assert.Contains(d.Persistent, e => e.Kind == "net-5xx");         // /api/x 500 in every run → PERSISTENT
+            Assert.Contains(d.Resolved, e => e.Message.Contains("gamma"));   // only in an older baseline run → RESOLVED
+            Assert.DoesNotContain(d.New, e => e.Kind == "net-5xx");
+            Assert.Equal(2, d.BaselineRunCount);                            // two prior settled runs, same location
+            Assert.False(d.Truncated);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTH_ENFORCEMENT_ENABLED", prior);
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sessions WHERE email = 'ed@errdiff.test'; DELETE FROM editors WHERE email = 'ed@errdiff.test'; " +
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name='errdiff'); " +
+                "DELETE FROM checks WHERE name='errdiff';");
+        }
+    }
+
     [SkippableFact]
     public async Task Incident_timeline_is_capped_newest_first_with_totalRuns_and_truncated()
     {

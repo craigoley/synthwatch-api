@@ -1,0 +1,56 @@
+namespace SynthWatch.Api.Dtos;
+
+/// <summary>
+/// Error-diff (P2) for GET /api/checks/{id}/error-diff: the errors this run has that are NEW vs the last-N
+/// settled runs, still PERSISTENT, or RESOLVED since. Computed entirely from persisted <c>runs.trace_signals</c>
+/// (no zip re-parse), against a LAST-N baseline (anti-flap: a one-off blip in a single baseline run is not NEW).
+/// NEW is the headline; each item carries a severity so the consumer ranks likely-real first-party regressions
+/// above third-party noise, and an origin so it can default to first-party.
+/// </summary>
+public sealed record ErrorDiffDto(
+    long CheckId,
+    long RunId,
+    System.DateTimeOffset RunStartedAt,
+    string? Location,
+    IReadOnlyList<long> BaselineRunIds,
+    IReadOnlyList<ErrorItemDto> New,
+    IReadOnlyList<ErrorItemDto> Persistent,
+    IReadOnlyList<ErrorItemDto> Resolved,
+    ErrorDiffCountsDto Counts,
+    // ★ TRUNCATION HONESTY: trace_signals is a capped top-N summary (console cap; DroppedError counts errors
+    // dropped by it). True when THIS run OR any baseline run hit the cap — the diff is over an incomplete set,
+    // so the UI must be able to say so rather than imply completeness.
+    bool Truncated,
+    // N actually used (may be < the configured baseline size on a young check / after a location change).
+    int BaselineRunCount);
+
+/// <summary>One error in the diff — a stable per-error identity + its classification and severity.</summary>
+public sealed record ErrorItemDto(
+    // {console|net} + level/status-class + origin + sourceHost + canonical(text|url) — stable across runs.
+    string Fingerprint,
+    // net-5xx | net-4xx | net-abort | console-error | pageerror | csp | warning
+    string Kind,
+    // first-party | third-party (from the P1 allowlist classifier) — the consumer defaults to first-party.
+    string Origin,
+    // console level (error/warning/pageerror); null for a network error.
+    string? Level,
+    // http status for a network error (or -1/0 for an abort); null for a console error.
+    int? Status,
+    string SourceHost,
+    // canonical text (console) or canonical url (network) — the volatile parts already stripped.
+    string Message,
+    // occurrences folded into this fingerprint within its run (the runner already deduped near-identical text).
+    int Count,
+    // higher = likelier a real first-party regression: fp-5xx(6) > fp-4xx(5) > fp-error/pageerror(4) >
+    // abort(3) > csp/warning(2) > ANY third-party(1). The consumer sorts NEW by this.
+    int Severity,
+    string SeverityLabel,
+    // set to RunId for a NEW error (it debuts this run — cheap); null otherwise. Full first-seen history +
+    // "first seen after deploy &lt;sha&gt;" correlation is P4.
+    long? FirstSeenRunId);
+
+/// <summary>First/third-party splits per bucket, so the UI can render e.g. "3 new — and 7 third-party".</summary>
+public sealed record ErrorDiffCountsDto(
+    int NewFirstParty, int NewThirdParty,
+    int PersistentFirstParty, int PersistentThirdParty,
+    int ResolvedFirstParty, int ResolvedThirdParty);
