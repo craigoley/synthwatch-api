@@ -45,6 +45,13 @@ public class Check
     // Read-only projection here (env-aware dashboard display); the runner owns writes.
     public string Environment { get; set; } = "prod";
 
+    // Per-check ENV OVERRIDE (env PR-3, runner migration 0074). DASHBOARD-OWNED (reconcile is STRUCTURALLY
+    // incapable of writing it — in NEITHER reconcile write allow-list, like ArchivedAt). NULL = no override →
+    // use the derived Environment (manifest ?? domain-inference ?? 'prod'). A value WINS. Readers coalesce:
+    // effective env = EnvironmentOverride ?? Environment. Set/cleared via PUT /api/checks/{id}/environment
+    // (which writes ONLY this column, never the git-authoritative Environment). CHECK IN ('prod','staging','dev').
+    public string? EnvironmentOverride { get; set; }
+
     public bool Enabled { get; set; } = true;
 
     public DateTimeOffset CreatedAt { get; set; }
