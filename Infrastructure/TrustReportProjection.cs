@@ -16,8 +16,10 @@ namespace SynthWatch.Api.Infrastructure;
 /// ★ THE CHIP RULES (evaluated top-to-bottom; first match wins — the precedence IS the contract):
 ///   1. "unverified"  — never green (lastGreenAt == null) OR no runs in the window (runCount == 0).
 ///                      No live evidence to trust; this truth dominates, so it is checked first.
-///   2. "flaky"       — retryRate ≥ 0.50 OR any monitor-noise incident (flakyTransient + selectorDrift &gt; 0).
-///                      The monitor limps over the line or has cried wolf; trust is degraded.
+///   2. "flaky"       — retryRate ≥ 0.50 OR any monitor-noise incident (flakyTransient + selectorDrift &gt; 0)
+///                      OR flapRate ≥ 0.10 with ≥ 2 transient failures (confirmation-retry P2: fail-then-confirm-
+///                      pass flaps that self-healed out of the health signal — a real flakiness pattern, not
+///                      a one-off). The monitor limps over the line, has cried wolf, or keeps flapping.
 ///   3. "proven-live" — last green within 2 check intervals AND retryRate &lt; 0.10 AND zero monitor-noise.
 ///                      A green here is PROVEN trustworthy — recent real pass, clean, no false alarms.
 ///   4. "nominal"     — everything in between (green exists but stale, or 0.10 ≤ retryRate &lt; 0.50), no noise.
@@ -32,6 +34,11 @@ public static class TrustReportProjection
     public const decimal ProvenLiveMaxRetryRate = 0.10m;
     public const decimal FlakyMinRetryRate = 0.50m;
     public const int ProvenLiveMaxIntervalsSinceGreen = 2;
+    // ★ Confirmation-retry P2: a monitor is flaky-by-flap when ≥ 10% of its scheduled runs are transient
+    // failures AND there are at least 2 (one flap is noise; a pattern needs repetition). Both guard against a
+    // low-volume window's single flap flipping the chip.
+    public const decimal FlakyMinFlapRate = 0.10m;
+    public const long FlakyMinFlapCount = 2;
 
     public const string ChipProvenLive = "proven-live";
     public const string ChipFlaky = "flaky";
@@ -40,6 +47,16 @@ public static class TrustReportProjection
 
     /// <summary>Monitor-noise = the "cry wolf" verdicts (monitor bugs), NOT reds the monitor correctly caught.</summary>
     public static long MonitorNoise(TrustMonitorRow r) => r.FlakyTransient + r.SelectorDrift;
+
+    /// <summary>flapRate = flapCount / scheduledCount (superseded transients ÷ non-sandbox runs); null when
+    /// scheduledCount == 0 (honest empty, never a fake 0).</summary>
+    public static decimal? FlapRate(long flapCount, long scheduledCount) =>
+        scheduledCount > 0 ? Math.Round((decimal)flapCount / scheduledCount, 4) : null;
+
+    /// <summary>Flaky-by-flap: a repeated (≥ 2) fail-then-confirm-pass pattern at ≥ 10% of scheduled runs.</summary>
+    public static bool IsFlappy(TrustMonitorRow r) =>
+        r.FlapCount >= FlakyMinFlapCount
+        && FlapRate(r.FlapCount, r.ScheduledCount) is decimal fr && fr >= FlakyMinFlapRate;
 
     /// <summary>retryRate = retryCount / runCount; null when runCount == 0 (honest empty, never a fake 0).</summary>
     public static decimal? RetryRate(long retryCount, long runCount) =>
@@ -58,8 +75,8 @@ public static class TrustReportProjection
         var retryRate = RetryRate(r.RetryCount, r.RunCount);
         var monitorNoise = MonitorNoise(r);
 
-        // 2. flaky — limping over the line, or has cried wolf.
-        if ((retryRate is decimal rr && rr >= FlakyMinRetryRate) || monitorNoise > 0)
+        // 2. flaky — limping over the line, cried wolf, or keeps flapping (fail-then-confirm-pass, P2).
+        if ((retryRate is decimal rr && rr >= FlakyMinRetryRate) || monitorNoise > 0 || IsFlappy(r))
             return ChipFlaky;
 
         // 3. proven-live — recent real pass, clean, no false alarms.
@@ -83,6 +100,12 @@ public static class TrustReportProjection
         RetryRate: RetryRate(r.RetryCount, r.RunCount),
         // ★ Display-only annotation — carried straight from the row, NEVER routed through DeriveChip.
         RetriedPasses: r.RetriedPasses,
+        // ★ Confirmation-retry P2: surface the flap counts + rate (transient failures ÷ scheduled runs). Raw
+        // counts too, so the UI can say "6 transient failures in 142 runs". Unlike RetriedPasses this DOES feed
+        // the chip (IsFlappy) — a repeated flap is real flakiness, not just degrading-but-green.
+        FlapCount: r.FlapCount,
+        ScheduledCount: r.ScheduledCount,
+        FlapRate: FlapRate(r.FlapCount, r.ScheduledCount),
         Incidents: new TrustIncidentsDto(
             Total: r.IncidentTotal,
             RealOutage: r.RealOutage,

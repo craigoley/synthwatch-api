@@ -162,6 +162,12 @@ public record TrustMonitorDto(
     // DISPLAY-ONLY annotation — NOT an input to `trust` (DeriveChip). A proven-live monitor with retried passes
     // STAYS proven-live; this only flags "watch it, it's working harder to stay green".
     [property: JsonPropertyName("retriedPasses")] long RetriedPasses,
+    // ★ Confirmation-retry P2 — flakiness surfaced: transient failures (superseded_by_run_id set, confirmed
+    // not-real, excluded from health) ÷ scheduled (non-sandbox) runs. Raw counts + the rate so the UI can say
+    // "6 transient failures in 142 runs (4.2%)". flapRate is null (never a fake 0) when scheduledCount == 0.
+    [property: JsonPropertyName("flapCount")] long FlapCount,
+    [property: JsonPropertyName("scheduledCount")] long ScheduledCount,
+    [property: JsonPropertyName("flapRate")] decimal? FlapRate,
     [property: JsonPropertyName("incidents")] TrustIncidentsDto Incidents,
     [property: JsonPropertyName("redTest")] TrustRedTestDto RedTest,
     [property: JsonPropertyName("specProvenance")] TrustProvenanceDto SpecProvenance,

@@ -90,6 +90,12 @@ public class TrustMonitorRow
     // ★ degrading-but-green early warning: PASS/WARN runs that still needed a real retry (display-only —
     // NEVER an input to the chip). Same window + retry_count>1 semantics as RetryCount.
     public long RetriedPasses { get; set; }
+    // ★ Flakiness surfaced (confirmation-retry P2): FlapCount = superseded TRANSIENT failures (a scheduled run
+    // that failed then a fresh confirmation PASSED, so it was excluded from health signal) over the window;
+    // ScheduledCount = non-sandbox runs (the flap-rate denominator). Same window as RetryCount. FlapRate =
+    // FlapCount/ScheduledCount makes a silently-self-healed failure VISIBLE and MEASURED.
+    public long FlapCount { get; set; }
+    public long ScheduledCount { get; set; }
     public long IncidentTotal { get; set; }
     public long RealOutage { get; set; }
     public long FlakyTransient { get; set; }
