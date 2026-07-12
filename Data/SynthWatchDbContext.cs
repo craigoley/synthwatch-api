@@ -40,6 +40,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<TestSendRequest> TestSendRequests => Set<TestSendRequest>();
     // READ-ONLY: the runner-owned spec_cache (the API has SELECT only — never writes it; see 0041 / SpecCacheRow).
     public DbSet<SpecCacheRow> SpecCache => Set<SpecCacheRow>();
+    public DbSet<EnvDomainMapRow> EnvDomainMap => Set<EnvDomainMapRow>();
     public DbSet<RunRequest> RunRequests => Set<RunRequest>();
     public DbSet<AvailabilityReportRow> AvailabilityReport => Set<AvailabilityReportRow>();
     public DbSet<AvailabilitySeriesRow> AvailabilityReportSeries => Set<AvailabilitySeriesRow>();
@@ -88,6 +89,18 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.SpecPath).HasColumnName("spec_path");
             e.Property(x => x.Etag).HasColumnName("etag");
             e.Property(x => x.FetchedAt).HasColumnName("fetched_at");
+        });
+
+        // READ-ONLY map of the runner-owned env_domain_map (0073; SELECT only — writes are env PR-3).
+        modelBuilder.Entity<EnvDomainMapRow>(e =>
+        {
+            e.ToTable("env_domain_map");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Pattern).HasColumnName("pattern");
+            e.Property(x => x.Environment).HasColumnName("environment");
+            e.Property(x => x.Priority).HasColumnName("priority");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at");
         });
 
         modelBuilder.Entity<CheckLocation>(e =>
