@@ -70,12 +70,14 @@ param azureOpenAiMaxTokens int = 16000
 @description('Trace AI Insights — reasoning_effort (minimal|low|medium|high). "low" keeps the reasoning-token spend down so the output fits the budget. Empty = omit the field.')
 param azureOpenAiReasoningEffort string = 'low'
 
-@description('GET /reports/cost — $ per vCPU-second (ACA Consumption). CONFIG TUNABLE: change here (or the app setting) to re-price WITHOUT a code deploy. Default 0.00003 reproduces #229 ~$67/mo; cpu=1/mem=2GiB are already folded in (see the runner container resources below). Passed as a string so a decimal survives ARM.')
-param costRatePerVcpuSecond string = '0.00003'
-@description('GET /reports/cost — human source/basis of the rate, ECHOED in the response so the figure is self-describing (an estimate, not billed truth).')
-param costRateSource string = 'ACA Consumption vCPU-second (cpu=1.0 vCPU / mem=2 GiB, main.bicep:528-529)'
-@description('GET /reports/cost — the date the rate was last set (YYYY-MM-DD), ECHOED in the response. Update alongside costRatePerVcpuSecond.')
-param costRateSetDate string = '2026-07-08'
+@description('GET /reports/cost — the runner (browser) job vCPU allocation being priced. The rate is DERIVED from TWO ACA Consumption meters × the live allocation (cpu×0.000024 + mem×0.000003) — NOT a single blended scalar. ★ The old 0.00003 "vCPU rate" was really the 1.0/2 blend, so it was 2× wrong at 2.0/4. Mirror the runner infra (synthwatch infra/main.bicep runner jobs); a resize re-prices with NO api code change. String so a decimal survives ARM.')
+param runnerCpu string = '2.0'
+@description('GET /reports/cost — the runner (browser) job memory (GiB) being priced. See runnerCpu. String so a decimal survives ARM.')
+param runnerMemoryGib string = '4'
+@description('GET /reports/cost — an OPTIONAL explicit $/active-second override (env COST_RATE_PER_ACTIVE_SECOND). Empty = DERIVE from runnerCpu/runnerMemoryGib (the normal case). Set only to re-price without touching the allocation. String so a decimal survives ARM.')
+param costRateOverridePerActiveSecond string = ''
+@description('GET /reports/cost — the date the rate basis was last set (YYYY-MM-DD), ECHOED in the response. Update alongside the meters/allocation.')
+param costRateSetDate string = '2026-07-12'
 
 @description('Existing runner-owned artifacts storage account (failure screenshots + Playwright traces). The Function App reads blobs from here via the trace/screenshot proxies.')
 param artifactsStorageAccountName string = 'synthwatche24e33105c'
@@ -261,15 +263,21 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'AZURE_OPENAI_REASONING_EFFORT'
           value: azureOpenAiReasoningEffort
         }
-        // GET /reports/cost — the pricing rate + its provenance, all deploy-free tunables (the code reads these
-        // env vars, falling back to the same documented defaults if unset). Echoed in the response.
+        // GET /reports/cost — the rate is DERIVED (two ACA meters × the live runner allocation), so we stamp
+        // the allocation the runner jobs carry (SYNTHWATCH_RUNNER_CPU/MEMORY_GIB). CostRate.cs blends them:
+        // cpu×0.000024 + mem×0.000003. A resize re-prices with NO api code deploy. The optional override is
+        // COST_RATE_PER_ACTIVE_SECOND ('' = derive). SetDate is echoed in the response.
         {
-          name: 'COST_RATE_PER_VCPU_SECOND'
-          value: costRatePerVcpuSecond
+          name: 'SYNTHWATCH_RUNNER_CPU'
+          value: runnerCpu
         }
         {
-          name: 'COST_RATE_SOURCE'
-          value: costRateSource
+          name: 'SYNTHWATCH_RUNNER_MEMORY_GIB'
+          value: runnerMemoryGib
+        }
+        {
+          name: 'COST_RATE_PER_ACTIVE_SECOND'
+          value: costRateOverridePerActiveSecond
         }
         {
           name: 'COST_RATE_SET_DATE'

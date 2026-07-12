@@ -66,20 +66,57 @@ public class CostReportTests
     }
 
     [Fact]
-    public void CostRate_reads_the_config_env_var_and_falls_back_to_the_default()
+    public void Count_columns_pass_through_from_the_function_verbatim()
+    {
+        var row = new CostReportRow
+        {
+            CheckId = 1, CheckName = "x", Kind = "browser", IntervalSeconds = 300, RegionCount = 1, AvgDurationS = 10.0,
+            Projected = 5m, Measured = 9m, Divergence = 1.9m, DivergenceFlag = true, ProjectedRaw = 5m, MeasuredRaw = 9m,
+            RunCount7d = 200, ConfirmationCount7d = 7, SandboxCount7d = 5, RunCountRecent = 100, RunCountPrior = 100,
+        };
+        var c = Assert.Single(CostReportProjection.Build(new List<CostReportRow> { row }, Rate, "s", "d", DateTimeOffset.UnixEpoch).Checks);
+        Assert.Equal(200, c.RunCount7d);
+        Assert.Equal(7, c.ConfirmationCount7d);
+        Assert.Equal(5, c.SandboxCount7d);
+        Assert.Equal(100, c.RunCountRecent);
+        Assert.Equal(100, c.RunCountPrior);
+    }
+
+    [Fact]
+    public void MUST_GO_RED_the_rate_is_the_two_meter_blend_of_the_live_allocation_2x_the_old_scalar()
+    {
+        // The old scalar 0.00003 was the 1.0/2 blend; the current 2.0/4 shape is EXACTLY 2×.
+        Assert.Equal(0.00003m, CostRate.Blend(1.0m, 2m));
+        Assert.Equal(0.00006m, CostRate.Blend(2.0m, 4m));
+        Assert.Equal(0.00006m, CostRate.DefaultPerActiveSecond);
+        Assert.Equal(2m, CostRate.Blend(2.0m, 4m) / CostRate.Blend(1.0m, 2m));
+    }
+
+    [Fact]
+    public void CostRate_derives_from_the_stamped_allocation_and_honours_an_override()
     {
         try
         {
-            Environment.SetEnvironmentVariable("COST_RATE_PER_VCPU_SECOND", "0.00009");
-            Assert.Equal(0.00009m, CostRate.PerVcpuSecond); // config wins — no code deploy needed
+            // Change the stamped allocation → the derived rate changes (proves it reads the LIVE allocation).
+            Environment.SetEnvironmentVariable("SYNTHWATCH_RUNNER_CPU", "1.0");
+            Environment.SetEnvironmentVariable("SYNTHWATCH_RUNNER_MEMORY_GIB", "2");
+            Assert.Equal(0.00003m, CostRate.PerActiveSecond);
+            Environment.SetEnvironmentVariable("SYNTHWATCH_RUNNER_CPU", "4.0");
+            Environment.SetEnvironmentVariable("SYNTHWATCH_RUNNER_MEMORY_GIB", "8");
+            Assert.Equal(0.00012m, CostRate.PerActiveSecond);
 
-            Environment.SetEnvironmentVariable("COST_RATE_PER_VCPU_SECOND", "not-a-number");
-            Assert.Equal(CostRate.DefaultPerVcpuSecond, CostRate.PerVcpuSecond); // invalid → safe default
+            // An explicit override wins over the derivation.
+            Environment.SetEnvironmentVariable("COST_RATE_PER_ACTIVE_SECOND", "0.000099");
+            Assert.Equal(0.000099m, CostRate.PerActiveSecond);
+            Environment.SetEnvironmentVariable("COST_RATE_PER_ACTIVE_SECOND", "not-a-number");
+            Assert.Equal(0.00012m, CostRate.PerActiveSecond); // invalid override → back to the derivation
         }
         finally
         {
-            Environment.SetEnvironmentVariable("COST_RATE_PER_VCPU_SECOND", null);
+            Environment.SetEnvironmentVariable("SYNTHWATCH_RUNNER_CPU", null);
+            Environment.SetEnvironmentVariable("SYNTHWATCH_RUNNER_MEMORY_GIB", null);
+            Environment.SetEnvironmentVariable("COST_RATE_PER_ACTIVE_SECOND", null);
         }
-        Assert.Equal(CostRate.DefaultPerVcpuSecond, CostRate.PerVcpuSecond); // unset → default
+        Assert.Equal(CostRate.DefaultPerActiveSecond, CostRate.PerActiveSecond); // unset → current-shape fallback
     }
 }

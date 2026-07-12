@@ -10,7 +10,7 @@ namespace SynthWatch.Api.Infrastructure;
 /// UNROUNDED per-check figures then rounded (no rounding drift), sorted by projected desc, topN drivers.</summary>
 public static class CostReportProjection
 {
-    public const decimal DivergenceFlagThreshold = 1.5m; // measured/projected above this = retry-amplification/failing-flow (in the SQL fn)
+    public const decimal DivergenceFlagThreshold = 1.5m; // measured/projected above this (in the SQL fn) = EXTRA runs vs the current schedule — a pure run-count ratio (config-change straddle / confirmation / sandbox), NOT retries
 
     public static CostReportResponseDto Build(
         IReadOnlyList<CostReportRow> rows, decimal rate, string rateSource, string rateSetDate,
@@ -20,7 +20,8 @@ public static class CostReportProjection
             .OrderByDescending(r => r.ProjectedRaw).ThenBy(r => r.CheckId)
             .Select(r => new CostCheckDto(
                 r.CheckId, r.SourceKey, r.CheckName, r.Kind, r.IntervalSeconds, r.RegionCount, r.AvgDurationS,
-                r.Projected, r.Measured, r.Divergence, r.DivergenceFlag))
+                r.Projected, r.Measured, r.Divergence, r.DivergenceFlag,
+                r.RunCount7d, r.ConfirmationCount7d, r.SandboxCount7d, r.RunCountRecent, r.RunCountPrior))
             .ToList();
 
         var totalProjected = Round(rows.Sum(r => r.ProjectedRaw)); // sum RAW, then round (no per-check drift)
