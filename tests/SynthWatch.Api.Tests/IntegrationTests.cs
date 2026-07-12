@@ -297,9 +297,10 @@ public class IntegrationTests
             Assert.Equal(300, c.IntervalSeconds);
             Assert.Equal(2, c.RegionCount);                          // from check_locations
             Assert.Equal(10.0, c.AvgDurationS!.Value, 3);            // avg(10000ms)/1000
-            // projected = 10 × (2,592,000/300) × 2 × 0.00003 = $5.18 (default config rate, unset env → default)
-            Assert.Equal(5.18m, c.ProjectedMonthly);
-            Assert.Equal(CostRate.DefaultPerVcpuSecond, dto.RateUsed);   // rate echoed, self-describing
+            // projected = 10 × (2,592,000/300) × 2 × 0.00006 = $10.37 (derived rate: 2.0 vCPU / 4 GiB fallback,
+            // env unset — EXACTLY 2× the old $5.18 the 0.00003 blended scalar produced).
+            Assert.Equal(10.37m, c.ProjectedMonthly);
+            Assert.Equal(CostRate.DefaultPerActiveSecond, dto.RateUsed); // rate echoed, self-describing (0.00006)
             Assert.False(string.IsNullOrEmpty(dto.RateSource));
             Assert.True(dto.TotalProjectedMonthly >= c.ProjectedMonthly);
 
@@ -310,7 +311,7 @@ public class IntegrationTests
                 new[] { "checks", "generatedAt", "rateSetDate", "rateSource", "rateUsed", "topCostDrivers", "totalMeasuredMonthly", "totalProjectedMonthly" },
                 root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
             Assert.Equal(
-                new[] { "avgDurationS", "checkId", "divergenceFlag", "divergenceRatio", "intervalSeconds", "kind", "measuredMonthly7d", "name", "projectedMonthly", "regionCount", "sourceKey" },
+                new[] { "avgDurationS", "checkId", "confirmationCount7d", "divergenceFlag", "divergenceRatio", "intervalSeconds", "kind", "measuredMonthly7d", "name", "projectedMonthly", "regionCount", "runCount7d", "runCountPrior", "runCountRecent", "sandboxCount7d", "sourceKey" },
                 root.GetProperty("checks")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
         }
         finally
@@ -352,8 +353,8 @@ public class IntegrationTests
 
             var c = Assert.Single(dto.Checks, x => x.Name == "cost-rep-messyavg");
             Assert.Equal(10.000333, c.AvgDurationS!.Value, 3);      // avg(10000,10000,10001)/1000
-            // projected = 10.000333… × (2,592,000/300) × 2 × 0.00003 = 5.18417… → round 2dp = $5.18
-            Assert.Equal(5.18m, c.ProjectedMonthly);
+            // projected = 10.000333… × (2,592,000/300) × 2 × 0.00006 = 10.3683… → round 2dp = $10.37
+            Assert.Equal(10.37m, c.ProjectedMonthly);
         }
         finally
         {

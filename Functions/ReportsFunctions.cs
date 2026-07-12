@@ -226,7 +226,9 @@ public class ReportsFunctions
     /// ECHOED in the response (rateUsed/rateSource/rateSetDate) so every figure is self-describing — an
     /// ESTIMATE, not billed truth. Anonymous GET, matching the other /reports (cost is no more sensitive than
     /// SLO). ★ Pre-prod INCLUDED (unlike SLO's prod-only filter) — a staging monitor is real spend.
-    /// divergence_ratio &gt; 1.5 per check flags retry-amplification / a failing flow.
+    /// divergence_ratio &gt; 1.5 per check = EXTRA runs vs the current schedule (a pure run-count ratio:
+    /// duration cancels) — the count columns attribute it to a config-change straddle / confirmation /
+    /// sandbox, never retries (0078). The rate is DERIVED from the two ACA meters × the live allocation.
     /// </summary>
     [Function("GetCostReport")]
     public async Task<IActionResult> GetCostReport(
@@ -246,12 +248,13 @@ public class ReportsFunctions
         var rows = await _db.CostReport
             .FromSql($@"SELECT check_id, source_key, check_name, kind, interval_seconds, region_count,
                                avg_duration_s, projected, measured, divergence, divergence_flag,
-                               round(projected_raw, 6) AS projected_raw, round(measured_raw, 6) AS measured_raw
-                        FROM cost_projection({CostRate.PerVcpuSecond})")
+                               round(projected_raw, 6) AS projected_raw, round(measured_raw, 6) AS measured_raw,
+                               run_count_7d, confirmation_count_7d, sandbox_count_7d, run_count_recent, run_count_prior
+                        FROM cost_projection({CostRate.PerActiveSecond})")
             .AsNoTracking().ToListAsync(ct);
 
         var dto = CostReportProjection.Build(
-            rows, CostRate.PerVcpuSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50);
+            rows, CostRate.PerActiveSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50);
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=60";
         req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(dto);

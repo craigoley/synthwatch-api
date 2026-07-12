@@ -21,4 +21,12 @@ public class CostReportRow
     public bool DivergenceFlag { get; set; }        // divergence > 1.5
     public decimal ProjectedRaw { get; set; }       // unrounded — sum for the fleet total
     public decimal MeasuredRaw { get; set; }
+    // 0078 — run-count columns for HONEST divergence attribution. divergence = RunCount7d / expected is a
+    // pure run-count ratio (duration cancels), so a flag is a config-change straddle / confirmation / sandbox,
+    // NEVER retries. RunCountRecent/Prior split the 7d window at 3.5d (a cadence step ⇒ an interval change).
+    public int RunCount7d { get; set; }             // runs (duration_ms NOT NULL) in the last 7d = N in divergence=N/expected
+    public int ConfirmationCount7d { get; set; }    // of those, confirmation re-runs (0077)
+    public int SandboxCount7d { get; set; }         // of those, sandbox / on-demand fires (0065)
+    public int RunCountRecent { get; set; }         // runs in the recent half (last 3.5d)
+    public int RunCountPrior { get; set; }          // runs in the prior half (3.5–7d ago)
 }

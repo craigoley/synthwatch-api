@@ -17,7 +17,9 @@ public record CostReportResponseDto(
 /// <summary>One monitor's estimated monthly cost. projectedMonthly = avgDurationS × (2,592,000/interval) ×
 /// regionCount × rate. measuredMonthly7d = (7d Σduration) × rate × 30/7 (the runs sum already spans all
 /// regions). divergenceRatio = measured/projected (null when projected is 0 / no runs). divergenceFlag =
-/// ratio &gt; 1.5 — the retry-amplification / failing-flow signal the dashboard surfaces.</summary>
+/// ratio &gt; 1.5. ★ divergence is a PURE RUN-COUNT ratio (duration cancels): divergenceRatio = runCount7d /
+/// expected — so a flag is a config-change straddle / confirmation / sandbox, NEVER retries. The count
+/// columns (runCount7d + confirmation/sandbox + recent/prior halves) let the dashboard attribute from data.</summary>
 public record CostCheckDto(
     long CheckId,
     string? SourceKey,
@@ -29,4 +31,9 @@ public record CostCheckDto(
     decimal ProjectedMonthly,
     decimal MeasuredMonthly7d,
     decimal? DivergenceRatio,
-    bool DivergenceFlag);
+    bool DivergenceFlag,
+    int RunCount7d,
+    int ConfirmationCount7d,
+    int SandboxCount7d,
+    int RunCountRecent,
+    int RunCountPrior);

@@ -477,6 +477,11 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.DivergenceFlag).HasColumnName("divergence_flag");
             e.Property(x => x.ProjectedRaw).HasColumnName("projected_raw");
             e.Property(x => x.MeasuredRaw).HasColumnName("measured_raw");
+            e.Property(x => x.RunCount7d).HasColumnName("run_count_7d");                     // 0078 — divergence attribution
+            e.Property(x => x.ConfirmationCount7d).HasColumnName("confirmation_count_7d");
+            e.Property(x => x.SandboxCount7d).HasColumnName("sandbox_count_7d");
+            e.Property(x => x.RunCountRecent).HasColumnName("run_count_recent");
+            e.Property(x => x.RunCountPrior).HasColumnName("run_count_prior");
         });
 
         modelBuilder.Entity<SloReportRow>(e =>
