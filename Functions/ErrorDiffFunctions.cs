@@ -64,15 +64,85 @@ public class ErrorDiffFunctions
         q = target.Location is null ? q.Where(r => r.Location == null) : q.Where(r => r.Location == target.Location);
         var baselineRuns = await q.OrderByDescending(r => r.StartedAt).Take(n).ToListAsync(ct);
 
+        // ★ P4 MUTE: the fingerprints the operator has muted for this check → the diff diverts would-be-NEW
+        // matches into its muted[] bucket (never silently dropped). One indexed read (WHERE check_id = $1).
+        var mutedFps = (await _db.ErrorMutes.AsNoTracking()
+            .Where(m => m.CheckId == id).Select(m => m.Fingerprint).ToListAsync(ct))
+            .ToHashSet(StringComparer.Ordinal);
+
         var dto = ErrorDiff.Compute(
             id, target.Id, target.StartedAt, target.Location,
-            ToSignals(target), baselineRuns.Select(ToSignals).ToList());
+            ToSignals(target), baselineRuns.Select(ToSignals).ToList(),
+            mutedFps);
+
+        // ★ P4 DEPLOY CORRELATION: every NEW error debuted in THIS run, so it first appeared in the window
+        // (previous settled run, this run]. A deploy that landed in that window on the check's host is the
+        // correlation — the SAME deploy for every NEW item (they share the window). ONE batched, indexed query
+        // (no N+1); attach it to each NEW item. Bounded below by the newest baseline run (baselineRuns is
+        // newest-first); with no baseline run there's no lower bound to attribute against → leave it null.
+        if (dto.New.Count > 0 && baselineRuns.Count > 0)
+        {
+            var targetUrl = await _db.Checks.AsNoTracking()
+                .Where(c => c.Id == id).Select(c => c.TargetUrl).FirstOrDefaultAsync(ct);
+            var deploy = await FirstSeenDeployAsync(targetUrl, baselineRuns[0].StartedAt, target.StartedAt, ct);
+            if (deploy is not null)
+                dto = dto with { New = dto.New.Select(i => i with { FirstSeenAfterDeploy = deploy }).ToList() };
+        }
 
         // Session-gated forensic data → NEVER publicly cacheable (a shared cache keyed on Origin, not
         // Authorization, could serve the authed 200 to a later anonymous caller — CWE-525). Matches the
         // sibling reconcile/trace-signals reads.
         req.HttpContext.Response.Headers.CacheControl = "no-store";
         return ApiResults.Ok(dto);
+    }
+
+    /// <summary>The deploy a NEW error first appeared after: the most recent deploy on the check's host whose
+    /// <c>deployed_at</c> falls in the window (windowStart, windowEnd] — i.e. between the previous settled run and
+    /// this one. Host-matched with the SAME normalization the incident deploy-proximity uses (lowercase + strip a
+    /// leading "www." on both sides), so an apex-host check matches a www deploy. Tolerant of the deploys table
+    /// not being migrated in this env (→ null, never a 500). Correlation, never causation.</summary>
+    private async Task<FirstSeenAfterDeployDto?> FirstSeenDeployAsync(
+        string? targetUrl, DateTimeOffset windowStart, DateTimeOffset windowEnd, CancellationToken ct)
+    {
+        var host = NormalizeHost(targetUrl);
+        if (host.Length == 0) return null;
+
+        try
+        {
+            // Indexed by deploys_host_time_idx (target_host, deployed_at DESC). regexp_replace strips a leading
+            // "www." from the stored host so apex ↔ www match. LIMIT 1 = the most recent deploy in the window.
+            var d = await _db.Deploys.FromSql(
+                $@"SELECT d.target_host, d.sha, d.fingerprint, d.is_sha, d.source, d.deployed_at
+                   FROM deploys d
+                   WHERE regexp_replace(lower(d.target_host), '^www\.', '') = {host}
+                     AND d.deployed_at > {windowStart} AND d.deployed_at <= {windowEnd}
+                   ORDER BY d.deployed_at DESC
+                   LIMIT 1").AsNoTracking().FirstOrDefaultAsync(ct);
+
+            return d is null
+                ? null
+                : new FirstSeenAfterDeployDto(
+                    Sha: d.IsSha ? (d.Sha ?? "") : "", // empty unless it's a real SHA (mirrors DeployMarkerDto)
+                    DeployedAt: d.DeployedAt,
+                    TargetHost: d.TargetHost);
+        }
+        catch (Npgsql.PostgresException e) when (e.SqlState == "42P01")
+        {
+            return null; // deploys not migrated in this env — serve null, never a 500.
+        }
+    }
+
+    /// <summary>Host for deploy matching: the URL's host (or the raw value when it isn't an absolute URL),
+    /// lowercased with a single leading "www." stripped — the SAME normalization the SQL applies to the stored
+    /// target_host, so apex and www variants match. (Mirrors IncidentsFunctions.NormalizeHost.)</summary>
+    private static string NormalizeHost(string? targetUrl)
+    {
+        if (string.IsNullOrWhiteSpace(targetUrl)) return "";
+        var host = Uri.TryCreate(targetUrl, UriKind.Absolute, out var u) && !string.IsNullOrEmpty(u.Host)
+            ? u.Host
+            : targetUrl;
+        host = host.Trim().ToLowerInvariant();
+        return host.StartsWith("www.", StringComparison.Ordinal) ? host["www.".Length..] : host;
     }
 
     // Parse a run's persisted signals (drifted/absent JSON → no signals, never a 500 — same tolerance as

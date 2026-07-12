@@ -41,6 +41,7 @@ public class SynthWatchDbContext : DbContext
     // READ-ONLY: the runner-owned spec_cache (the API has SELECT only — never writes it; see 0041 / SpecCacheRow).
     public DbSet<SpecCacheRow> SpecCache => Set<SpecCacheRow>();
     public DbSet<EnvDomainMapRow> EnvDomainMap => Set<EnvDomainMapRow>();
+    public DbSet<ErrorMuteRow> ErrorMutes => Set<ErrorMuteRow>();
     public DbSet<RunRequest> RunRequests => Set<RunRequest>();
     public DbSet<AvailabilityReportRow> AvailabilityReport => Set<AvailabilityReportRow>();
     public DbSet<AvailabilitySeriesRow> AvailabilityReportSeries => Set<AvailabilitySeriesRow>();
@@ -101,6 +102,20 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Environment).HasColumnName("environment");
             e.Property(x => x.Priority).HasColumnName("priority");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
+        });
+
+        // error_mutes (0076): per-check, per-fingerprint mute for the error-diff NEW bucket (error-diff P4).
+        // KEYED (unlike the read-only env_domain_map) — the API INSERTs/DELETEs it (mute/unmute). No UPDATE.
+        modelBuilder.Entity<ErrorMuteRow>(e =>
+        {
+            e.ToTable("error_mutes");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.CheckId).HasColumnName("check_id");
+            e.Property(x => x.Fingerprint).HasColumnName("fingerprint");
+            e.Property(x => x.MutedAt).HasColumnName("muted_at");
+            e.Property(x => x.MutedBy).HasColumnName("muted_by");
+            e.Property(x => x.Note).HasColumnName("note");
         });
 
         modelBuilder.Entity<CheckLocation>(e =>

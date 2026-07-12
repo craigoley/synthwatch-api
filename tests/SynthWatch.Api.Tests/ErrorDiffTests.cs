@@ -108,6 +108,51 @@ public class ErrorDiffTests
     }
 
     [Fact]
+    public void Muted_fingerprint_leaves_New_and_surfaces_in_Muted_never_silently_dropped()
+    {
+        // Two would-be-NEW first-party errors; the operator has muted ONE of them.
+        var target = RS(10, Sig(console:
+        [
+            Con("error", "site", "www.wegmans.com", "known noisy"),
+            Con("error", "site", "www.wegmans.com", "real regression"),
+        ]));
+
+        // Grab the muted one's fingerprint from an unfiltered compute, then mute exactly it.
+        var unfiltered = ErrorDiff.Compute(1, 10, DateTimeOffset.UnixEpoch, "eastus2", target, []);
+        var mutedFp = Assert.Single(unfiltered.New, e => e.Message.Contains("known noisy")).Fingerprint;
+
+        var d = ErrorDiff.Compute(1, 10, DateTimeOffset.UnixEpoch, "eastus2", target, [],
+            new HashSet<string> { mutedFp });
+
+        // ★ anti-fatigue: the muted error is OUT of New (so New stays must-go-red) but NEVER dropped — it is
+        // surfaced in Muted (visible-on-demand) with its debut run id, and counted.
+        Assert.DoesNotContain(d.New, e => e.Message.Contains("known noisy"));
+        Assert.Contains(d.New, e => e.Message.Contains("real regression"));
+        Assert.Contains(d.Muted!, e => e.Message.Contains("known noisy"));
+        Assert.Equal(10, Assert.Single(d.Muted!).FirstSeenRunId);
+        Assert.Equal(1, d.Counts.Muted);
+        Assert.Equal(1, d.Counts.NewFirstParty); // only the un-muted one counts as NEW
+    }
+
+    [Fact]
+    public void Muting_a_PERSISTENT_error_does_not_move_it_out_of_Persistent()
+    {
+        // The error is in the baseline too → PERSISTENT (already known). A mute only intercepts the would-be-NEW
+        // signal, so a muted-but-persistent error stays in Persistent (mute has no effect there).
+        var err = Con("error", "site", "www.wegmans.com", "persistent one");
+        var target = RS(10, Sig(console: [err]));
+        var baseline = RS(9, Sig(console: [err]));
+        var fp = Assert.Single(ErrorDiff.Compute(1, 10, DateTimeOffset.UnixEpoch, "eastus2", target, [baseline]).Persistent).Fingerprint;
+
+        var d = ErrorDiff.Compute(1, 10, DateTimeOffset.UnixEpoch, "eastus2", target, [baseline],
+            new HashSet<string> { fp });
+
+        Assert.Contains(d.Persistent, e => e.Message.Contains("persistent one"));
+        Assert.Empty(d.Muted!);       // mute didn't intercept it
+        Assert.Empty(d.New);
+    }
+
+    [Fact]
     public void Null_signals_are_tolerated_not_a_crash()
     {
         // target with a real error; a baseline run with NO signals (older run) is excluded from the union.
