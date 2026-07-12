@@ -2608,6 +2608,39 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Env_domain_map_endpoint_returns_ordered_rules()
+    {
+        // env PR-2: GET /api/env-domain-map serves the ordered inference rules (priority asc, id asc — the
+        // order the runner matches in). Seed a few, assert they surface and are priority-ordered.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO env_domain_map (pattern, environment, priority) VALUES
+              ('ep-preview.commerce.wegmans.com', 'staging', 100),
+              ('*.ep-staging.wegmans.com',        'staging', 200),
+              ('ep-localhost',                    'dev',     300)
+            ON CONFLICT (pattern) DO NOTHING;
+            """);
+        try
+        {
+            var res = Assert.IsType<EnvDomainMapResponse>(
+                Assert.IsType<OkObjectResult>(await new EnvDomainMapFunctions(db).GetEnvDomainMap(Request(), default)).Value!);
+            // The seeded rules surface with their env.
+            Assert.Contains(res.Rules, r => r.Pattern == "ep-preview.commerce.wegmans.com" && r.Environment == "staging");
+            Assert.Contains(res.Rules, r => r.Pattern == "*.ep-staging.wegmans.com" && r.Environment == "staging");
+            Assert.Contains(res.Rules, r => r.Pattern == "ep-localhost" && r.Environment == "dev");
+            // Ordered by priority ascending (the first-match order the runner resolves in).
+            for (int i = 1; i < res.Rules.Count; i++)
+                Assert.True(res.Rules[i].Priority >= res.Rules[i - 1].Priority, "rules must be priority-ordered");
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM env_domain_map WHERE pattern IN ('ep-preview.commerce.wegmans.com','*.ep-staging.wegmans.com','ep-localhost');");
+        }
+    }
+
+    [SkippableFact]
     public async Task Channel_crud_and_config_validation()
     {
         RequireDocker();

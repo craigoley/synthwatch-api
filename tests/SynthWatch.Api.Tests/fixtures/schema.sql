@@ -862,6 +862,25 @@ CREATE TABLE public.check_tags (
 );
 CREATE INDEX check_tags_key_value_idx ON public.check_tags (key, value);
 
+--
+-- env_domain_map (runner migration 0073): ordered domain→environment inference for reconcile-apply. Added
+-- to the snapshot to mirror the live schema (pattern UNIQUE, lowercase/whitespace-free CHECK; environment
+-- prod|staging|dev CHECK; priority >= 0). The API only SELECTs it (GET /api/env-domain-map).
+--
+CREATE TABLE public.env_domain_map (
+    id          bigint GENERATED ALWAYS AS IDENTITY,
+    pattern     text NOT NULL,
+    environment text NOT NULL,
+    priority    integer NOT NULL DEFAULT 100,
+    created_at  timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT env_domain_map_pkey PRIMARY KEY (id),
+    CONSTRAINT env_domain_map_pattern_key UNIQUE (pattern),
+    CONSTRAINT env_domain_map_pattern_check CHECK (pattern = lower(pattern) AND pattern !~ '[[:space:]]'::text),
+    CONSTRAINT env_domain_map_environment_check CHECK (environment = ANY (ARRAY['prod'::text, 'staging'::text, 'dev'::text])),
+    CONSTRAINT env_domain_map_priority_check CHECK (priority >= 0)
+);
+CREATE INDEX env_domain_map_priority_idx ON public.env_domain_map (priority, id);
+
 
 --
 -- Tag-routing (runner migration 0025 / #85): tag-rule routing dimension (severity ∪ per-check ∪ tag-rules
