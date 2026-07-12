@@ -3537,7 +3537,7 @@ public class IntegrationTests
 
         var edTok = "errdiff-ed-tok";
         await db.Database.ExecuteSqlRawAsync(
-            "INSERT INTO checks (name, kind, target_url) VALUES ('errdiff', 'browser', 'https://www.wegmans.com');");
+            "INSERT INTO checks (name, kind, target_url, flow_name) VALUES ('errdiff', 'browser', 'https://www.wegmans.com', 'shop');");
         // baseline B2 (oldest): net-500 + console 'gamma'; baseline B1: net-500; target T: net-500 + console 'alpha'.
         await db.Database.ExecuteSqlRawAsync(
             "INSERT INTO runs (check_id, status, started_at, location, trace_signals) " +
