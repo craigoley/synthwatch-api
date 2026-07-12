@@ -115,6 +115,34 @@ public class MappingTests
     }
 
     [Fact]
+    public void Env_override_yields_effective_env_and_source_on_both_dtos()
+    {
+        // env PR-3: environment_override (dashboard-owned) WINS over the derived environment. Effective =
+        // override ?? environment; source = "override" when set, else "derived". The git-authoritative
+        // `Environment` is surfaced unchanged alongside so the UI can show "staging (overridden from prod)".
+        var overridden = new Check
+        {
+            Id = 1, Name = "c", Kind = "http", TargetUrl = "https://x",
+            Environment = "prod", EnvironmentOverride = "staging",
+        };
+        var s = CheckSummaryDto.From(overridden, null, CheckMetricsDto.Empty, Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>());
+        Assert.Equal("prod", s.Environment);              // the derived (git) env is unchanged
+        Assert.Equal("staging", s.EnvironmentOverride);
+        Assert.Equal("staging", s.EffectiveEnvironment);  // the override wins
+        Assert.Equal("override", s.EnvironmentSource);
+        var d = CheckDetailDto.From(overridden, Array.Empty<Run>(), Array.Empty<TagDto>());
+        Assert.Equal("staging", d.EffectiveEnvironment);
+        Assert.Equal("override", d.EnvironmentSource);
+
+        // No override → effective == derived env, source "derived".
+        var derived = new Check { Id = 2, Name = "c", Kind = "http", TargetUrl = "https://x", Environment = "staging", EnvironmentOverride = null };
+        var ds = CheckSummaryDto.From(derived, null, CheckMetricsDto.Empty, Array.Empty<LocationStatusDto>(), Array.Empty<TagDto>());
+        Assert.Null(ds.EnvironmentOverride);
+        Assert.Equal("staging", ds.EffectiveEnvironment);
+        Assert.Equal("derived", ds.EnvironmentSource);
+    }
+
+    [Fact]
     public void Archive_surfaces_on_dtos_and_takes_precedence_over_paused_in_status()
     {
         // An ARCHIVED check (archived_at set) surfaces ArchivedAt on both read DTOs and reads CurrentStatus

@@ -298,6 +298,42 @@ public class ChecksFunctions
         return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct), await BuildSloAsync(id, check.SloTarget, ct)));
     }
 
+    /// <summary>PUT /api/checks/{id}/environment — set or CLEAR (null) the per-check ENV OVERRIDE (env PR-3).
+    /// ★ Writes ONLY checks.environment_override, NEVER the git-authoritative environment (reconcile owns
+    /// that). The override is dashboard-owned (in neither reconcile write allow-list) so it survives every
+    /// apply/re-infer. Gated + audited by the AuthorizationMiddleware like the other mutating check verbs.</summary>
+    [Function("SetCheckEnvironmentOverride")]
+    public async Task<IActionResult> SetCheckEnvironmentOverride(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "checks/{id:long}/environment")] HttpRequest req,
+        long id,
+        CancellationToken ct)
+    {
+        var (body, bodyError) = await RequestJson.ReadAsync<SetEnvironmentOverrideRequest>(req, ct);
+        if (bodyError is not null) return bodyError;
+        if (body is null) return ApiResults.BadRequest("Request body is required.");
+
+        // null = clear the override (revert to the derived env). A value must be the pinned vocab.
+        var ov = body.EnvironmentOverride;
+        if (ov is not null && ov is not ("prod" or "staging" or "dev"))
+            return ApiResults.ValidationError(new Dictionary<string, string>
+            {
+                ["environmentOverride"] = "must be one of prod|staging|dev, or null to clear.",
+            });
+
+        var check = await _db.Checks.FirstOrDefaultAsync(c => c.Id == id, ct);
+        if (check is null) return ApiResults.NotFound($"Check {id} not found.");
+
+        check.EnvironmentOverride = ov; // ★ ONLY this column — never check.Environment.
+        await _db.SaveChangesAsync(ct);
+
+        var recentRuns = await _db.Runs.AsNoTracking()
+            .Where(r => r.CheckId == id)
+            .OrderByDescending(r => r.StartedAt)
+            .Take(20)
+            .ToListAsync(ct);
+        return ApiResults.Ok(CheckDetailDto.From(check, recentRuns, await CheckTagsAsync(id, ct), await BuildSloAsync(id, check.SloTarget, ct)));
+    }
+
     // A check's key:value tags as DTOs (sorted), for the check detail/update responses.
     private async Task<IReadOnlyList<TagDto>> CheckTagsAsync(long checkId, CancellationToken ct) =>
         await _db.CheckTags.AsNoTracking()

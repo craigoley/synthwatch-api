@@ -105,7 +105,15 @@ public record CheckSummaryDto(
     // is detectable from the response instead of a manual DB query. See RedactionStatus.
     bool Sensitive,
     bool HasRedactPatterns,
-    string RedactionHealth)
+    string RedactionHealth,
+    // env PR-3 (appended last). EnvironmentOverride = the per-check manual override (null = none). Effective =
+    // override ?? Environment (what the env-aware rollups/badges use). Source = "override" when set, else
+    // "derived" (Environment came from the git manifest / domain-map / 'prod' default — the row doesn't record
+    // WHICH, so it's reported as "derived", not manifest-vs-inferred). The UI shows override vs derived + can
+    // offer to clear the override to revert to the derived value.
+    string? EnvironmentOverride,
+    string EffectiveEnvironment,
+    string EnvironmentSource)
 {
     public static CheckSummaryDto From(Check c, Run? latest, CheckMetricsDto m,
         IReadOnlyList<LocationStatusDto> locations, IReadOnlyList<TagDto> tags) => new(
@@ -143,7 +151,10 @@ public record CheckSummaryDto(
         SpecPath: c.SpecPath,
         Sensitive: c.Sensitive,
         HasRedactPatterns: RedactionStatus.HasPatterns(c.RedactPatterns),
-        RedactionHealth: RedactionStatus.Health(c.Sensitive, c.RedactPatterns));
+        RedactionHealth: RedactionStatus.Health(c.Sensitive, c.RedactPatterns),
+        EnvironmentOverride: c.EnvironmentOverride,
+        EffectiveEnvironment: c.EnvironmentOverride ?? c.Environment,
+        EnvironmentSource: c.EnvironmentOverride is not null ? "override" : "derived");
 }
 
 /// <summary>A check's latest-run status from one location (per-location rollup for the grid).</summary>
@@ -231,7 +242,12 @@ public record CheckDetailDto(
     // B10 redaction status (read-only visibility, June-29). See CheckSummaryDto + RedactionStatus.
     bool Sensitive,
     bool HasRedactPatterns,
-    string RedactionHealth)
+    string RedactionHealth,
+    // env PR-3 (appended last) — see CheckSummaryDto: the manual override (null = none), the EFFECTIVE env
+    // (override ?? Environment), and its source ("override" | "derived").
+    string? EnvironmentOverride,
+    string EffectiveEnvironment,
+    string EnvironmentSource)
 {
     public static CheckDetailDto From(Check c, IReadOnlyList<Run> recentRuns, IReadOnlyList<TagDto> tags,
         SloDto? slo = null, IReadOnlyList<LocationStatusDto>? locations = null) => new(
@@ -259,7 +275,10 @@ public record CheckDetailDto(
         SuccessTraceAt: c.SuccessTraceAt,
         Sensitive: c.Sensitive,
         HasRedactPatterns: RedactionStatus.HasPatterns(c.RedactPatterns),
-        RedactionHealth: RedactionStatus.Health(c.Sensitive, c.RedactPatterns));
+        RedactionHealth: RedactionStatus.Health(c.Sensitive, c.RedactPatterns),
+        EnvironmentOverride: c.EnvironmentOverride,
+        EffectiveEnvironment: c.EnvironmentOverride ?? c.Environment,
+        EnvironmentSource: c.EnvironmentOverride is not null ? "override" : "derived");
 }
 
 /// <summary>

@@ -3,12 +3,12 @@
     "SINGLE SOURCE OF TRUTH for the privileges the synthwatch-api managed identity (MI) requires.",
     "Motivated by four separate missing-grant root-causes (dismiss-500, on-demand reconcile, spec_cache,",
     "AOAI/email). The grants split across TWO planes:",
-    "  • azureRbac  — Azure control/data-plane role assignments. ENFORCED in CI: scripts/check-grant-coverage.mjs",
+    "  \u2022 azureRbac  \u2014 Azure control/data-plane role assignments. ENFORCED in CI: scripts/check-grant-coverage.mjs",
     "                 asserts this set EXACTLY matches the role assignments in infra/main.bicep (fail-closed).",
-    "  • postgres   — table grants on the MI's Postgres role. Granted by RUNNER-owned migrations (separate repo),",
+    "  \u2022 postgres   \u2014 table grants on the MI's Postgres role. Granted by RUNNER-owned migrations (separate repo),",
     "                 so they're DOCUMENTED here (the single place that lists everything) but NOT CI-enforced from",
-    "                 this repo — asserting them needs the live DB / the runner's migrations.",
-    "To add an endpoint that needs a new Azure role: add it to azureRbac AND grant it in main.bicep — the CI",
+    "                 this repo \u2014 asserting them needs the live DB / the runner's migrations.",
+    "To add an endpoint that needs a new Azure role: add it to azureRbac AND grant it in main.bicep \u2014 the CI",
     "check fails until both are present (a new endpoint can't merge without its grant)."
   ],
   "principal": "synthwatch-api Function App system-assigned managed identity",
@@ -38,14 +38,14 @@
       "role": "Container Apps Jobs Operator",
       "roleId": "b9a307c4-5aa3-4b52-ba60-2b17c136cd7b",
       "scope": "runnerJob",
-      "reason": "Microsoft.App/jobs/start/action — start the runner job on-demand ('Run now' / test-send).",
+      "reason": "Microsoft.App/jobs/start/action \u2014 start the runner job on-demand ('Run now' / test-send).",
       "neededBy": "ArmRunnerJobTrigger (POST /checks/{id}/run, channel test)"
     },
     {
       "role": "Container Apps Jobs Operator",
       "roleId": "b9a307c4-5aa3-4b52-ba60-2b17c136cd7b",
       "scope": "reconcileJob",
-      "reason": "Microsoft.App/jobs/start/action — start the reconcile job on-demand.",
+      "reason": "Microsoft.App/jobs/start/action \u2014 start the reconcile job on-demand.",
       "neededBy": "ArmRunnerJobTrigger (POST /reconcile/trigger)"
     },
     {
@@ -65,53 +65,162 @@
   ],
   "postgres": {
     "$comment": [
-      "★ NOW CI-ENFORCED (scripts/check-pg-grant-coverage.mjs) — this closes the gap the old comment named.",
+      "\u2605 NOW CI-ENFORCED (scripts/check-pg-grant-coverage.mjs) \u2014 this closes the gap the old comment named.",
       "The two worst 500s this session lived on this plane: dismiss-500 (missing DELETE on access_requests),",
       "approve-500 (missing UPDATE on reconcile_apply_plan). They are INVISIBLE to admin psql + Testcontainers",
-      "(both run as SUPERUSER, and the snapshot has no synthwatch-api role) — they only surface as a prod 500.",
+      "(both run as SUPERUSER, and the snapshot has no synthwatch-api role) \u2014 they only surface as a prod 500.",
       "",
       "The check compares:",
       "  REQUIRED  = `writes` below (the WRITE privileges the synthwatch-api role needs, per the handlers).",
-      "  GRANTED   = the GRANT … TO \\\"synthwatch-api\\\" statements parsed from the RUNNER repo's db/migrations/*.sql",
+      "  GRANTED   = the GRANT \u2026 TO \\\"synthwatch-api\\\" statements parsed from the RUNNER repo's db/migrations/*.sql",
       "              (the runner owns the schema/grants), UNIONed with `opsBaseline` below.",
-      "It FAILS if any required (table, privilege) is in neither — naming the table + missing privilege.",
+      "It FAILS if any required (table, privilege) is in neither \u2014 naming the table + missing privilege.",
       "",
       "Why an allowlist (approach b), not parsing the C#: the write surface is part raw SQL (regex-able) and",
-      "part EF change-tracking — incl. IMPLICIT updates (a fetched-then-mutated entity + SaveChanges emits",
+      "part EF change-tracking \u2014 incl. IMPLICIT updates (a fetched-then-mutated entity + SaveChanges emits",
       "UPDATE with no syntactic marker, e.g. PATCH check / edit channel). That makes UPDATEs unreliable to",
       "enumerate statically, so the required WRITE set is a maintained allowlist. (The check ALSO scans the",
-      "API's raw-SQL writes and fails if one names a table absent from `writes` — an auto-catch for the common",
+      "API's raw-SQL writes and fails if one names a table absent from `writes` \u2014 an auto-catch for the common",
       "case.) SELECT is covered for every table by ALTER DEFAULT PRIVILEGES (ops), so only WRITES are listed.",
       "",
       "TO ADD an endpoint that writes a NEW table/privilege: add it to `writes` here AND add a runner migration",
-      "`GRANT <priv> ON <table> TO \\\"synthwatch-api\\\";` — CI fails until both are present (no merge without the grant)."
+      "`GRANT <priv> ON <table> TO \\\"synthwatch-api\\\";` \u2014 CI fails until both are present (no merge without the grant)."
     ],
     "writes": [
-      { "table": "access_requests",     "privileges": ["INSERT", "DELETE"],          "neededBy": "POST /access-requests (request) + DELETE /access-requests/{email} (dismiss-500)" },
-      { "table": "alert_routes",         "privileges": ["INSERT", "DELETE"],          "neededBy": "PUT /routing — per-dimension replace (ExecuteDelete + AddRange)" },
-      { "table": "audit_log",            "privileges": ["INSERT"],                    "neededBy": "the authz/audit envelope writes one row per authorized mutation" },
-      { "table": "channels",             "privileges": ["INSERT", "UPDATE", "DELETE"], "neededBy": "channel CRUD (create / edit / delete)" },
-      { "table": "check_locations",      "privileges": ["INSERT", "DELETE"],          "neededBy": "PUT /checks/{id}/locations — assign/de-assign; create-check seeding" },
-      { "table": "check_tags",           "privileges": ["INSERT", "DELETE"],          "neededBy": "PUT /checks/{id}/tags — replace tags" },
-      { "table": "checks",               "privileges": ["INSERT", "UPDATE", "DELETE"], "neededBy": "create / PATCH / delete check; reconcile-apply materialize" },
-      { "table": "editors",              "privileges": ["INSERT", "DELETE"],          "neededBy": "edit-access editor add/remove" },
-      { "table": "otp_codes",            "privileges": ["INSERT", "UPDATE"],          "neededBy": "OTP sign-in — issue + consume" },
-      { "table": "reconcile_apply_plan", "privileges": ["UPDATE"],                    "neededBy": "POST /reconcile/approve|reject|apply (approve-500)" },
-      { "table": "run_requests",         "privileges": ["INSERT"],                    "neededBy": "POST /checks/{id}/run — enqueue an on-demand run" },
-      { "table": "sessions",             "privileges": ["INSERT", "UPDATE"],          "neededBy": "auth session create + refresh" },
-      { "table": "tag_routes",           "privileges": ["INSERT", "DELETE"],          "neededBy": "PUT /routing — tag-rule replace (ExecuteDelete + AddRange)" },
-      { "table": "test_send_requests",   "privileges": ["INSERT"],                    "neededBy": "POST channel test-send" }
+      {
+        "table": "access_requests",
+        "privileges": [
+          "INSERT",
+          "DELETE"
+        ],
+        "neededBy": "POST /access-requests (request) + DELETE /access-requests/{email} (dismiss-500)"
+      },
+      {
+        "table": "alert_routes",
+        "privileges": [
+          "INSERT",
+          "DELETE"
+        ],
+        "neededBy": "PUT /routing \u2014 per-dimension replace (ExecuteDelete + AddRange)"
+      },
+      {
+        "table": "audit_log",
+        "privileges": [
+          "INSERT"
+        ],
+        "neededBy": "the authz/audit envelope writes one row per authorized mutation"
+      },
+      {
+        "table": "channels",
+        "privileges": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ],
+        "neededBy": "channel CRUD (create / edit / delete)"
+      },
+      {
+        "table": "check_locations",
+        "privileges": [
+          "INSERT",
+          "DELETE"
+        ],
+        "neededBy": "PUT /checks/{id}/locations \u2014 assign/de-assign; create-check seeding"
+      },
+      {
+        "table": "check_tags",
+        "privileges": [
+          "INSERT",
+          "DELETE"
+        ],
+        "neededBy": "PUT /checks/{id}/tags \u2014 replace tags"
+      },
+      {
+        "table": "env_domain_map",
+        "privileges": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ],
+        "neededBy": "POST/PUT/DELETE /api/env-domain-map (env PR-3 map management page). GRANT in runner migration 0075."
+      },
+      {
+        "table": "checks",
+        "privileges": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ],
+        "neededBy": "create / PATCH / delete check; reconcile-apply materialize"
+      },
+      {
+        "table": "editors",
+        "privileges": [
+          "INSERT",
+          "DELETE"
+        ],
+        "neededBy": "edit-access editor add/remove"
+      },
+      {
+        "table": "otp_codes",
+        "privileges": [
+          "INSERT",
+          "UPDATE"
+        ],
+        "neededBy": "OTP sign-in \u2014 issue + consume"
+      },
+      {
+        "table": "reconcile_apply_plan",
+        "privileges": [
+          "UPDATE"
+        ],
+        "neededBy": "POST /reconcile/approve|reject|apply (approve-500)"
+      },
+      {
+        "table": "run_requests",
+        "privileges": [
+          "INSERT"
+        ],
+        "neededBy": "POST /checks/{id}/run \u2014 enqueue an on-demand run"
+      },
+      {
+        "table": "sessions",
+        "privileges": [
+          "INSERT",
+          "UPDATE"
+        ],
+        "neededBy": "auth session create + refresh"
+      },
+      {
+        "table": "tag_routes",
+        "privileges": [
+          "INSERT",
+          "DELETE"
+        ],
+        "neededBy": "PUT /routing \u2014 tag-rule replace (ExecuteDelete + AddRange)"
+      },
+      {
+        "table": "test_send_requests",
+        "privileges": [
+          "INSERT"
+        ],
+        "neededBy": "POST channel test-send"
+      }
     ],
     "opsBaseline": {
       "$comment": [
-        "WRITE grants applied at role setup (Azure ops), NOT via a repo migration — so the migration parse",
+        "WRITE grants applied at role setup (Azure ops), NOT via a repo migration \u2014 so the migration parse",
         "can't see them and would false-fail without this list. Verified against the live DB on 2026-07-01:",
         "  SELECT table_name, string_agg(privilege_type,',') FROM information_schema.role_table_grants",
         "  WHERE grantee='synthwatch-api' GROUP BY 1;",
         "`checks` is the only API-write table granted out-of-band (every other write table is migration-granted).",
         "Re-verify + update this if the bootstrap grants ever change."
       ],
-      "checks": ["INSERT", "UPDATE", "DELETE"]
+      "checks": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ]
     }
   }
 }

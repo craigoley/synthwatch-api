@@ -2641,6 +2641,95 @@ public class IntegrationTests
     }
 
     [SkippableFact]
+    public async Task Env_domain_map_crud_creates_updates_deletes_and_validates()
+    {
+        // env PR-3: POST/PUT/DELETE manage rules; validation rejects a regex-y pattern / bad env.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        var fn = new EnvDomainMapFunctions(db);
+        long id = 0;
+        try
+        {
+            // CREATE (201 ObjectResult)
+            var createdResult = Assert.IsType<ObjectResult>(
+                await fn.CreateEnvDomainRule(JsonRequest(new { pattern = "crud.staging.example", environment = "staging", priority = 150 }), default));
+            Assert.Equal(201, createdResult.StatusCode);
+            var created = Assert.IsType<EnvDomainRuleDto>(createdResult.Value!);
+            id = created.Id;
+            Assert.Equal("crud.staging.example", created.Pattern);
+            Assert.Equal("staging", created.Environment);
+
+            // A regex-y / invalid pattern is rejected (predictable config, not a footgun).
+            Assert.IsType<BadRequestObjectResult>(
+                await fn.CreateEnvDomainRule(JsonRequest(new { pattern = "^.*staging.*$", environment = "staging" }), default));
+            // A bad environment is rejected.
+            Assert.IsType<BadRequestObjectResult>(
+                await fn.CreateEnvDomainRule(JsonRequest(new { pattern = "ok.example", environment = "prod-ish" }), default));
+
+            // UPDATE (replace env + priority).
+            var updated = Assert.IsType<EnvDomainRuleDto>(Assert.IsType<OkObjectResult>(
+                await fn.UpdateEnvDomainRule(JsonRequest(new { pattern = "crud.staging.example", environment = "dev", priority = 50 }), id, default)).Value!);
+            Assert.Equal("dev", updated.Environment);
+            Assert.Equal(50, updated.Priority);
+
+            // DELETE → 204, then a re-delete is 404.
+            Assert.IsType<NoContentResult>(await fn.DeleteEnvDomainRule(Request(), id, default));
+            Assert.IsType<NotFoundObjectResult>(await fn.DeleteEnvDomainRule(Request(), id, default));
+            id = 0;
+        }
+        finally
+        {
+            if (id != 0) await db.Database.ExecuteSqlRawAsync($"DELETE FROM env_domain_map WHERE id = {id};");
+        }
+    }
+
+    [SkippableFact]
+    public async Task Set_check_environment_override_sets_and_clears_without_touching_environment()
+    {
+        // ★ env PR-3 load-bearing: PUT /checks/{id}/environment writes ONLY environment_override, never the
+        // git-authoritative `environment`. The effective env = override ?? environment.
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO checks (name, kind, target_url, environment) VALUES ('env-ovr-test','http','https://x','prod');");
+        var id = await db.Checks.Where(c => c.Name == "env-ovr-test").Select(c => c.Id).FirstAsync();
+        var fn = new ChecksFunctions(db);
+        try
+        {
+            // SET override to staging.
+            var dto = Assert.IsType<CheckDetailDto>(Assert.IsType<OkObjectResult>(
+                await fn.SetCheckEnvironmentOverride(JsonRequest(new { environmentOverride = "staging" }), id, default)).Value!);
+            Assert.Equal("prod", dto.Environment);              // the git env is UNTOUCHED
+            Assert.Equal("staging", dto.EnvironmentOverride);
+            Assert.Equal("staging", dto.EffectiveEnvironment);
+            Assert.Equal("override", dto.EnvironmentSource);
+
+            // Persisted: environment_override=staging, environment STILL 'prod'.
+            await using (var db2 = _pg.NewDbContext())
+            {
+                var row = await db2.Checks.AsNoTracking().FirstAsync(c => c.Id == id);
+                Assert.Equal("staging", row.EnvironmentOverride);
+                Assert.Equal("prod", row.Environment);
+            }
+
+            // An invalid override value is rejected (400).
+            Assert.IsType<BadRequestObjectResult>(
+                await fn.SetCheckEnvironmentOverride(JsonRequest(new { environmentOverride = "qa" }), id, default));
+
+            // CLEAR the override (null) → reverts to derived; effective = 'prod'.
+            var cleared = Assert.IsType<CheckDetailDto>(Assert.IsType<OkObjectResult>(
+                await fn.SetCheckEnvironmentOverride(JsonRequest(new { environmentOverride = (string?)null }), id, default)).Value!);
+            Assert.Null(cleared.EnvironmentOverride);
+            Assert.Equal("prod", cleared.EffectiveEnvironment);
+            Assert.Equal("derived", cleared.EnvironmentSource);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'env-ovr-test';");
+        }
+    }
+
+    [SkippableFact]
     public async Task Channel_crud_and_config_validation()
     {
         RequireDocker();
