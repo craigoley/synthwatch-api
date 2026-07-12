@@ -4597,13 +4597,13 @@ public class IntegrationTests
             DECLARE ca bigint; cs bigint; rf bigint; rc bigint;
             BEGIN
               -- (1) AWAITING: a healthy check whose latest run FAILED and a confirmation is pending.
-              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-cfm-awaiting','browser','https://cfma.ex','critical') RETURNING id INTO ca;
+              INSERT INTO checks (name, kind, target_url, severity, flow_name) VALUES ('st-cfm-awaiting','browser','https://cfma.ex','critical','noop') RETURNING id INTO ca;
               INSERT INTO check_tags (check_id, key, value) VALUES (ca,'area','st-cfm-awaiting');
               INSERT INTO runs (check_id,status,started_at) VALUES (ca,'pass', now()-interval '10 minutes');
               INSERT INTO runs (check_id,status,started_at) VALUES (ca,'fail', now());  -- awaiting original (latest)
               INSERT INTO run_requests (check_id, confirmation, status) VALUES (ca, true, 'pending');
               -- (2) SUPERSEDED: a transient fail whose confirmation PASSED (the confirmation is the newest run).
-              INSERT INTO checks (name, kind, target_url, severity) VALUES ('st-cfm-super','browser','https://cfms.ex','critical') RETURNING id INTO cs;
+              INSERT INTO checks (name, kind, target_url, severity, flow_name) VALUES ('st-cfm-super','browser','https://cfms.ex','critical','noop') RETURNING id INTO cs;
               INSERT INTO check_tags (check_id, key, value) VALUES (cs,'area','st-cfm-super');
               INSERT INTO runs (check_id,status,started_at) VALUES (cs,'fail', now()-interval '3 minutes') RETURNING id INTO rf;
               INSERT INTO runs (check_id,status,started_at,confirmation_of_run_id) VALUES (cs,'pass', now()-interval '2 minutes', rf) RETURNING id INTO rc;
@@ -4637,7 +4637,7 @@ public class IntegrationTests
             DO $$
             DECLARE cid bigint; rc bigint;
             BEGIN
-              INSERT INTO checks (name, kind, target_url, slo_target) VALUES ('cfm-slo','browser','https://cfmslo.ex', 0.99) RETURNING id INTO cid;
+              INSERT INTO checks (name, kind, target_url, slo_target, flow_name) VALUES ('cfm-slo','browser','https://cfmslo.ex', 0.99, 'noop') RETURNING id INTO cid;
               INSERT INTO runs (check_id,status,started_at) VALUES (cid,'pass', now()-interval '5 minutes') RETURNING id INTO rc;
               -- a transient fail, superseded by the passing confirmation → excluded from down_runs
               INSERT INTO runs (check_id,status,started_at,superseded_by_run_id) VALUES (cid,'fail', now()-interval '6 minutes', rc);
