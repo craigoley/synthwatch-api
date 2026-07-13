@@ -96,6 +96,27 @@ public static class AuthEmailTemplates
         "</table></td></tr></table></body></html>";
 
     // Bulletproof button (table-cell <a> with padding + bg) — omitted when there's no dashboard URL.
+    /// <summary>★ Gap-1 digest: when access requests exceed the global hourly notify cap (an email-bomb, or a
+    /// genuine onboarding surge), admins get ONE digest with a count + a link to the Users page — instead of N
+    /// individual emails. Every request is still recorded + reviewable there; the attack degrades the
+    /// NOTIFICATION channel, not the ACCESS channel.</summary>
+    public static Email AccessRequestDigest(long countLastHour, string? dashboardUrl)
+    {
+        var body =
+            $"<div style=\"color:{Ink};font-size:15px;line-height:1.5;margin-bottom:16px\">There have been <strong>{countLastHour}</strong> edit-access requests to SynthWatch in the last hour — more than the per-hour notification cap, so individual emails were suppressed and collapsed into this one digest.</div>" +
+            Button("Review requests in Users", dashboardUrl) +
+            $"<div style=\"color:{Muted};font-size:13px;line-height:1.5;margin-top:18px\">Every request is recorded and reviewable on the Users page. If this volume is unexpected it may be an email-bomb attempt — the requests are safely captured, not lost.</div>";
+
+        var cta = string.IsNullOrWhiteSpace(dashboardUrl) ? "" : $"\nReview requests in Users: {UsersUrl(dashboardUrl)}";
+        var text =
+            $"[SynthWatch] {countLastHour} edit-access requests in the last hour\n\n" +
+            $"There have been {countLastHour} edit-access requests in the last hour — more than the per-hour cap, so individual emails were suppressed and collapsed into this digest. " +
+            "Every request is recorded and reviewable on the Users page." + cta;
+
+        return new Email($"SynthWatch — {countLastHour} access requests in the last hour",
+            Shell("Access requests", $"{countLastHour} requests in the last hour", body), text);
+    }
+
     private static string Button(string label, string? dashboardUrl)
     {
         if (string.IsNullOrWhiteSpace(dashboardUrl))

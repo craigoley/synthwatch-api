@@ -38,7 +38,23 @@ public class AuthFunctions
     private static readonly TimeSpan CodeRateWindow = TimeSpan.FromMinutes(15);
     private const int MaxCodesPerWindow = 5;
     private static readonly TimeSpan AccessRateWindow = TimeSpan.FromHours(24);
-    private const int MaxAccessPerWindow = 3;
+    private const int MaxAccessPerWindow = 3; // per-EMAIL RECORDING cap (one email can't flood the ledger)
+
+    // ★ Gap-1 email-bomb defense. request-access fans a notification out to every admin, so an attacker
+    // VARYING THE EMAIL (bypassing the per-email cap) could bomb the admin inboxes. Three layers, none of
+    // which reveals anything to the requester (the response is byte-identical in every branch):
+    //   • GLOBAL hourly notify cap — THE REAL FIX. At most this many request-access NOTIFICATIONS per rolling
+    //     hour, TOTAL, regardless of source. Beyond it the individual email is suppressed and admins get ONE
+    //     digest. Sized generously: legitimate access requests are rare (a handful a week); 10/hour leaves room
+    //     for a batch onboarding while turning a 100-email bomb into ≤10 emails + 1 digest. Does NOT depend on
+    //     the IP — which is worthless as a discriminator when EVERY legit Wegmans user shares one egress IP.
+    public const int GlobalNotifyCapPerHour = 10;
+    private static readonly TimeSpan GlobalNotifyWindow = TimeSpan.FromHours(1);
+    //   • Per-IP cap — a BLAST-RADIUS limiter for the lazy case ONLY, NOT a real defense: X-Forwarded-For's
+    //     leftmost hop is client-controllable (see ClientIp) → SPOOFABLE, and the shared corporate egress means
+    //     a cap tight enough to stop a bomb would lock out the whole company. 100/24h: a whole floor of Wegmans
+    //     employees onboarding from the shared IP never hits it; a single un-rotated script does. Claims nothing more.
+    public const int PerIpAccessCapPerDay = 100;
 
     private const string CodeSentMessage = "If your email is registered, a sign-in code has been sent.";
     private const string AccessMessage = "If your request is valid, an admin will review it.";
@@ -175,9 +191,11 @@ public class AuthFunctions
 
     /// <summary>
     /// POST /api/auth/request-access { email } — ENUMERATION-SAFE access request. ALWAYS the same response,
-    /// regardless of whether the email is unknown / already an editor / an admin — never reveals status.
-    /// Records the request (admin visibility) and notifies ADMIN_EMAILS. Rate-limited per email (it pages
-    /// admins — an email-bomb vector).
+    /// regardless of whether the email is unknown / already an editor / an admin, and regardless of whether the
+    /// notification was emailed, digested, deduped, or rate-limited — never reveals status (a distinguishable
+    /// reply would be a probing oracle AND a new dead-end: "my request went nowhere and nobody told me").
+    /// Records the request (admin visibility); notifies ADMIN_EMAILS under an email-bomb-resistant policy
+    /// (<see cref="DecideAccessNotify"/>).
     /// </summary>
     [Function("AuthRequestAccess")]
     public async Task<IActionResult> RequestAccess(
@@ -188,18 +206,62 @@ public class AuthFunctions
             return ApiResults.BadRequest("A valid email is required.");
 
         var now = DateTimeOffset.UtcNow;
-        var recent = await _db.AccessRequests.CountAsync(a => a.Email == email && a.RequestedAt > now - AccessRateWindow, ct);
-        if (recent >= MaxAccessPerWindow)
-            return ApiResults.Ok(new MessageDto(AccessMessage)); // silent rate-limit (uniform response)
+        var ip = ClientIp(req);
 
-        _db.AccessRequests.Add(new AccessRequest { Email = email, RequestIp = ClientIp(req) });
+        // Per-EMAIL RECORDING cap: one email can't flood the ledger. Over it → uniform 200, no record, no email
+        // (a same-email repeat is already captured + already notified via the first request's dedupe below).
+        var perEmail = await _db.AccessRequests.CountAsync(a => a.Email == email && a.RequestedAt > now - AccessRateWindow, ct);
+        if (perEmail >= MaxAccessPerWindow)
+            return ApiResults.Ok(new MessageDto(AccessMessage));
+
+        // ★ ALWAYS record every distinct request — nobody's request is silently lost (that would be the
+        // dead-end all over again, in a new place). Recorded BEFORE the counts so they include this request.
+        _db.AccessRequests.Add(new AccessRequest { Email = email, RequestIp = ip });
         await _db.SaveChangesAsync(ct);
 
-        // Notify each admin (few). Uniform response regardless of send outcome.
-        foreach (var admin in AdminEmails())
-            await TrySendAsync(admin, AuthEmailTemplates.AccessRequest(email, DashboardUrl()), ct);
+        // The three inputs to the notify policy (all over the indexed access_requests table).
+        var priorSameEmail = perEmail > 0; // an earlier request from THIS email in the window → dedupe
+        var perIpCount = ip is null ? 0 : await _db.AccessRequests.CountAsync(a => a.RequestIp == ip && a.RequestedAt > now - AccessRateWindow, ct);
+        var hourlyCount = await _db.AccessRequests.CountAsync(a => a.RequestedAt > now - GlobalNotifyWindow, ct);
 
-        return ApiResults.Ok(new MessageDto(AccessMessage));
+        switch (DecideAccessNotify(priorSameEmail, perIpCount, ip is not null, hourlyCount))
+        {
+            case AccessNotify.Individual:
+                foreach (var admin in AdminEmails())
+                    await TrySendAsync(admin, AuthEmailTemplates.AccessRequest(email, DashboardUrl()), ct);
+                break;
+            case AccessNotify.Digest:
+                // ★ THE BOMB BECOMES A DIGEST LINK: one digest to the admins instead of N individual emails.
+                foreach (var admin in AdminEmails())
+                    await TrySendAsync(admin, AuthEmailTemplates.AccessRequestDigest(hourlyCount, DashboardUrl()), ct);
+                break;
+            case AccessNotify.Suppress:
+                break; // recorded + reviewable on the Users page; no email (deduped / over a cap)
+        }
+
+        return ApiResults.Ok(new MessageDto(AccessMessage)); // ★ BYTE-IDENTICAL across every branch above
+    }
+
+    /// <summary>What to do with the admin notification for a just-recorded access request — the pure, testable
+    /// email-bomb policy. The requester's HTTP response is byte-identical regardless of the verdict.
+    ///   • <c>Individual</c> — a fresh request, under both the per-IP blast-radius cap and the global hourly cap.
+    ///   • <c>Digest</c>     — the exact moment the global hourly cap is CROSSED (hourlyCount == cap + 1): send
+    ///                         ONE digest, stateless (no per-digest state column — access_requests is runner-owned).
+    ///   • <c>Suppress</c>   — a same-email dedupe, an over-IP request, or beyond the crossing: recorded, no email.
+    /// ★ Only the GLOBAL cap is a real defense (the per-IP source is spoofable + shared); it needs no IP at all.</summary>
+    public enum AccessNotify { Individual, Digest, Suppress }
+
+    public static AccessNotify DecideAccessNotify(bool priorSameEmailInWindow, long perIpCountInDay, bool ipKnown, long hourlyCount)
+    {
+        var overGlobal = hourlyCount > GlobalNotifyCapPerHour;
+        var overIp = ipKnown && perIpCountInDay > PerIpAccessCapPerDay;
+        if (!priorSameEmailInWindow && !overIp && !overGlobal)
+            return AccessNotify.Individual;
+        // Over the global cap → ONE digest, fired exactly at the crossing (stateless). Under a sustained bomb
+        // hourlyCount climbs monotonically within the hour, so the digest fires once; the rest are suppressed.
+        if (overGlobal && hourlyCount == GlobalNotifyCapPerHour + 1)
+            return AccessNotify.Digest;
+        return AccessNotify.Suppress;
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
