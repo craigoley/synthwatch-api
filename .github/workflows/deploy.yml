@@ -118,6 +118,27 @@ jobs:
             echo "- CORS origins now: $(az functionapp cors show -g "$RG" -n "$APP" --query "join(', ', allowedOrigins)" -o tsv 2>/dev/null || echo '(read failed)')"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # ★ Assert the auth boundary's admin list can't ship WIPED. ADMIN_EMAILS is the API's SOLE source of
+      # admin identity; it lives out-of-band and the CD never applies its bicep param (default ''), so a manual
+      # bicep apply could set it to '' and lock out EVERY admin — and NOTHING else catches it (the WARN drift
+      # check above watches names, not emptiness; the runner's verify() never touches the API). Unlike that
+      # additive/warn reconcile, this is a BLOCKING guard: an empty ADMIN_EMAILS FAILS the deploy (NOT
+      # continue-on-error). But a TRANSIENT az read still only warns — a "confirmed wiped" fails, a "couldn't
+      # check" doesn't block. ★★ NEVER logs the value (real employee emails) — assert-admin-emails.sh prints
+      # only the entry COUNT.
+      - name: Assert ADMIN_EMAILS is set (auth boundary — fail loud, never log the value)
+        env:
+          RG: synthwatch-rg
+        run: |
+          set -uo pipefail
+          APP="$AZURE_FUNCTIONAPP_NAME"
+          if ! val="$(az functionapp config appsettings list -g "$RG" -n "$APP" \
+                        --query "[?name=='ADMIN_EMAILS'].value | [0]" -o tsv 2>/dev/null)"; then
+            echo "::warning::could not read ADMIN_EMAILS (transient Azure error) — skipping the wipe assertion this run."
+            exit 0
+          fi
+          ADMIN_EMAILS="$val" bash scripts/assert-admin-emails.sh
+
       # functions-action uses the azure/login (RBAC) session — no publish profile/secret.
       # v1.5.x supports Flex Consumption + dotnet-isolated.
       - name: Deploy to Azure Functions

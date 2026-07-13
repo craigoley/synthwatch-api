@@ -43,7 +43,14 @@ param maximumInstanceCount int = 40
 @allowed([512, 2048, 4096])
 param instanceMemoryMB int = 2048
 
-@description('Phase 12 auth — comma-separated admin emails. ★ The API enforces ADMIN from THIS setting (not the dashboard Vercel env), so admins are recognized + cannot be locked out. Empty = no admins until set.')
+// ★★ TRAP — READ BEFORE YOU DEPLOY THIS BICEP. This param is NEVER applied by the CD (`.github/workflows/
+// deploy.yml` is a code-only functions-action push; it does NOT run `az deployment group create`). ADMIN_EMAILS
+// — the API's SOLE source of admin identity — is set OUT-OF-BAND (`az functionapp config appsettings set …
+// --settings ADMIN_EMAILS=…`). A manual `az deployment group create` of this template WITHOUT `-p adminEmails=…`
+// applies this default ('') and WIPES ADMIN_EMAILS, LOCKING OUT EVERY ADMIN. Always pass the live value
+// (`az functionapp config appsettings list … --query "[?name=='ADMIN_EMAILS'].value" -o tsv`) when applying
+// this bicep. A deploy guard (scripts/assert-admin-emails.sh, wired into deploy.yml) fails loud on an empty list.
+@description('Phase 12 auth — comma-separated admin emails. ★ The API enforces ADMIN from THIS setting (not the dashboard Vercel env), so admins are recognized + cannot be locked out. Empty = no admins until set. ★ NOT applied by the CD (set out-of-band) — a bicep apply without -p adminEmails=… WIPES it; see the trap comment above.')
 param adminEmails string = ''
 
 @description('Phase 12 auth — the ACS sender for OTP / access-request emails. The API reads THIS (AuthFunctions/AcsEmailSender → AUTH_EMAIL_FROM) as the message senderAddress (the From: header). NON-secret (a property of the ACS-owned managed domain); committed so a redeploy can\'t blank it. Value = the Verified fromSenderDomain on synthwatch-email (donotreply@<guid>.azurecomm.net) — identical to the runner\'s ALERT_EMAIL_FROM, which is proven to deliver. ★ NOTE (corrects #83): delivered mail shows a "<guid>.us3.azurecomm.net" Return-Path / mailed-by — that is ACS\'s REGIONAL envelope domain for the unitedstates data location, NOT this senderAddress and NOT a value to set here (it appears regardless of AUTH_EMAIL_FROM, for the runner too). The actual problem is SPAM placement (shared azurecomm.net reputation) — fix with a custom verified domain + SPF/DKIM/DMARC (follow-up), not by changing this address.')

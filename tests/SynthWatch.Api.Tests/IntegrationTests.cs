@@ -4449,6 +4449,124 @@ public class IntegrationTests
         }
     }
 
+    // ★ Gap-1 pure policy (no Docker): the email-bomb decision boundaries the admin-notification cap enforces.
+    // ★ Includes the shared-egress proof: the per-IP cap does NOT trip for a plausible Wegmans burst (100 from
+    // one IP is fine; only 101 trips) — because every legit user shares one egress IP, the IP is blast-radius only.
+    [Fact]
+    public void Auth_access_notify_policy_boundaries_including_shared_egress()
+    {
+        const int N = AuthFunctions.GlobalNotifyCapPerHour;  // 10
+        const int Ip = AuthFunctions.PerIpAccessCapPerDay;   // 100
+        static AuthFunctions.AccessNotify D(bool prior, long perIp, bool ipKnown, long hourly) =>
+            AuthFunctions.DecideAccessNotify(prior, perIp, ipKnown, hourly);
+
+        // fresh, under both caps → an individual notification.
+        Assert.Equal(AuthFunctions.AccessNotify.Individual, D(false, 1, true, 1));
+
+        // GLOBAL cap: hourly == N still individual; == N+1 is the CROSSING → one digest; beyond → suppress.
+        Assert.Equal(AuthFunctions.AccessNotify.Individual, D(false, 1, true, N));
+        Assert.Equal(AuthFunctions.AccessNotify.Digest,     D(false, 1, true, N + 1));
+        Assert.Equal(AuthFunctions.AccessNotify.Suppress,   D(false, 1, true, N + 2));
+
+        // DEDUPE: a prior request from the same email in the window → no 2nd email (suppressed), even under caps.
+        Assert.Equal(AuthFunctions.AccessNotify.Suppress,   D(true, 1, true, 1));
+
+        // ★★ SHARED-EGRESS: the per-IP cap must NOT punish a floor of Wegmans users behind one IP. At the cap
+        //    (100) → still individual; only 101 trips it (blast-radius for a single un-rotated script).
+        Assert.Equal(AuthFunctions.AccessNotify.Individual, D(false, Ip, true, 1));
+        Assert.Equal(AuthFunctions.AccessNotify.Suppress,   D(false, Ip + 1, true, 1));
+        // an unknown IP (null) never trips the per-IP cap (can't punish a missing/absent source).
+        Assert.Equal(AuthFunctions.AccessNotify.Individual, D(false, 0, false, 1));
+
+        // the GLOBAL overflow dominates: the crossing digest fires even if the request is ALSO a dedupe/over-IP.
+        Assert.Equal(AuthFunctions.AccessNotify.Digest,     D(true, Ip + 5, true, N + 1));
+    }
+
+    // ★★ Gap-1 MUST-GO-RED (the bomb): N+2 request-access calls with DIFFERENT emails in one hour → the first N
+    // send individual admin emails, the (N+1)th CROSSES the global cap → ONE digest, the (N+2)th is suppressed.
+    // ★ EVERY request is still recorded (nobody's request lost). Removing the global cap makes this FAIL
+    // (every call would send an individual email and no digest would exist).
+    [SkippableFact]
+    public async Task Auth_request_access_email_bomb_collapses_to_a_digest_and_records_all()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "boss@bomb.test");
+        await using var db = _pg.NewDbContext();
+        var email = new FakeEmailSender();
+        var fn = new AuthFunctions(db, email, NullLogger<AuthFunctions>.Instance);
+        const int N = AuthFunctions.GlobalNotifyCapPerHour;
+        try
+        {
+            for (var i = 0; i < N + 2; i++)
+                await fn.RequestAccess(JsonRequest(new { email = $"bomber{i}@bomb.test" }), default);
+
+            var individual = email.Sent.Count(s => s.Subject.Contains("edit-access request"));
+            var digest = email.Sent.Count(s => s.Subject.Contains("access requests in the last hour"));
+            Assert.Equal(N, individual);   // the bomb did NOT send N+2 individual emails…
+            Assert.Equal(1, digest);       // …it collapsed to ONE digest at the crossing.
+
+            await using var dbr = _pg.NewDbContext();
+            Assert.Equal(N + 2, await dbr.AccessRequests.AsNoTracking()
+                .CountAsync(a => a.Email.EndsWith("@bomb.test"))); // ★ every request recorded — none lost
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+            await using var cleanup = _pg.NewDbContext();
+            await cleanup.Database.ExecuteSqlRawAsync("DELETE FROM access_requests WHERE email LIKE '%@bomb.test';");
+        }
+    }
+
+    // ★★★ THE UNIFORM-RESPONSE PROOF: an EMAILED, a DEDUPED, a DIGESTED, a SUPPRESSED, and a per-email
+    // RATE-LIMITED request ALL return the BYTE-IDENTICAL response (status + body). A distinguishable reply
+    // would be a probing oracle AND a new dead-end. Fails if any branch ever diverges. (Composes with
+    // e2e/auth.spec.ts:186 in the dashboard — known vs unknown byte-identical.)
+    [SkippableFact]
+    public async Task Auth_request_access_response_is_byte_identical_across_every_notify_path()
+    {
+        RequireDocker();
+        Environment.SetEnvironmentVariable("ADMIN_EMAILS", "boss@uni.test");
+        await using var db = _pg.NewDbContext();
+        var email = new FakeEmailSender();
+        var fn = new AuthFunctions(db, email, NullLogger<AuthFunctions>.Instance);
+        const int N = AuthFunctions.GlobalNotifyCapPerHour;
+        static int Status(IActionResult r) => Assert.IsType<OkObjectResult>(r).StatusCode ?? 200;
+        static string Body(IActionResult r) =>
+            JsonSerializer.Serialize(Assert.IsType<MessageDto>(Assert.IsType<OkObjectResult>(r).Value!));
+        try
+        {
+            var responses = new List<IActionResult>
+            {
+                await fn.RequestAccess(JsonRequest(new { email = "a@uni.test" }), default), // EMAILED (fresh)
+                await fn.RequestAccess(JsonRequest(new { email = "a@uni.test" }), default), // DEDUPED (same email)
+            };
+            // Drive the hour past the global cap with distinct emails → spans INDIVIDUAL → DIGEST (crossing) → SUPPRESS.
+            for (var i = 0; i < N + 3; i++)
+                responses.Add(await fn.RequestAccess(JsonRequest(new { email = $"f{i}@uni.test" }), default));
+            // a@uni.test again → hits the per-email RECORDING cap (3/24h) → the early uniform return path.
+            for (var i = 0; i < 3; i++)
+                responses.Add(await fn.RequestAccess(JsonRequest(new { email = "a@uni.test" }), default));
+
+            var s0 = Status(responses[0]);
+            var b0 = Body(responses[0]);
+            foreach (var r in responses)
+            {
+                Assert.Equal(s0, Status(r));   // identical status…
+                Assert.Equal(b0, Body(r));     // …and byte-identical body across ALL paths
+            }
+
+            // …and confirm the paths were actually exercised (an emailed AND a digest actually fired).
+            Assert.Contains(email.Sent, s => s.Subject.Contains("edit-access request"));
+            Assert.Contains(email.Sent, s => s.Subject.Contains("access requests in the last hour"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ADMIN_EMAILS", null);
+            await using var cleanup = _pg.NewDbContext();
+            await cleanup.Database.ExecuteSqlRawAsync("DELETE FROM access_requests WHERE email LIKE '%@uni.test';");
+        }
+    }
+
     // ─── Phase 12 slice 3 — editor (user) management, admin-only ────────────────────────────────────
 
     private static HttpRequest AuthReq(string? token = null)
