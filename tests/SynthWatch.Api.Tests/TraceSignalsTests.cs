@@ -83,7 +83,32 @@ public class TraceSignalsTests
             "{\"type\":\"console\",\"messageType\":\"error\",\"text\":\"distinct site error number " + i +
             "\",\"location\":{\"url\":\"https://www.wegmans.com/p" + i + "\"}}");
         var c = TraceExtractor.ExtractConsole(S(string.Join('\n', lines)), Target);
-        Assert.True(c.Messages.Count <= 40, $"expected ≤40 kept, got {c.Messages.Count}");
+        Assert.True(c.Messages.Count <= 80, $"expected ≤80 kept, got {c.Messages.Count}");
+    }
+
+    // ★★ MUST-GO-RED (parity with the runner's traceSignals.test.ts): the capture drop-policy ranks by
+    // FIRST-PARTY-NESS before severity, so at the cap THIRD-PARTY is dropped FIRST and first-party — INCLUDING
+    // first-party WARNINGS — survives. Reverting to the old severity-dominant order (third-party errors above
+    // first-party warnings) makes DroppedFirstParty > 0, failing this.
+    [Fact]
+    public void Console_drop_policy_drops_third_party_before_first_party_at_the_cap()
+    {
+        var fpErrors = Enumerable.Range(0, 10).Select(i =>
+            "{\"type\":\"console\",\"messageType\":\"error\",\"text\":\"first-party API error " + i +
+            "\",\"location\":{\"url\":\"https://www.wegmans.com/x" + i + "\"}}");
+        var fpWarnings = Enumerable.Range(0, 50).Select(i =>
+            "{\"type\":\"console\",\"messageType\":\"warning\",\"text\":\"first-party warning " + i +
+            "\",\"location\":{\"url\":\"https://www.wegmans.com/w" + i + "\"}}");
+        var tpErrors = Enumerable.Range(0, 50).Select(i =>
+            "{\"type\":\"console\",\"messageType\":\"error\",\"text\":\"doubleclick tracker error " + i +
+            "\",\"location\":{\"url\":\"https://ad.doubleclick.net/t" + i + "\"}}");
+        var c = TraceExtractor.ExtractConsole(
+            S(string.Join('\n', fpErrors.Concat(fpWarnings).Concat(tpErrors))), Target);
+        Assert.Equal(80, c.Messages.Count);
+        Assert.Equal(60, c.Messages.Count(m => m.Origin == "site"));  // every first-party (10 err + 50 warn) survives
+        Assert.Equal(30, c.DroppedError);
+        Assert.Equal(30, c.DroppedThirdParty);
+        Assert.Equal(0, c.DroppedFirstParty);                        // ← reverting the ranking flips this to 30
     }
 
     // ── Error-diff P1: resource-host classification (console) ────────────────────────────────────────────

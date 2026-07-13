@@ -39,7 +39,10 @@ public static partial class TraceExtractor
     private const int UncompressedMinBytes = 30_000;
     // ★ Hard cap on console messages so a pathological trace (hundreds of distinct site errors) can't blow the
     // downstream AOAI token budget. The network lists are already top-N bounded; this was the one unbounded list.
-    private const int MaxConsoleMessages = 40;
+    // Sized from the real distribution of the worst offender (check 355, the full-shop-flow): first-party
+    // (error+warning) peaks at ~37/run, so 80 keeps every first-party message with >2× headroom while still
+    // capturing a healthy third-party slice. MUST equal the runner's MAX_CONSOLE_MESSAGES (traceSignals.ts).
+    private const int MaxConsoleMessages = 80;
 
     /// <summary>Open the trace zip + extract both sections. Non-fatal: a bad zip / missing entries → empty.</summary>
     public static TraceSignalsDto FromZip(Stream zip, string? targetHost)
@@ -198,16 +201,24 @@ public static partial class TraceExtractor
                     Text: text.Length > 200 ? text[..200] : text));
             }
         }
-        // Bound the list, keeping the most relevant: the site's own errors/pageerrors first, then warnings/
-        // third-party. OrderBy is stable, so first-seen order is preserved within each priority tier. `kept`
-        // holds ONLY error/warning/pageerror (info was excluded up front), so an error is never dropped for an
-        // info log; DroppedError records how many of these preserved messages the cap still truncated (visible).
-        var bounded = kept
-            .OrderByDescending(m => m.Level == "error" || m.Level == "pageerror")
-            .ThenByDescending(m => m.Origin == "site")
-            .Take(MaxConsoleMessages)
+        // Bound the list, ranking by FIRST-PARTY-NESS FIRST, then by severity — so the cap is spent on the
+        // errors a Wegmans monitor actually cares about and tracker noise (doubleclick/emplifi/rlcdn) is dropped
+        // BEFORE a wegmans.com / *.wegmans.cloud message. Strict order:
+        //   first-party error/pageerror > first-party warning > third-party error/pageerror > third-party warning
+        // OrderBy is stable, so first-seen order is preserved within each tier. info/log was excluded up front.
+        // MUST mirror the runner's extractConsole score (traceSignals.ts) — the shared golden fixture guards it.
+        var ranked = kept
+            .OrderByDescending(m => m.Origin == "site")                            // first-party first (high bit)
+            .ThenByDescending(m => m.Level == "error" || m.Level == "pageerror")   // then severity (low bit)
             .ToList();
-        return new ConsoleSummaryDto(bounded, droppedLevel, droppedExt, kept.Count - bounded.Count);
+        var bounded = ranked.Take(MaxConsoleMessages).ToList();
+        var dropped = ranked.Skip(MaxConsoleMessages).ToList();
+        // Split the truncation by owner: because third-party ranks below all first-party, DroppedFirstParty > 0
+        // ONLY once every third-party is gone AND first-party alone overflows the cap — the only case that
+        // threatens the diff. Lets the panel say "N third-party dropped — first-party complete" vs stay LOUD.
+        var droppedThirdParty = dropped.Count(m => m.Origin == "third-party");
+        return new ConsoleSummaryDto(
+            bounded, droppedLevel, droppedExt, dropped.Count, droppedThirdParty, dropped.Count - droppedThirdParty);
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────

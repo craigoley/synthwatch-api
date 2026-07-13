@@ -27,7 +27,13 @@ public sealed record ErrorDiffDto(
     // are REMOVED from New (so the panel stays must-go-red for real regressions) and surfaced HERE instead — the
     // UI shows a collapsed "N muted" disclosure with an unmute action. A muted error that is instead PERSISTENT
     // stays in Persistent (mute only intercepts the would-be-NEW signal). Default [] (no mutes / older callers).
-    IReadOnlyList<ErrorItemDto>? Muted = null);
+    IReadOnlyList<ErrorItemDto>? Muted = null,
+    // ★ TRUNCATION, BY CLASS (makes `Truncated` informative instead of just scary). FirstPartyTruncated = the
+    // cap dropped a FIRST-PARTY message on this run or a baseline — the diff may have lost real signal, so the
+    // UI stays LOUD. When Truncated but NOT FirstPartyTruncated, only tracker noise was dropped and the UI can
+    // say "N third-party dropped — first-party capture is complete" (DroppedThirdParty = the target run's count).
+    bool FirstPartyTruncated = false,
+    int DroppedThirdParty = 0);
 
 /// <summary>One error in the diff — a stable per-error identity + its classification and severity.</summary>
 public sealed record ErrorItemDto(

@@ -48,7 +48,12 @@ public sealed record ConsoleSummaryDto(
     // ★ DroppedError = error-class messages (error/warning/pageerror) dropped by the MaxConsoleMessages cap.
     // info/log chatter is excluded up front (DroppedInfoLog) so an error is NEVER dropped for an info log;
     // this makes the remaining truncation (errors beyond the cap) HONEST instead of silent.
-    IReadOnlyList<ConsoleMessageDto> Messages, int DroppedInfoLog, int DroppedExtensionNoise, int DroppedError)
+    IReadOnlyList<ConsoleMessageDto> Messages, int DroppedInfoLog, int DroppedExtensionNoise, int DroppedError,
+    // ★ DroppedError SPLIT by first-party-ness (DroppedThirdParty + DroppedFirstParty == DroppedError). The
+    // capture drop-policy ranks first-party above third-party, so DroppedFirstParty > 0 ONLY when first-party
+    // alone overflowed the cap — the case that actually threatens the diff. Optional: older persisted rows (no
+    // split) deserialize these as 0, which reads as "no first-party loss known" — the calm default.
+    int DroppedThirdParty = 0, int DroppedFirstParty = 0)
 {
     public static readonly ConsoleSummaryDto Empty = new([], 0, 0, 0);
 }
