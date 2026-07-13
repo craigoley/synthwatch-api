@@ -62,6 +62,16 @@ public static class TrustReportProjection
     public const decimal RetryElevatedRate = 0.02m;
     public const decimal RetryFlakyRate = 0.10m;
 
+    // SPURIOUS-RED (B3-2 stage 2) — a MONITOR-SIDE transient (a superseded transient the monitor caused: no NEW
+    // first-party service error, runner 0079) ÷ scheduled runs. This is the dimension 222's paint-race reds
+    // needed — flap/retry/monitor-noise all read it clean. Same band as flap (elevated ≥ 1%, flaky ≥ 5%, ≥ 2)
+    // because it measures the same "the monitor cried wolf" concept, just restricted to the proven-monitor-side
+    // subset. ★ SERVICE-side + indeterminate transients are DELIBERATELY excluded — a service-side transient is
+    // a real, if brief, outage the monitor CAUGHT; penalising the monitor for it would invert monitoring.
+    public const decimal SpuriousRedElevatedRate = 0.01m;
+    public const decimal SpuriousRedFlakyRate = 0.05m;
+    public const long SpuriousRedMinCount = 2;
+
     // proven-live recency: the last green must be within this many check intervals (unchanged).
     public const int ProvenLiveMaxIntervalsSinceGreen = 2;
 
@@ -86,6 +96,11 @@ public static class TrustReportProjection
     /// <summary>retryRate = retryCount / runCount; null when runCount == 0 (honest empty, never a fake 0).</summary>
     public static decimal? RetryRate(long retryCount, long runCount) =>
         runCount > 0 ? Math.Round((decimal)retryCount / runCount, 4) : null;
+
+    /// <summary>spuriousRedRate = MONITOR-SIDE transients ÷ scheduledCount (service-side + indeterminate are
+    /// NOT in the numerator — only proven monitor-caused reds). null when scheduledCount == 0.</summary>
+    public static decimal? SpuriousRedRate(long monitorSideTransients, long scheduledCount) =>
+        scheduledCount > 0 ? Math.Round((decimal)monitorSideTransients / scheduledCount, 4) : null;
 
     // ── The three dimension states (each graded on its OWN axis from the named thresholds above) ──
 
@@ -115,13 +130,26 @@ public static class TrustReportProjection
     public static string MonitorNoiseState(TrustMonitorRow r) =>
         MonitorNoise(r) > 0 ? StateFlaky : StateOk;
 
-    /// <summary>The three graded dimensions for the row — the SURFACED replacement for the OR-collapse. The UI
-    /// pairs each state with the numeric value that already lives on the row (flapRate / retryRate / the
-    /// incident counts).</summary>
+    /// <summary>spurious-red dimension (B3-2 stage 2): monitor-side transients ÷ scheduled — `elevated` in
+    /// [1%, 5%), `flaky` at ≥ 5%, gated on ≥ 2 monitor-side transients. ★ ONLY monitor-side counts; a
+    /// service-side transient (a real brief outage the monitor caught) NEVER flags this. null denom → ok.</summary>
+    public static string SpuriousRedState(TrustMonitorRow r)
+    {
+        if (r.MonitorSideTransients < SpuriousRedMinCount) return StateOk;   // one is noise; a pattern needs ≥ 2
+        if (SpuriousRedRate(r.MonitorSideTransients, r.ScheduledCount) is not decimal sr) return StateOk;
+        if (sr >= SpuriousRedFlakyRate) return StateFlaky;
+        if (sr >= SpuriousRedElevatedRate) return StateElevated;
+        return StateOk;
+    }
+
+    /// <summary>The graded dimensions for the row — the SURFACED replacement for the OR-collapse. The UI pairs
+    /// each state with the numeric value that already lives on the row (flapRate / retryRate / the incident +
+    /// transient counts).</summary>
     public static TrustDimensionsDto Dimensions(TrustMonitorRow r) => new(
         Flap: new TrustDimensionDto(FlapState(r)),
         Retry: new TrustDimensionDto(RetryState(r)),
-        MonitorNoise: new TrustDimensionDto(MonitorNoiseState(r)));
+        MonitorNoise: new TrustDimensionDto(MonitorNoiseState(r)),
+        SpuriousRed: new TrustDimensionDto(SpuriousRedState(r)));
 
     /// <summary>
     /// The chip, DERIVED from the per-dimension states above. <paramref name="asOf"/> is the reference clock
@@ -137,16 +165,18 @@ public static class TrustReportProjection
         var flap = FlapState(r);
         var retry = RetryState(r);
         var noise = MonitorNoiseState(r);
+        var spurious = SpuriousRedState(r);
 
         // 2. flaky — ANY dimension is pathological. The OR now names WHICH dimension (Dimensions), never hides it.
-        if (flap == StateFlaky || retry == StateFlaky || noise == StateFlaky)
+        if (flap == StateFlaky || retry == StateFlaky || noise == StateFlaky || spurious == StateFlaky)
             return ChipFlaky;
 
         // 3. proven-live — recent real green AND EVERY dimension clean (no `elevated`, no `flaky`). A monitor
-        //    flapping 6.25% (flap `flaky`) or retrying 6% (retry `elevated`) can NO LONGER read proven-live.
+        //    flapping 6.25% (flap `flaky`), retrying 6% (retry `elevated`), or crying wolf on monitor-side reds
+        //    (spurious-red `flaky`) can NO LONGER read proven-live.
         var freshCutoff = asOf - TimeSpan.FromSeconds((double)r.IntervalSeconds * ProvenLiveMaxIntervalsSinceGreen);
         var greenIsFresh = r.LastGreenAt.Value >= freshCutoff;
-        if (greenIsFresh && flap == StateOk && retry == StateOk && noise == StateOk)
+        if (greenIsFresh && flap == StateOk && retry == StateOk && noise == StateOk && spurious == StateOk)
             return ChipProvenLive;
 
         // 4. nominal — green exists but stale, OR a dimension is `elevated` (watch it, not yet flaky).
@@ -170,6 +200,15 @@ public static class TrustReportProjection
         FlapCount: r.FlapCount,
         ScheduledCount: r.ScheduledCount,
         FlapRate: FlapRate(r.FlapCount, r.ScheduledCount),
+        // ★ B3-2 stage 2: the flap's transients split by whose fault + the spurious-red rate (monitor-side ÷
+        // scheduled). SpuriousRedRate + the counts let the UI say "222: spurious-red 4.1% (2 monitor-side, 1
+        // service-side, 3 indeterminate)". ★ indeterminate is surfaced so an operator sees how much is
+        // UNCLASSIFIED — a spurious-red rate over mostly-indeterminate data is not trustworthy, and the UI says so.
+        Transients: new TrustTransientsDto(
+            MonitorSide: r.MonitorSideTransients,
+            ServiceSide: r.ServiceSideTransients,
+            Indeterminate: r.IndeterminateTransients,
+            SpuriousRedRate: SpuriousRedRate(r.MonitorSideTransients, r.ScheduledCount)),
         Incidents: new TrustIncidentsDto(
             Total: r.IncidentTotal,
             RealOutage: r.RealOutage,

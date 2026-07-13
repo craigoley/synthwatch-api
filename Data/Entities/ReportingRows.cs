@@ -96,6 +96,13 @@ public class TrustMonitorRow
     // FlapCount/ScheduledCount makes a silently-self-healed failure VISIBLE and MEASURED.
     public long FlapCount { get; set; }
     public long ScheduledCount { get; set; }
+    // ★ B3-2 stage 2 (runner 0079): the classification of the window's SUPERSEDED transients. MonitorSide =
+    // the monitor cried wolf (a spurious red) → the ONLY count that feeds the spurious-red dimension / burns
+    // the flake budget. ServiceSide = a real brief outage the monitor caught (must NOT penalise it).
+    // Indeterminate = no signals to tell (http/dns/ssl / strand). MonitorSide+ServiceSide+Indeterminate ≤ FlapCount.
+    public long MonitorSideTransients { get; set; }
+    public long ServiceSideTransients { get; set; }
+    public long IndeterminateTransients { get; set; }
     public long IncidentTotal { get; set; }
     public long RealOutage { get; set; }
     public long FlakyTransient { get; set; }

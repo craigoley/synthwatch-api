@@ -66,6 +66,11 @@ public class Run
     public long? ConfirmationOfRunId { get; set; }
     public long? SupersededByRunId { get; set; }
 
+    // B3-2 stage 2 (runner migration 0079): the classification of a SUPERSEDED transient — 'monitor-side' /
+    // 'service-side' / 'indeterminate' (NULL on every non-superseded run). Runner-written; the API reads it to
+    // grade the spurious-red trust dimension and (B3-3) to burn ONLY monitor-side transients.
+    public string? TransientClass { get; set; }
+
     // Navigation (read-mostly).
     public Check? Check { get; set; }
     public List<RunStep> Steps { get; set; } = new();

@@ -359,6 +359,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.Sandbox).HasColumnName("sandbox"); // runner 0065: paused-monitor sandbox run
             e.Property(x => x.ConfirmationOfRunId).HasColumnName("confirmation_of_run_id"); // runner 0077
             e.Property(x => x.SupersededByRunId).HasColumnName("superseded_by_run_id"); // runner 0077
+            e.Property(x => x.TransientClass).HasColumnName("transient_class"); // runner 0079 (B3-2 stage 2)
             e.HasOne(x => x.Check).WithMany(c => c.Runs).HasForeignKey(x => x.CheckId);
             e.HasIndex(x => new { x.CheckId, x.StartedAt });
         });
@@ -545,6 +546,9 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.RetriedPasses).HasColumnName("retried_passes");
             e.Property(x => x.FlapCount).HasColumnName("flap_count");             // confirmation-retry P2
             e.Property(x => x.ScheduledCount).HasColumnName("scheduled_count");
+            e.Property(x => x.MonitorSideTransients).HasColumnName("monitor_side_transients");   // B3-2 stage 2
+            e.Property(x => x.ServiceSideTransients).HasColumnName("service_side_transients");
+            e.Property(x => x.IndeterminateTransients).HasColumnName("indeterminate_transients");
             e.Property(x => x.IncidentTotal).HasColumnName("incident_total");
             e.Property(x => x.RealOutage).HasColumnName("real_outage");
             e.Property(x => x.FlakyTransient).HasColumnName("flaky_transient");
