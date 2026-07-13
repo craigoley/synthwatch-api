@@ -538,8 +538,10 @@ public class IntegrationTests
     }
 
     // ── §D1 Monitor-Trust Scorecard ────────────────────────────────────────────────────────────────────
-    // ★ The chip rules are the contract. This pure test locks them (no Docker) — including the exact
-    // boundaries (retryRate 0.10 / 0.50; green at 2×interval) the dashboard legend renders.
+    // ★ B3-2 — the chip rules are the contract, and they are now DERIVED FROM DISTINCT DIMENSIONS (no
+    // OR-collapse). This pure test locks the exact per-dimension boundaries the dashboard legend renders:
+    // retry elevated at 0.02 / flaky at 0.10; green at 2×interval. proven-live requires EVERY dimension `ok`
+    // (an `elevated` dimension → nominal, not proven-live).
     [Fact]
     public void Trust_chip_derives_from_stated_auditable_rules_including_boundaries()
     {
@@ -557,16 +559,19 @@ public class IntegrationTests
         Assert.Equal("unverified", Chip(Row(10, 0, null), asOf));                       // never green
         Assert.Equal("unverified", Chip(Row(0, 0, asOf.AddSeconds(-30)), asOf));        // no runs in window
 
-        // 2. flaky — retryRate ≥ 0.50 (boundary: exactly 0.50) OR any monitor-noise incident.
-        Assert.Equal("flaky", Chip(Row(10, 5, asOf.AddSeconds(-30)), asOf));            // 0.50 exactly → flaky
-        Assert.Equal("flaky", Chip(Row(100, 1, asOf.AddSeconds(-30), selector: 1), asOf)); // low retry, but noise
+        // 2. flaky — retry dimension `flaky` at ≥ 0.10 (boundary: exactly 0.10), OR any monitor-noise incident.
+        Assert.Equal("flaky", Chip(Row(100, 10, asOf.AddSeconds(-30)), asOf));          // 0.10 exactly → retry flaky
+        Assert.Equal("flaky", Chip(Row(10, 5, asOf.AddSeconds(-30)), asOf));            // 0.50 → retry flaky
+        Assert.Equal("flaky", Chip(Row(100, 1, asOf.AddSeconds(-30), selector: 1), asOf)); // retry ok, but noise flaky
 
-        // 3. proven-live — green within 2 intervals AND retryRate < 0.10 AND zero monitor-noise.
-        Assert.Equal("proven-live", Chip(Row(100, 9, asOf.AddSeconds(-30)), asOf));     // 0.09 < 0.10
+        // 3. proven-live — green within 2 intervals AND EVERY dimension ok (retry < 0.02, no flap, no noise).
+        Assert.Equal("proven-live", Chip(Row(100, 1, asOf.AddSeconds(-30)), asOf));     // 0.01 < 0.02 → retry ok
         Assert.Equal("proven-live", Chip(Row(100, 0, asOf.AddSeconds(-600)), asOf));    // green EXACTLY at 2×interval → still fresh
 
-        // 4. nominal — in between: retryRate exactly 0.10 (not <), or green just past 2 intervals.
-        Assert.Equal("nominal", Chip(Row(100, 10, asOf.AddSeconds(-30)), asOf));        // 0.10 → not proven-live, not flaky
+        // 4. nominal — a dimension is `elevated` (retry in [0.02, 0.10)) OR green just past 2 intervals. An
+        //    ELEVATED dimension blocks proven-live but is not yet flaky — this is where the old collapse hid it.
+        Assert.Equal("nominal", Chip(Row(100, 2, asOf.AddSeconds(-30)), asOf));         // 0.02 → retry elevated → nominal (not proven-live)
+        Assert.Equal("nominal", Chip(Row(100, 9, asOf.AddSeconds(-30)), asOf));         // 0.09 → retry elevated → nominal
         Assert.Equal("nominal", Chip(Row(100, 0, asOf.AddSeconds(-601)), asOf));        // green 1s past 2×interval → stale
     }
 
@@ -577,20 +582,23 @@ public class IntegrationTests
     public void Trust_retriedPasses_is_display_only_and_never_feeds_the_chip()
     {
         var asOf = new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero);
-        // A proven-live row: retryRate 0.05 (< 0.10), fresh green, no noise.
+        // A proven-live row: retryRate 0.01 (< 0.02 → retry ok), fresh green, no flap, no noise. RetriedPasses
+        // is set INDEPENDENTLY of RetryCount here (the display field is not derived from it in this pure row),
+        // so the two rows differ ONLY in RetriedPasses — isolating the "never an input" invariant.
         TrustMonitorRow ProvenLive(long retriedPasses) => new()
         {
             CheckId = 1, CheckName = "x", IntervalSeconds = 300,
-            RunCount = 100, RetryCount = 5, LastGreenAt = asOf.AddSeconds(-30),
+            RunCount = 100, RetryCount = 1, LastGreenAt = asOf.AddSeconds(-30),
             RetriedPasses = retriedPasses,
         };
         Assert.Equal("proven-live", TrustReportProjection.DeriveChip(ProvenLive(0), asOf));
         Assert.Equal("proven-live", TrustReportProjection.DeriveChip(ProvenLive(99), asOf)); // ★ 99 retried passes → STILL proven-live
     }
 
-    // ★ Confirmation-retry P2: flapRate feeds the flaky chip, but ONLY as a repeated pattern — ≥ 2 transient
-    // failures AND ≥ 10% of scheduled runs. Both guards stop a low-volume window's single flap flipping the
-    // chip. Zero flaps must never change an existing chip (null-safe, like the canary at 1 flap).
+    // ★ B3-2 flap DIMENSION boundaries (derived from the fleet distribution): ok below the band, `elevated`
+    // in [1%, 5%), `flaky` at ≥ 5% — both gated on ≥ 2 transient failures (one flap is noise; 395's lone
+    // canary flap stays ok). The `elevated` band is exactly where the OLD 10% collapse hid 355's 6.25% as
+    // "proven live"; now 6.25% is flap `flaky` → the chip is flaky and NAMES the flap dimension.
     [Fact]
     public void Trust_flap_rate_feeds_flaky_only_as_a_repeated_pattern()
     {
@@ -607,18 +615,75 @@ public class IntegrationTests
         Assert.Equal(0.0423m, TrustReportProjection.FlapRate(6, 142));
         Assert.Null(TrustReportProjection.FlapRate(0, 0));
 
-        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(Row(0, 100), asOf)); // 0 flaps → unchanged
-        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(Row(1, 8), asOf));   // 1 flap (12.5%) → count guard: NOT flaky
-        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(Row(3, 100), asOf)); // 3 flaps but 3% → rate guard: NOT flaky
-        Assert.Equal("flaky", TrustReportProjection.DeriveChip(Row(2, 8), asOf));         // 2 flaps @ 25% → flaky-by-flap
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(Row(0, 100), asOf)); // 0 flaps → flap ok
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(Row(1, 8), asOf));   // 1 flap (12.5%) → count guard: flap ok
+        Assert.Equal("nominal", TrustReportProjection.DeriveChip(Row(3, 100), asOf));     // 3 flaps @ 3% → flap ELEVATED → nominal (not proven-live)
+        Assert.Equal("flaky", TrustReportProjection.DeriveChip(Row(5, 100), asOf));       // 5 flaps @ 5% (boundary) → flap flaky
+        Assert.Equal("flaky", TrustReportProjection.DeriveChip(Row(2, 8), asOf));         // 2 flaps @ 25% → flap flaky
     }
 
-    // ★ THE COEXISTENCE PROOF (end-to-end) + must-go-red: a monitor with retried PASSES at a retry RATE below
-    // ProvenLiveMaxRetryRate stays proven-live AND surfaces retriedPasses > 0 — the "degrading-but-green" early
-    // warning is an ANNOTATION on a healthy monitor, never a demotion (the #152 class must not recur). Also
-    // proves retriedPasses counts ONLY pass/warn retries (a failed run's retry is in retryCount, NOT here).
+    // ★★ THE MUST-GO-RED (the deliverable, stage 1) — reproduced from LIVE prod (2026-07-13): the two least-
+    // trustworthy monitors read trustworthy-LOOKING under the OR-collapse, and the distinct dimensions fix it,
+    // NAMING which axis flags. The revert proof (`OldCollapseChip` = the exact pre-B3-2 rule) shows the collapse
+    // makes them read clean again — so this test HARD-FAILS if anyone reinstates the collapse.
+    //   • 355 (shop-flow): flap 6.25% (3/48), retry 0, fresh green, no noise → OLD collapse: "proven live" (it
+    //     missed the 10% flap cutoff). NEW: flaky, flap dimension = flaky.
+    //   • 342 (kitting API): retry 11.3% (310/2747), flap 0, fresh green, no noise → OLD: "nominal" (retry ≥ 10%
+    //     blocked proven-live but < 50% wasn't flaky — a silent middle). NEW: flaky on RETRY, flap honestly ok —
+    //     two signals that used to read as one flat verdict are now surfaced separately, not contradicting.
+    // (222's paint-race spurious reds are a dimension nothing measures yet — they land in stage 2.)
+    [Fact]
+    public void Trust_distinct_dimensions_flag_355_and_342_that_the_OR_collapse_hid()
+    {
+        var asOf = new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero);
+
+        // The EXACT pre-B3-2 OR-collapse rule (retry ≥ 0.50 OR noise OR flap ≥ 10% w/ ≥ 2; proven-live if
+        // green-fresh AND retry < 0.10 AND no noise). Inlined so the revert is provable without a git revert.
+        static string OldCollapseChip(TrustMonitorRow r, DateTimeOffset a)
+        {
+            if (r.LastGreenAt is null || r.RunCount == 0) return "unverified";
+            var retry = TrustReportProjection.RetryRate(r.RetryCount, r.RunCount);
+            var noise = TrustReportProjection.MonitorNoise(r);
+            var flapRate = TrustReportProjection.FlapRate(r.FlapCount, r.ScheduledCount);
+            var oldFlappy = r.FlapCount >= 2 && flapRate is decimal fr && fr >= 0.10m;
+            if ((retry is decimal rr && rr >= 0.50m) || noise > 0 || oldFlappy) return "flaky";
+            var fresh = r.LastGreenAt.Value >= a - TimeSpan.FromSeconds(r.IntervalSeconds * 2);
+            if (fresh && retry is decimal rr2 && rr2 < 0.10m && noise == 0) return "proven-live";
+            return "nominal";
+        }
+
+        // 355 — flap 6.25% (3/48), retry 0, fresh green (interval 1800s), no noise.
+        var m355 = new TrustMonitorRow
+        {
+            CheckId = 355, CheckName = "355 shop-flow", IntervalSeconds = 1800,
+            RunCount = 96, RetryCount = 0, LastGreenAt = asOf.AddMinutes(-20),
+            FlapCount = 3, ScheduledCount = 48,
+        };
+        Assert.Equal("proven-live", OldCollapseChip(m355, asOf));                         // ★ the bug: reverting reads it clean
+        Assert.Equal("flaky", TrustReportProjection.DeriveChip(m355, asOf));              // ★ fixed: not proven-live
+        Assert.Equal("flaky", TrustReportProjection.FlapState(m355));                     // ★ NAMES the flap dimension
+        Assert.Equal("ok", TrustReportProjection.RetryState(m355));                       // (retry honestly clean)
+
+        // 342 — retry 11.3% (310/2747), flap 0, fresh green (interval 900s), no noise.
+        var m342 = new TrustMonitorRow
+        {
+            CheckId = 342, CheckName = "342 kitting", IntervalSeconds = 900,
+            RunCount = 2747, RetryCount = 310, LastGreenAt = asOf.AddSeconds(-30),
+            FlapCount = 0, ScheduledCount = 2747,
+        };
+        Assert.Equal("nominal", OldCollapseChip(m342, asOf));                             // ★ the old silent middle
+        Assert.Equal("flaky", TrustReportProjection.DeriveChip(m342, asOf));              // ★ fixed: flaky on retry
+        Assert.Equal("flaky", TrustReportProjection.RetryState(m342));                    // ★ NAMES the retry dimension
+        Assert.Equal("ok", TrustReportProjection.FlapState(m342));                        // ★ flap honestly ok — no longer contradicting
+    }
+
+    // ★ B3-2 end-to-end: retriedPasses is a DISPLAY annotation (never itself a chip input, the #152 class), but
+    // the RETRIES it counts DO grade the retry dimension honestly. A monitor working at 6% retry to stay green
+    // is retry-`elevated` → nominal (NOT hidden behind proven-live, as the old collapse did) AND still surfaces
+    // retriedPasses = 5. Also proves retriedPasses counts ONLY pass/warn retries (a failed run's retry is in
+    // retryCount, NOT here). A truly clean monitor (0 retries) stays proven-live.
     [SkippableFact]
-    public async Task Trust_retriedPasses_coexists_with_proven_live_and_excludes_fail_retries()
+    public async Task Trust_retriedPasses_surfaces_and_its_retries_grade_the_retry_dimension()
     {
         RequireDocker();
         await using var db = _pg.NewDbContext();
@@ -649,20 +714,25 @@ public class IntegrationTests
             var m = all.Monitors.Where(x => x.CheckName.StartsWith("trust-")).ToDictionary(x => x.CheckName);
 
             var degrading = m["trust-degrading"];
-            Assert.Equal("proven-live", degrading.Trust);       // ★ coexistence: healthy chip...
-            Assert.Equal(5, degrading.RetriedPasses);           // ★ ...AND the annotation fires (> 0)
+            Assert.Equal("nominal", degrading.Trust);           // ★ 6% retry → retry ELEVATED → nominal (no longer hidden as proven-live)
+            Assert.Equal("elevated", degrading.Dimensions.Retry.State); // ★ the dimension names it
+            Assert.Equal("ok", degrading.Dimensions.Flap.State);
+            Assert.Equal("ok", degrading.Dimensions.MonitorNoise.State);
+            Assert.Equal(5, degrading.RetriedPasses);           // ★ the display annotation still fires (> 0)
             Assert.Equal(6, degrading.RetryCount);              // the failed run's retry IS counted here...
             Assert.NotEqual(degrading.RetriedPasses, degrading.RetryCount); // ...but NOT in retriedPasses
             Assert.Equal(0.06m, degrading.RetryRate);
 
             var solid = m["trust-solid"];
-            Assert.Equal("proven-live", solid.Trust);
+            Assert.Equal("proven-live", solid.Trust);           // 0 retries → every dimension ok
+            Assert.Equal("ok", solid.Dimensions.Retry.State);
             Assert.Equal(0, solid.RetriedPasses);               // zero retried passes → annotation absent
 
-            // the detail endpoint carries the same field (its Monitor is a TrustMonitorDto)
+            // the detail endpoint carries the same fields (its Monitor is a TrustMonitorDto)
             var detail = Assert.IsType<TrustMonitorDetailDto>(Assert.IsType<OkObjectResult>(
                 await reports.GetTrustMonitorDetail(Request("?window=30d"), degrading.CheckId, default)).Value!);
-            Assert.Equal("proven-live", detail.Monitor.Trust);
+            Assert.Equal("nominal", detail.Monitor.Trust);
+            Assert.Equal("elevated", detail.Monitor.Dimensions.Retry.State);
             Assert.Equal(5, detail.Monitor.RetriedPasses);
         }
         finally

@@ -137,6 +137,21 @@ public record TrustRedTestDto(
     [property: JsonPropertyName("testedAt")] DateTimeOffset? TestedAt = null,
     [property: JsonPropertyName("method")] string? Method = null);
 
+/// <summary>★ B3-2 — the DISTINCT trust DIMENSIONS that replace the OR-collapsed chip's hidden internals. Each
+/// axis carries its OWN state ∈ {ok, elevated, flaky} from a NAMED threshold (TrustReportProjection); the chip
+/// is now a DERIVATION over these, and the scorecard surfaces WHICH dimension flags — never a lossy single
+/// verdict. proven-live requires EVERY dimension `ok`; ANY dimension `flaky` ⇒ the chip is `flaky`. The numeric
+/// value each dimension grades (flapRate / retryRate / the incident counts) already lives on the parent row.</summary>
+public record TrustDimensionsDto(
+    [property: JsonPropertyName("flap")] TrustDimensionDto Flap,
+    [property: JsonPropertyName("retry")] TrustDimensionDto Retry,
+    [property: JsonPropertyName("monitorNoise")] TrustDimensionDto MonitorNoise);
+
+/// <summary>One trust dimension's graded verdict. <c>state</c> ∈ {ok, elevated, flaky} — see
+/// TrustReportProjection for the exact per-axis thresholds the legend renders verbatim.</summary>
+public record TrustDimensionDto(
+    [property: JsonPropertyName("state")] string State);
+
 /// <summary>Spec-integrity provenance from the monitor's most recent run that carried it: the sha256 of the
 /// assertion code that ACTUALLY executed + its spec path. A real integrity-of-execution fact ("the monitor
 /// ran the committed, hash-pinned version") — NOT a red-test and NOT a headline score. Null when no run in
@@ -171,6 +186,9 @@ public record TrustMonitorDto(
     [property: JsonPropertyName("incidents")] TrustIncidentsDto Incidents,
     [property: JsonPropertyName("redTest")] TrustRedTestDto RedTest,
     [property: JsonPropertyName("specProvenance")] TrustProvenanceDto SpecProvenance,
+    // ★ B3-2: the distinct per-dimension states (flap / retry / monitor-noise) — the SURFACED replacement for
+    // the OR-collapse. The chip is derived FROM these; the scorecard shows which dimension flagged.
+    [property: JsonPropertyName("dimensions")] TrustDimensionsDto Dimensions,
     [property: JsonPropertyName("trust")] string Trust);
 
 /// <summary>GET /reports/trust — the fleet scorecard: one row per ENABLED check over the window.</summary>
