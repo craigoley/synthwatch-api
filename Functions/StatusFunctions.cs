@@ -26,8 +26,16 @@ public class StatusFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "status")] HttpRequest req,
         CancellationToken ct)
     {
-        // (1) Current signal per area-tagged ENABLED check: its latest run's status (across locations) +
-        //     severity + open-incident severity. LATERAL picks the single most-recent run.
+        // (1) Current signal per area-tagged ENABLED, NON-ARCHIVED check: its latest run's status (across
+        //     locations) + severity + open-incident severity. LATERAL picks the single most-recent run.
+        // ★ ARCHIVED EXCLUSION (dashboard #259): a reversibly-archived monitor (archived_at set, runner 0071)
+        // is retired — it no longer runs and must NEVER declare state. Critically this drops its OPEN-incident
+        // signal (has_open_incident/open_severity) too, so a retired check's LINGERING open critical incident
+        // can't flip a property to "down" via IsDownCritical — the real bug #259 caught client-side. archived_at
+        // is DISTINCT from enabled (an archived check can still be enabled=true), so `c.enabled` alone did NOT
+        // exclude it. removed_at (the git-removal purge clock, runner 0072) is intentionally NOT filtered — a
+        // removed check stays visible on its clock by design (#259 preserved this). Composes with the
+        // superseded/awaiting/running run exclusions below.
         var checks = await _db.StatusChecks.FromSql(
             $@"SELECT t.value AS property, c.severity AS severity,
                       COALESCE(l.status, 'unknown') AS status,
@@ -58,20 +66,22 @@ public class StatusFunctions
                                             WHERE rr.check_id = c.id AND rr.confirmation AND rr.status = 'pending'))
                     ORDER BY r.started_at DESC LIMIT 1
                ) l ON true
-               WHERE c.enabled").AsNoTracking().ToListAsync(ct);
+               WHERE c.enabled AND c.archived_at IS NULL").AsNoTracking().ToListAsync(ct);
 
-        // (2) SLA counts per area-tagged enabled check over the 30d view → summed per property for uptime.
+        // (2) SLA counts per area-tagged enabled, non-archived check over the 30d view → summed per property for
+        //     uptime. archived_at IS NULL keeps a retired monitor's history out of the property uptime %.
         var sla = await _db.StatusSla.FromSql(
             $@"SELECT t.value AS property, s.completed_runs, s.up_runs, s.down_runs
                FROM sla_availability_30d s
                JOIN check_tags t ON t.check_id = s.check_id AND t.key = 'area'
-               JOIN checks c ON c.id = s.check_id AND c.enabled").AsNoTracking().ToListAsync(ct);
+               JOIN checks c ON c.id = s.check_id AND c.enabled AND c.archived_at IS NULL").AsNoTracking().ToListAsync(ct);
 
-        // (3) Recent incidents on area-tagged checks — property-level fields only (no id/url exposed).
+        // (3) Recent incidents on area-tagged, non-archived checks — property-level fields only (no id/url
+        //     exposed). archived_at IS NULL so a retired monitor's incident doesn't surface in the public list.
         var incidents = await _db.StatusIncidents.FromSql(
             $@"SELECT t.value AS property, c.name AS check_name, i.summary, i.opened_at, i.resolved_at, i.status, i.severity
                FROM incidents i
-               JOIN checks c ON c.id = i.check_id
+               JOIN checks c ON c.id = i.check_id AND c.archived_at IS NULL
                JOIN check_tags t ON t.check_id = c.id AND t.key = 'area'
                ORDER BY i.opened_at DESC
                LIMIT 15").AsNoTracking().ToListAsync(ct);

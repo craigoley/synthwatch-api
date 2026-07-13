@@ -4785,6 +4785,61 @@ public class IntegrationTests
         }
     }
 
+    // ★ ARCHIVED EXCLUSION (dashboard #259) MUST-GO-RED: an ARCHIVED check with a LINGERING OPEN CRITICAL
+    // incident must NOT declare its property "down" — a retired monitor cannot declare an outage. This is the
+    // exact bug #259 caught client-side, now closed at the /status source. Reverting `archived_at IS NULL` on
+    // query (1) fails this (the archived check's has_open_incident/open_severity=critical would drive
+    // IsDownCritical → "down"). Also proves: archived is out of the check set + uptime; a REMOVED (purge-clock)
+    // check stays visible (removed_at is NOT swept out with archived_at, #259).
+    [SkippableFact]
+    public async Task Status_page_excludes_archived_checks_but_keeps_removed_ones()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE ca bigint; cr bigint; ck bigint;
+            BEGIN
+              -- (1) ARCHIVED but still enabled=true (archived_at ⟂ enabled) with an OPEN CRITICAL incident +
+              --     a green run. Old SQL -> its open critical incident drives the property "down" (the #259 bug).
+              INSERT INTO checks (name, kind, target_url, severity, enabled, archived_at)
+                VALUES ('st-arch','http','https://arch.ex','critical', true, now()-interval '2 days') RETURNING id INTO ca;
+              INSERT INTO check_tags (check_id, key, value) VALUES (ca,'area','st-arch');
+              INSERT INTO runs (check_id,status,started_at) VALUES (ca,'pass', now()-interval '3 minutes');
+              INSERT INTO incidents (check_id,status,severity,opened_at) VALUES (ca,'open','critical', now()-interval '1 day');
+              -- (2) REMOVED (git-removal purge clock) but NOT archived — must stay visible on its clock (#259).
+              --     A passing run + no incident -> the property reads "up".
+              INSERT INTO checks (name, kind, target_url, severity, enabled, removed_at)
+                VALUES ('st-rm','http','https://rm.ex','critical', true, now()-interval '1 day') RETURNING id INTO cr;
+              INSERT INTO check_tags (check_id, key, value) VALUES (cr,'area','st-rm');
+              INSERT INTO runs (check_id,status,started_at) VALUES (cr,'pass', now()-interval '3 minutes');
+            END $$;
+            """);
+        try
+        {
+            var dto = Assert.IsType<StatusPageDto>(Assert.IsType<OkObjectResult>(
+                await new StatusFunctions(db).GetStatus(Request(), default)).Value!);
+            var props = dto.Properties.ToDictionary(p => p.Name);
+
+            // ★ MUST-GO-RED: the archived check's open critical incident must NOT down its property — it's gone
+            //   from the check set entirely, so the property doesn't even exist in the projection.
+            Assert.False(props.ContainsKey("st-arch"));
+            // …and it must not appear in the public recent-incident list either.
+            Assert.DoesNotContain(dto.RecentIncidents, i => i.Property == "st-arch");
+
+            // A REMOVED (purge-clock) check stays visible and reads its real state (up).
+            Assert.True(props.ContainsKey("st-rm"));
+            Assert.Equal("up", props["st-rm"].State);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'st-arch%' OR name LIKE 'st-rm%'); " +
+                "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name LIKE 'st-arch%' OR name LIKE 'st-rm%'); " +
+                "DELETE FROM checks WHERE name LIKE 'st-arch%' OR name LIKE 'st-rm%';");
+        }
+    }
+
     // ★ GET /reports/deploys — the deploy-marker overlay source (deploy-markers v1). Proves: host-scoped;
     // a git-sha marker exposes its sha, a non-sha (etag) marker exposes NULL sha + is_sha=false (honest);
     // window filtering; host required (400); and the wire shape.
