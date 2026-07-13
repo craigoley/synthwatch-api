@@ -31,7 +31,8 @@ public sealed record BlobSasResult(SasStatus Status, string? Url, DateTimeOffset
 /// serverless proxy (which terminates a multi-tens-of-MB transfer at its ~15 s maxDuration). Key-LESS: signed
 /// with a user-delegation key obtained via the API's managed identity (needs the <c>Storage Blob Delegator</c>
 /// role) — NO account key is ever held or used. The mint stays behind the <c>#154</c> forensic auth gate; the
-/// SAS itself is the tightest scope Azure offers (one blob, read, ~2 min).
+/// SAS itself is the tightest scope Azure offers (one blob, read, 30 min — long enough for an interactive
+/// viewer SESSION, since the viewer lazily range-fetches this URL throughout the investigation).
 /// </summary>
 public interface IBlobSasMinter
 {
@@ -40,10 +41,19 @@ public interface IBlobSasMinter
 
 public sealed class BlobSasMinter : IBlobSasMinter
 {
-    /// <summary>SAS lifetime — short on purpose: long enough to START the direct fetch, too short to share
-    /// around. Azure validates <c>se</c> at request start, so a single whole-blob GET that begins in-window
-    /// completes even for a 124 MB trace.</summary>
-    public static readonly TimeSpan Ttl = TimeSpan.FromMinutes(2);
+    /// <summary>SAS lifetime. ★ Must cover an INTERACTIVE trace-viewing SESSION, not just the initial fetch:
+    /// the Playwright viewer (public/trace-viewer/sw.bundle.js) opens the zip with zip.js HttpReader + Range
+    /// reads and LAZILY range-fetches entries from this SAS URL throughout the investigation — so any request
+    /// after <c>se</c> 403s ("Signature not valid in the specified KEY time frame") mid-session. The old 2-min
+    /// TTL broke every investigation lasting &gt; ~2 min (blob size is irrelevant — 355's trace is 9.9 MB; the
+    /// failing request is a late lazy range-fetch, not a slow download).
+    /// ★ 30 min is a JUDGMENT CALL, not a measurement: we have no telemetry on how long a trace session
+    /// actually lasts, so this is sized to cover a thorough multi-step forensic dig (actions → snapshots →
+    /// network) with margin, while staying FAR short of the 30-day login session — the SAS stays a narrow,
+    /// single-blob, read-only, HTTPS-only, authed-mint credential, never a session surrogate. The real fix
+    /// (proxy the bytes through the API under the session, so access is governed by the session not a
+    /// credential in the URL) is a separate, gated architecture change.</summary>
+    public static readonly TimeSpan Ttl = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan Skew = TimeSpan.FromSeconds(30); // clock-skew backdate on start
 
     private readonly TokenCredential _credential;

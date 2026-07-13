@@ -1,3 +1,4 @@
+using System.Globalization;
 using SynthWatch.Api.Data.Entities;
 using SynthWatch.Api.Dtos;
 
@@ -176,9 +177,9 @@ public static class TrustReportProjection
     {
         if (FlakeBudgetState(r) != FlakeBudgetDegraded) return null;
         var ratePct = SpuriousRedRate(r.FlakeConsumed, r.FlakeScheduledRuns) is decimal sr
-            ? (sr * 100m).ToString("0.#")
+            ? (sr * 100m).ToString("0.#", CultureInfo.InvariantCulture)
             : "n/a";
-        var budgetPct = (r.FlakeTarget * 100m).ToString("0.#");
+        var budgetPct = (r.FlakeTarget * 100m).ToString("0.#", CultureInfo.InvariantCulture);
         return $"{r.CheckName}: spurious-red {ratePct}% (budget {budgetPct}%) — {r.FlakeConsumed} monitor-side "
              + $"red(s) with no new first-party service error over {r.FlakeScheduledRuns} scheduled runs. "
              + "Fix the flaky assertion/selector — this is a MONITOR problem, not a service outage.";

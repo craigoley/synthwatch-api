@@ -23,6 +23,17 @@ public class BlobSasMinterTests
 
     private static BlobSasMinter Minter() => new(new NeverCredential(), NullLogger<BlobSasMinter>.Instance);
 
+    // ★ The TTL is a deliberate contract, not an incidental constant: it must cover an interactive trace-viewer
+    // SESSION (the viewer lazily range-fetches the SAS URL throughout the dig), not just the initial fetch. Pins
+    // 30 min so a shrink back toward the old 2-min window — which 403'd every investigation past ~2 min — is a
+    // conscious change that trips this test, not a silent regression.
+    [Fact]
+    public void Sas_ttl_covers_an_interactive_session_not_just_the_initial_fetch()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(30), BlobSasMinter.Ttl);
+        Assert.True(BlobSasMinter.Ttl >= TimeSpan.FromMinutes(10), "TTL must comfortably outlast a real trace investigation");
+    }
+
     [Fact]
     public async Task Null_or_empty_url_is_Missing_without_touching_the_credential()
     {
