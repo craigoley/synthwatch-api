@@ -1,0 +1,23 @@
+name: Shell safety (SIGPIPE-grep)
+
+# Bans the fail-open SIGPIPE antipattern (`… | grep -q` / `| head` under `set -o pipefail`) in shell
+# scripts + workflow `run:` blocks — the class shellcheck/actionlint miss. A match here fails the check;
+# ci-gate aggregates it, so a reintroduced instance can never merge. See scripts/check-no-sigpipe-grep.sh
+# for the mechanism + the here-string fix. Mirrors the runner's guardrail discipline.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sigpipe-grep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Scan for the fail-open SIGPIPE-grep antipattern
+        run: bash scripts/check-no-sigpipe-grep.sh

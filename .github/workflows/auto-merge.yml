@@ -59,7 +59,11 @@ jobs:
           # push `paths` filter: .cs/.csproj/host.json/deploy.yml) — a docs/workflow-only merge
           # shouldn't redeploy. Matches the runner repo's auto-merge dispatch gating.
           FILES=$(gh pr view "$PR" --json files -q '.files[].path' 2>/dev/null || echo "")
-          if ! printf '%s\n' "$FILES" | grep -qE '(\.cs|\.csproj)$|(^|/)host\.json$|^\.github/workflows/deploy\.yml$'; then
+          # ★ HERE-STRING, not `printf "$FILES" | grep -qE`. Under `set -o pipefail`, grep -q closes the pipe
+          # the instant it matches; on a LARGE $FILES (a big PR) the still-writing printf takes SIGPIPE (141),
+          # pipefail makes the whole pipeline 141, and `if !` INVERTS a match into "no deploy-relevant changes"
+          # → a merged .cs change would SILENTLY never deploy. A here-string has no piped writer to kill.
+          if ! grep -qE '(\.cs|\.csproj)$|(^|/)host\.json$|^\.github/workflows/deploy\.yml$' <<< "$FILES"; then
             echo "No deploy-relevant changes in PR #$PR — not dispatching Deploy."
             exit 0
           fi

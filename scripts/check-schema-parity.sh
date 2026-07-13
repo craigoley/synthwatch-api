@@ -166,7 +166,10 @@ check_runner_column_parity() { # <migDb> <fixDb>
   #   visual-baseline / notification bookkeeping columns the API never maps.
   local allow="checks/retries checks/checks_retries_check checks/baseline_screenshot_url checks/last_burn_notified_at incidents/rca_notified_at"
   missing="$(diff_missing_in_fixture "$WORK/mig.txt" "$WORK/fix.txt" | while IFS='|' read -r kind obj rest; do
-    echo "$fixobjs" | grep -qx "$obj" || continue        # object (table/fn) the API doesn't read at all → skip
+    grep -qx "$obj" <<< "$fixobjs" || continue           # object (table/fn) the API doesn't read at all → skip
+    # ↑ here-string, not `echo "$fixobjs" | grep -qx`: grep -q closes the pipe on match; under pipefail a large
+    #   $fixobjs makes echo take SIGPIPE (141) → `|| continue` would SKIP a shared object that IS in the fixture
+    #   → the parity gate silently drops it (false-green). A here-string has no piped writer to kill.
     key="$obj/${rest%%|*}"                               # "table/column" or "table/constraint" (fn: name/1st-token, never matches)
     case " $allow " in *" $key "*) continue;; esac       # vetted runner-internal object → exempt
     echo "$kind|$obj|$rest"
@@ -219,7 +222,7 @@ run_self_test() {
   snapshot st_b "$WORK/b2.txt"
   local drift
   drift="$(diff_missing_in_fixture "$WORK/a.txt" "$WORK/b2.txt" || true)"
-  if ! echo "$drift" | grep -q '^col|runs|retry_count|'; then
+  if ! grep -q '^col|runs|retry_count|' <<< "$drift"; then     # here-string, not `echo | grep -q` (SIGPIPE class)
     echo "self-test FAILED: dropping runs.retry_count was NOT detected" >&2
     echo "$drift" >&2; exit 3
   fi
@@ -233,13 +236,13 @@ run_self_test() {
   psql_db st_b -c "$(printf 'CREATE FUNCTION public.st_probe() RETURNS int LANGUAGE sql AS $q$\n -- a comment the other side lacks\n SELECT 41  +  1 $q$;')" >/dev/null
   snapshot st_a "$WORK/a3.txt"
   snapshot st_b "$WORK/b3.txt"
-  if diff_missing_in_fixture "$WORK/a3.txt" "$WORK/b3.txt" | grep -q '^fn|st_probe|'; then
+  if grep -q '^fn|st_probe|' <<< "$(diff_missing_in_fixture "$WORK/a3.txt" "$WORK/b3.txt")"; then  # here-string (SIGPIPE class)
     echo "self-test FAILED: a comment/whitespace-only function change was flagged — normalization is broken" >&2; exit 3
   fi
   echo "  comment/whitespace-only fn change → GREEN (normalization holds) ✓"
   psql_db st_b -c "CREATE OR REPLACE FUNCTION public.st_probe() RETURNS int LANGUAGE sql AS \$q\$ SELECT 41 + 2 \$q\$;" >/dev/null
   snapshot st_b "$WORK/b4.txt"
-  if ! diff_missing_in_fixture "$WORK/a3.txt" "$WORK/b4.txt" | grep -q '^fn|st_probe|'; then
+  if ! grep -q '^fn|st_probe|' <<< "$(diff_missing_in_fixture "$WORK/a3.txt" "$WORK/b4.txt")"; then  # here-string (SIGPIPE class)
     echo "self-test FAILED: a function LOGIC change (41+1 → 41+2) was NOT detected — normalization is too aggressive" >&2; exit 3
   fi
   echo "  logic fn change (41+1 → 41+2) → RED, detected ✓"
