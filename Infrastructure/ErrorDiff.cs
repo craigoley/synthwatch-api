@@ -86,17 +86,28 @@ public static partial class ErrorDiff
             Muted: mutedItems.Count);
 
         var truncated = target.Truncated || baseline.Any(b => b.Truncated);
+        // ★ Split the truncation signal by owner so the UI can be HONEST *and* INFORMATIVE. First-party
+        // truncation (first-party signal lost) is the case that actually threatens the diff and must stay LOUD;
+        // third-party-only truncation (tracker noise dropped) is benign — the panel can say "first-party
+        // complete". DroppedThirdParty is the TARGET run's count (the run being viewed) for the panel's "N".
+        var firstPartyTruncated =
+            IsFirstPartyTruncated(target.Signals) || baseline.Any(b => IsFirstPartyTruncated(b.Signals));
+        var droppedThirdParty = target.Signals?.Console?.DroppedThirdParty ?? 0;
 
         return new ErrorDiffDto(
             checkId, runId, runStartedAt, location,
             BaselineRunIds: baseline.Select(b => b.RunId).ToList(),
             New: @new, Persistent: persistent, Resolved: resolved,
             Counts: counts, Truncated: truncated, BaselineRunCount: baseline.Count,
-            Muted: mutedItems);
+            Muted: mutedItems, FirstPartyTruncated: firstPartyTruncated, DroppedThirdParty: droppedThirdParty);
     }
 
     /// <summary>True when a run's console set was truncated by the cap (errors beyond it were dropped).</summary>
     public static bool IsTruncated(TraceSignalsDto? s) => (s?.Console?.DroppedError ?? 0) > 0;
+
+    /// <summary>True when the cap dropped a FIRST-PARTY message (not just tracker noise) — the LOUD case. The
+    /// drop-policy ranks first-party last-to-drop, so this is > 0 only when first-party alone overflowed.</summary>
+    public static bool IsFirstPartyTruncated(TraceSignalsDto? s) => (s?.Console?.DroppedFirstParty ?? 0) > 0;
 
     // ── fingerprint a run's error set → { fingerprint : representative item (count aggregated within the run) } ──
     private static Dictionary<string, ErrorItemDto> Fingerprint(TraceSignalsDto? s)

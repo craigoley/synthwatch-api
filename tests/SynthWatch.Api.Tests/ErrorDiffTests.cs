@@ -9,10 +9,11 @@ namespace SynthWatch.Api.Tests;
 public class ErrorDiffTests
 {
     // ── builders ──
-    private static TraceSignalsDto Sig(ConsoleMessageDto[]? console = null, TraceRequestDto[]? failed = null, int droppedError = 0) =>
+    private static TraceSignalsDto Sig(ConsoleMessageDto[]? console = null, TraceRequestDto[]? failed = null,
+        int droppedError = 0, int droppedThirdParty = 0, int droppedFirstParty = 0) =>
         new("wegmans.com",
             new NetworkSummaryDto(0, 0, 0, failed ?? [], [], [], [], [], []),
-            new ConsoleSummaryDto(console ?? [], 0, 0, droppedError));
+            new ConsoleSummaryDto(console ?? [], 0, 0, droppedError, droppedThirdParty, droppedFirstParty));
 
     private static ConsoleMessageDto Con(string level, string origin, string host, string text) => new(level, origin, host, text);
     private static TraceRequestDto Req(string url, int status, bool thirdParty) => new(url, status, "fetch", 0, 0, 0, 0, "", thirdParty);
@@ -105,6 +106,32 @@ public class ErrorDiffTests
         Assert.True(Compute(RS(10, Sig(droppedError: 7))).Truncated);                       // this run truncated
         Assert.True(Compute(RS(10, Sig()), RS(9, Sig(droppedError: 3))).Truncated);         // a baseline run truncated
         Assert.False(Compute(RS(10, Sig()), RS(9, Sig())).Truncated);                       // neither
+    }
+
+    // ★ The truncation warning is INFORMATIVE, not just scary: third-party-only truncation is benign (the panel
+    // can say "first-party complete"); a first-party drop stays LOUD. FirstPartyTruncated fires on the target OR
+    // any baseline; DroppedThirdParty surfaces the target run's count for the panel's "N".
+    [Fact]
+    public void Truncation_is_split_by_class_third_party_only_vs_first_party_lost()
+    {
+        // 12 third-party dropped, 0 first-party → truncated but NOT loud; the panel says "12 third-party dropped".
+        var tpOnly = Compute(RS(10, Sig(droppedError: 12, droppedThirdParty: 12, droppedFirstParty: 0)));
+        Assert.True(tpOnly.Truncated);
+        Assert.False(tpOnly.FirstPartyTruncated);
+        Assert.Equal(12, tpOnly.DroppedThirdParty);
+
+        // A first-party message was dropped → LOUD, regardless of the third-party count.
+        var fpLost = Compute(RS(10, Sig(droppedError: 5, droppedThirdParty: 2, droppedFirstParty: 3)));
+        Assert.True(fpLost.FirstPartyTruncated);
+
+        // First-party truncation in a BASELINE run also trips the loud flag (the diff's baseline is incomplete).
+        var baselineFpLost = Compute(RS(10, Sig()), RS(9, Sig(droppedError: 4, droppedThirdParty: 0, droppedFirstParty: 4)));
+        Assert.True(baselineFpLost.FirstPartyTruncated);
+
+        // No truncation at all → neither flag.
+        var clean = Compute(RS(10, Sig()));
+        Assert.False(clean.Truncated);
+        Assert.False(clean.FirstPartyTruncated);
     }
 
     [Fact]
