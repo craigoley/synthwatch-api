@@ -120,6 +120,7 @@ CREATE TABLE public.checks (
     warn_renotify_seconds integer DEFAULT 86400 NOT NULL,
     assertions jsonb DEFAULT '[]'::jsonb NOT NULL,
     slo_target real,
+    flake_target numeric,
     min_fail_locations integer,
     request_headers jsonb,
     request_body text,
@@ -144,6 +145,7 @@ CREATE TABLE public.checks (
     CONSTRAINT checks_failure_threshold_check CHECK ((failure_threshold > 0)),
     CONSTRAINT checks_interval_seconds_check CHECK ((interval_seconds > 0)),
     CONSTRAINT checks_slo_target_check CHECK (slo_target IS NULL OR (slo_target > 0 AND slo_target < 1)),
+    CONSTRAINT checks_flake_target_check CHECK (flake_target IS NULL OR (flake_target >= 0 AND flake_target < 1)),
     CONSTRAINT checks_kind_check CHECK ((kind = ANY (ARRAY['http'::text, 'browser'::text, 'ssl'::text, 'dns'::text, 'tcp'::text, 'ping'::text, 'multistep'::text]))),
     CONSTRAINT checks_severity_check CHECK ((severity = ANY (ARRAY['critical'::text, 'warning'::text]))),
     CONSTRAINT checks_spec_path_shape CHECK ((spec_path IS NULL OR ((spec_path ~ '^monitors/.+\.spec\.ts$') AND (position('..' in spec_path) = 0)))),
@@ -682,6 +684,66 @@ AS $function$
         CASE WHEN total_runs > 0
              THEN round((down_runs::numeric / total_runs) / (1::numeric - slo_target::numeric), 4)
              ELSE 0 END                                                AS burn_rate
+    FROM agg
+$function$
+;
+
+-- flake_status(check_id, from, to) (0080) — the MONITOR trust budget (mirrors the runner migration). consumed =
+-- MONITOR-SIDE transients ONLY (service_side + indeterminate surfaced, never consumed); N = scheduled runs
+-- (INCLUDES superseded transients, EXCLUDES confirmations + sandbox + maintenance); fleet default 2% via COALESCE.
+CREATE OR REPLACE FUNCTION public.flake_status(p_check_id bigint, p_from timestamp with time zone, p_to timestamp with time zone)
+ RETURNS TABLE(check_id bigint, flake_target numeric, target_is_default boolean, window_from timestamp with time zone, window_to timestamp with time zone, scheduled_runs bigint, monitor_side bigint, service_side bigint, indeterminate bigint, budget numeric, consumed bigint, remaining numeric, remaining_pct numeric, burn_rate numeric)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH agg AS (
+        SELECT
+            c.id AS check_id,
+            COALESCE(c.flake_target, 0.02)::numeric AS flake_target,
+            (c.flake_target IS NULL)                AS target_is_default,
+            count(*) FILTER (
+                WHERE r.confirmation_of_run_id IS NULL AND NOT r.sandbox) AS scheduled_runs,
+            count(*) FILTER (
+                WHERE r.superseded_by_run_id IS NOT NULL AND r.transient_class = 'monitor-side'
+                  AND r.confirmation_of_run_id IS NULL AND NOT r.sandbox) AS monitor_side,
+            count(*) FILTER (
+                WHERE r.superseded_by_run_id IS NOT NULL AND r.transient_class = 'service-side'
+                  AND r.confirmation_of_run_id IS NULL AND NOT r.sandbox) AS service_side,
+            count(*) FILTER (
+                WHERE r.superseded_by_run_id IS NOT NULL AND r.transient_class = 'indeterminate'
+                  AND r.confirmation_of_run_id IS NULL AND NOT r.sandbox) AS indeterminate
+        FROM checks c
+        LEFT JOIN runs r
+               ON r.check_id   = c.id
+              AND r.started_at >= p_from
+              AND r.started_at <  p_to
+        LEFT JOIN maintenance_windows mw
+               ON (mw.check_id = c.id OR mw.check_id IS NULL)
+              AND r.started_at >= mw.starts_at
+              AND r.started_at <  mw.ends_at
+        WHERE c.id = p_check_id
+          AND mw.id IS NULL
+        GROUP BY c.id, c.flake_target
+    )
+    SELECT
+        check_id,
+        flake_target,
+        target_is_default,
+        p_from AS window_from,
+        p_to   AS window_to,
+        scheduled_runs,
+        monitor_side,
+        service_side,
+        indeterminate,
+        flake_target * scheduled_runs                    AS budget,
+        monitor_side                                     AS consumed,
+        flake_target * scheduled_runs - monitor_side     AS remaining,
+        CASE WHEN flake_target * scheduled_runs > 0
+             THEN round(1 - monitor_side::numeric / (flake_target * scheduled_runs), 6)
+             END                                         AS remaining_pct,
+        CASE WHEN scheduled_runs > 0 AND flake_target > 0
+             THEN round((monitor_side::numeric / scheduled_runs) / flake_target, 4)
+             ELSE 0 END                                  AS burn_rate
     FROM agg
 $function$
 ;

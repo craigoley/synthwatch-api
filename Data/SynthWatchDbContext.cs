@@ -299,6 +299,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.PerfBudgetTransferBytes).HasColumnName("perf_budget_transfer_bytes");
             e.Property(x => x.CertExpiryWarnDays).HasColumnName("cert_expiry_warn_days");
             e.Property(x => x.SloTarget).HasColumnName("slo_target");
+            e.Property(x => x.FlakeTarget).HasColumnName("flake_target");   // B3-3 monitor trust budget (dashboard-owned)
             // Monitors-as-code activation (Phase 13): the manifest id + spec path this check runs.
             e.Property(x => x.SourceKey).HasColumnName("source_key");
             e.Property(x => x.SpecPath).HasColumnName("spec_path");
@@ -549,6 +550,14 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.MonitorSideTransients).HasColumnName("monitor_side_transients");   // B3-2 stage 2
             e.Property(x => x.ServiceSideTransients).HasColumnName("service_side_transients");
             e.Property(x => x.IndeterminateTransients).HasColumnName("indeterminate_transients");
+            e.Property(x => x.FlakeTarget).HasColumnName("flake_target");                        // B3-3 budget
+            e.Property(x => x.FlakeTargetIsDefault).HasColumnName("flake_target_is_default");
+            e.Property(x => x.FlakeScheduledRuns).HasColumnName("flake_scheduled_runs");
+            e.Property(x => x.FlakeBudget).HasColumnName("flake_budget");
+            e.Property(x => x.FlakeConsumed).HasColumnName("flake_consumed");
+            e.Property(x => x.FlakeRemaining).HasColumnName("flake_remaining");
+            e.Property(x => x.FlakeRemainingPct).HasColumnName("flake_remaining_pct");
+            e.Property(x => x.FlakeBurnRate).HasColumnName("flake_burn_rate");
             e.Property(x => x.IncidentTotal).HasColumnName("incident_total");
             e.Property(x => x.RealOutage).HasColumnName("real_outage");
             e.Property(x => x.FlakyTransient).HasColumnName("flaky_transient");
