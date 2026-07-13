@@ -439,6 +439,10 @@ public class ReportsFunctions
                   coalesce(rc.monitor_side_transients, 0) AS monitor_side_transients,
                   coalesce(rc.service_side_transients, 0) AS service_side_transients,
                   coalesce(rc.indeterminate_transients, 0) AS indeterminate_transients,
+                  fb.flake_target AS flake_target, fb.target_is_default AS flake_target_is_default,
+                  fb.scheduled_runs AS flake_scheduled_runs, fb.budget AS flake_budget,
+                  fb.consumed AS flake_consumed, fb.remaining AS flake_remaining,
+                  fb.remaining_pct AS flake_remaining_pct, fb.burn_rate AS flake_burn_rate,
                   coalesce(ic.total, 0) AS incident_total,
                   coalesce(ic.real_outage, 0) AS real_outage,
                   coalesce(ic.flaky_transient, 0) AS flaky_transient,
@@ -500,6 +504,10 @@ public class ReportsFunctions
                ORDER BY rt0.tested_at DESC
                LIMIT 1
            ) rt ON true
+           -- ★ B3-3 MONITOR TRUST BUDGET (runner flake_status): the canonical algebra — consumed = MONITOR-SIDE
+           -- transients ONLY (service-side + indeterminate surfaced by rc above, never consumed). budget =
+           -- flake_target × scheduled_runs, fleet default 2%. Same window as rc. READ-ONLY — no alert path.
+           CROSS JOIN LATERAL flake_status(c.id, now() - ({days} * INTERVAL '1 day'), now()) fb
            WHERE c.enabled = true
              -- ★ Pre-prod default-EXCLUDE (arc S1c): the trust scorecard is the PROD fleet only. The
              -- single-check detail (TrustDetailSql) is deliberately NOT excluded — a caller asking for one
@@ -520,6 +528,10 @@ public class ReportsFunctions
                   coalesce(rc.monitor_side_transients, 0) AS monitor_side_transients,
                   coalesce(rc.service_side_transients, 0) AS service_side_transients,
                   coalesce(rc.indeterminate_transients, 0) AS indeterminate_transients,
+                  fb.flake_target AS flake_target, fb.target_is_default AS flake_target_is_default,
+                  fb.scheduled_runs AS flake_scheduled_runs, fb.budget AS flake_budget,
+                  fb.consumed AS flake_consumed, fb.remaining AS flake_remaining,
+                  fb.remaining_pct AS flake_remaining_pct, fb.burn_rate AS flake_burn_rate,
                   coalesce(ic.total, 0) AS incident_total,
                   coalesce(ic.real_outage, 0) AS real_outage,
                   coalesce(ic.flaky_transient, 0) AS flaky_transient,
@@ -581,6 +593,10 @@ public class ReportsFunctions
                ORDER BY rt0.tested_at DESC
                LIMIT 1
            ) rt ON true
+           -- ★ B3-3 MONITOR TRUST BUDGET (runner flake_status): the canonical algebra — consumed = MONITOR-SIDE
+           -- transients ONLY (service-side + indeterminate surfaced by rc above, never consumed). budget =
+           -- flake_target × scheduled_runs, fleet default 2%. Same window as rc. READ-ONLY — no alert path.
+           CROSS JOIN LATERAL flake_status(c.id, now() - ({days} * INTERVAL '1 day'), now()) fb
            WHERE c.id = {checkId}";
 
     /// <summary>GET /api/reports/availability?window=&amp;groupBy=&lt;tagKey&gt;&amp;tag=key:value (repeatable, AND-filter) — availability by group (from the rollup).</summary>

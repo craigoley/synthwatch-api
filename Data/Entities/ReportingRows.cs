@@ -103,6 +103,19 @@ public class TrustMonitorRow
     public long MonitorSideTransients { get; set; }
     public long ServiceSideTransients { get; set; }
     public long IndeterminateTransients { get; set; }
+    // ★ B3-3: the MONITOR trust budget, from the runner's flake_status() SQL (the canonical algebra — consumed =
+    // monitor-side ONLY). FlakeConsumed == MonitorSideTransients by construction (the gate lives in the SQL);
+    // service_side + indeterminate are surfaced (above), NEVER consumed. FlakeTargetIsDefault = the fleet default
+    // (2%) is in force (no per-monitor override). FlakeScheduledRuns is flake_status' own denominator (excludes
+    // confirmations + sandbox + maintenance) — distinct from ScheduledCount above (which is only NOT-sandbox).
+    public decimal FlakeTarget { get; set; }
+    public bool FlakeTargetIsDefault { get; set; }
+    public long FlakeScheduledRuns { get; set; }
+    public decimal FlakeBudget { get; set; }
+    public long FlakeConsumed { get; set; }
+    public decimal FlakeRemaining { get; set; }
+    public decimal? FlakeRemainingPct { get; set; }
+    public decimal FlakeBurnRate { get; set; }
     public long IncidentTotal { get; set; }
     public long RealOutage { get; set; }
     public long FlakyTransient { get; set; }

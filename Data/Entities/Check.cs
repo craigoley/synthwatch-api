@@ -111,6 +111,11 @@ public class Check
     // so target = 1.0 would div-by-zero (and 500 GetCheck) and target outside (0,1) is nonsensical.
     public float? SloTarget { get; set; }
 
+    // MONITOR trust budget target (migration 0080; numeric, nullable). Null = the FLEET DEFAULT (2%, applied in
+    // flake_status) — NOT opt-in like slo_target; a per-monitor value overrides. DASHBOARD-OWNED (reconcile never
+    // writes it). "this monitor may be MONITOR-SIDE flaky ≤ this fraction of scheduled runs."
+    public decimal? FlakeTarget { get; set; }
+
     // Monitors-as-code (Phase 13 activation). source_key (migration 0030) = the synthwatch-monitors
     // manifest id this check was activated from; a partial unique index (checks_source_key_uniq) allows
     // at most one live check per manifest id. spec_path (0033) = the manifest's Playwright spec path

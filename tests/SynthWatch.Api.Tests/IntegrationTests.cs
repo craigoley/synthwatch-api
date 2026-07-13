@@ -748,6 +748,81 @@ public class IntegrationTests
         Assert.Equal("ok", TrustReportProjection.SpuriousRedState(mOne));
     }
 
+    // ★★ B3-3 THE SAFETY PROPERTY, extended to the BUDGET: the MONITOR trust budget consumes MONITOR-SIDE
+    // transients ONLY. 355 (service-flaky) must NOT go "degraded-as-a-monitor" for Wegmans being flaky; 222
+    // (monitor-flaky) MUST, and must surface a directed FIX task; indeterminate burns nothing. The revert proof
+    // (`NaiveAllTransientsBudget`, consuming EVERY transient) hard-fails if the monitor-side gate is dropped.
+    [Fact]
+    public void Trust_flake_budget_burns_only_monitor_side_and_surfaces_a_directed_task_never_a_mute()
+    {
+        // The gate stripped: a budget that consumes ALL transients (monitor + service + indeterminate) — exactly
+        // what would burn 355's budget for the SERVICE being flaky. degraded = consumed ≥ 2 AND consumed > budget.
+        static string NaiveAllTransientsBudget(TrustMonitorRow r)
+        {
+            var all = r.MonitorSideTransients + r.ServiceSideTransients + r.IndeterminateTransients;
+            if (all < TrustReportProjection.SpuriousRedMinCount) return TrustReportProjection.FlakeBudgetOk;
+            return all > r.FlakeBudget ? TrustReportProjection.FlakeBudgetDegraded : TrustReportProjection.FlakeBudgetOk;
+        }
+
+        // ── 355 SERVICE-flaky: 4 service-side / 48 scheduled, ZERO monitor-side. budget = 2% × 48 = 0.96. ──
+        var m355 = new TrustMonitorRow
+        {
+            CheckId = 355, CheckName = "355 shop-flow",
+            ServiceSideTransients = 4, MonitorSideTransients = 0,
+            FlakeTarget = 0.02m, FlakeTargetIsDefault = true, FlakeScheduledRuns = 48,
+            FlakeBudget = 0.96m, FlakeConsumed = 0, FlakeRemaining = 0.96m,
+        };
+        // ★★ THE SAFETY PROPERTY: a purely service-flaky monitor is NOT degraded — its budget is untouched.
+        Assert.Equal(TrustReportProjection.FlakeBudgetOk, TrustReportProjection.FlakeBudgetState(m355));
+        Assert.Null(TrustReportProjection.FlakeDirectedTask(m355));                 // no task — nothing for the operator to fix
+        // ★ REVERT PROOF: dropping the gate (consume all transients) WOULD degrade 355 (4 > 0.96) — the inversion
+        //   we refuse. If someone changes FlakeBudgetState to count all transients, the assertion above breaks.
+        Assert.Equal(TrustReportProjection.FlakeBudgetDegraded, NaiveAllTransientsBudget(m355));
+
+        // ── 222 MONITOR-flaky: 3 monitor-side / 49 scheduled. budget = 2% × 49 = 0.98; consumed 3 > 0.98. ──
+        var m222 = new TrustMonitorRow
+        {
+            CheckId = 222, CheckName = "222 dashboard",
+            MonitorSideTransients = 3, ServiceSideTransients = 0,
+            FlakeTarget = 0.02m, FlakeTargetIsDefault = true, FlakeScheduledRuns = 49,
+            FlakeBudget = 0.98m, FlakeConsumed = 3, FlakeRemaining = -2.02m,
+        };
+        Assert.Equal(TrustReportProjection.FlakeBudgetDegraded, TrustReportProjection.FlakeBudgetState(m222));
+        var task = TrustReportProjection.FlakeDirectedTask(m222);
+        Assert.NotNull(task);
+        Assert.Contains("222 dashboard", task);
+        Assert.Contains("spurious-red", task);
+        Assert.Contains("budget 2%", task);                                        // names the dimension + the budget
+        Assert.DoesNotContain("mute", task, StringComparison.OrdinalIgnoreCase);   // ★ a FIX task, NEVER a mute
+        Assert.DoesNotContain("suppress", task, StringComparison.OrdinalIgnoreCase);
+
+        // ── INDETERMINATE burns nothing: 10 indeterminate, ZERO monitor-side → ok (even though 10 > budget). ──
+        var mIndet = new TrustMonitorRow
+        {
+            CheckId = 999, CheckName = "indet",
+            IndeterminateTransients = 10, MonitorSideTransients = 0,
+            FlakeTarget = 0.02m, FlakeTargetIsDefault = true, FlakeScheduledRuns = 50,
+            FlakeBudget = 1.0m, FlakeConsumed = 0, FlakeRemaining = 1.0m,
+        };
+        Assert.Equal(TrustReportProjection.FlakeBudgetOk, TrustReportProjection.FlakeBudgetState(mIndet)); // ★ burns nothing
+        Assert.Equal(TrustReportProjection.FlakeBudgetDegraded, NaiveAllTransientsBudget(mIndet));         // (naive would burn it)
+
+        // ── a lone monitor-side red is noise, not degraded (the ≥ 2 floor, mirroring spurious-red). ──
+        var mOne = new TrustMonitorRow
+        {
+            CheckId = 998, CheckName = "one", MonitorSideTransients = 1,
+            FlakeTarget = 0.02m, FlakeScheduledRuns = 10, FlakeBudget = 0.2m, FlakeConsumed = 1, FlakeRemaining = -0.8m,
+        };
+        Assert.Equal(TrustReportProjection.FlakeBudgetOk, TrustReportProjection.FlakeBudgetState(mOne));
+
+        // ── the DTO carries the fleet-default flag + the surfaced (never-consumed) service/indeterminate counts. ──
+        var dto = TrustReportProjection.FlakeBudget(m355);
+        Assert.True(dto.TargetIsDefault);
+        Assert.Equal(0, dto.Consumed);              // monitor-side only
+        Assert.Equal(4, dto.ServiceSide);           // surfaced, not consumed
+        Assert.Equal("ok", dto.State);
+    }
+
     // ★ B3-2 end-to-end: retriedPasses is a DISPLAY annotation (never itself a chip input, the #152 class), but
     // the RETRIES it counts DO grade the retry dimension honestly. A monitor working at 6% retry to stay green
     // is retry-`elevated` → nominal (NOT hidden behind proven-live, as the old collapse did) AND still surfaces

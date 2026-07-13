@@ -174,6 +174,28 @@ public record TrustProvenanceDto(
     [property: JsonPropertyName("executedSha256")] string? ExecutedSha256,
     [property: JsonPropertyName("specPath")] string? SpecPath);
 
+/// <summary>★ B3-3 — the MONITOR trust budget. <c>consumed</c> = MONITOR-SIDE transients ONLY (the safety gate: a
+/// service-side transient is a real, if brief, blip the monitor CAUGHT and must NEVER burn its budget); serviceSide
+/// + indeterminate are surfaced, never consumed. <c>state</c> ∈ {ok, degraded-as-a-monitor} — DELIBERATELY DISTINCT
+/// from a service outage: this says "MY MONITOR is unreliable", a different problem with a different owner than
+/// "Wegmans is down". <c>directedTask</c> (non-null only when degraded) names the failing dimension + the evidence
+/// — a FIX task, NEVER a mute/auto-suppression (the flake budget has no write path to alerting). <c>targetIsDefault</c>
+/// = the fleet default (2%) is in force. indeterminate is surfaced so a budget over partial data reads honestly.</summary>
+public record TrustFlakeBudgetDto(
+    [property: JsonPropertyName("target")] decimal Target,
+    [property: JsonPropertyName("targetIsDefault")] bool TargetIsDefault,
+    [property: JsonPropertyName("scheduledRuns")] long ScheduledRuns,
+    [property: JsonPropertyName("monitorSide")] long MonitorSide,
+    [property: JsonPropertyName("serviceSide")] long ServiceSide,
+    [property: JsonPropertyName("indeterminate")] long Indeterminate,
+    [property: JsonPropertyName("budget")] decimal Budget,
+    [property: JsonPropertyName("consumed")] long Consumed,
+    [property: JsonPropertyName("remaining")] decimal Remaining,
+    [property: JsonPropertyName("remainingPct")] decimal? RemainingPct,
+    [property: JsonPropertyName("burnRate")] decimal BurnRate,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("directedTask")] string? DirectedTask);
+
 /// <summary>One monitor's trust row: measured facts + the derived chip. <c>lastGreenAt</c> null = NEVER
 /// verified green (a first-class state). <c>retryRate</c> = retryCount/runCount, null when runCount = 0
 /// (honest empty, not 0). <c>trust</c> ∈ {proven-live, flaky, unverified, nominal} — see TrustReportProjection
@@ -205,6 +227,8 @@ public record TrustMonitorDto(
     // ★ B3-2: the distinct per-dimension states (flap / retry / monitor-noise) — the SURFACED replacement for
     // the OR-collapse. The chip is derived FROM these; the scorecard shows which dimension flagged.
     [property: JsonPropertyName("dimensions")] TrustDimensionsDto Dimensions,
+    // ★ B3-3: the MONITOR trust budget — "degraded as a monitor" + the directed fix task. Burns MONITOR-SIDE only.
+    [property: JsonPropertyName("flakeBudget")] TrustFlakeBudgetDto FlakeBudget,
     [property: JsonPropertyName("trust")] string Trust);
 
 /// <summary>GET /reports/trust — the fleet scorecard: one row per ENABLED check over the window.</summary>

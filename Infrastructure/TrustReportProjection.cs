@@ -85,6 +85,11 @@ public static class TrustReportProjection
     public const string StateElevated = "elevated";
     public const string StateOk = "ok";
 
+    // ★ B3-3 flake-budget states — DELIBERATELY DISTINCT idiom from a service outage: "degraded as a MONITOR"
+    // (my monitor is unreliable) vs "the SERVICE is down". Different problems, different owners.
+    public const string FlakeBudgetOk = "ok";
+    public const string FlakeBudgetDegraded = "degraded-as-a-monitor";
+
     /// <summary>Monitor-noise = the "cry wolf" verdicts (monitor bugs), NOT reds the monitor correctly caught.</summary>
     public static long MonitorNoise(TrustMonitorRow r) => r.FlakyTransient + r.SelectorDrift;
 
@@ -150,6 +155,51 @@ public static class TrustReportProjection
         Retry: new TrustDimensionDto(RetryState(r)),
         MonitorNoise: new TrustDimensionDto(MonitorNoiseState(r)),
         SpuriousRed: new TrustDimensionDto(SpuriousRedState(r)));
+
+    /// <summary>★★ THE MONITOR TRUST BUDGET STATE. "degraded-as-a-monitor" when the monitor has spent MORE than
+    /// its budget on MONITOR-SIDE transients — i.e. <c>FlakeConsumed</c> (monitor-side ONLY, from flake_status'
+    /// gated SQL) exceeds <c>FlakeBudget</c> (= target × scheduled). Gated on ≥ 2 (a lone spurious red is noise,
+    /// mirroring SpuriousRed). ★ SERVICE-side + indeterminate transients are NOT in FlakeConsumed, so a monitor
+    /// that flaps only because the SERVICE is flaky (355) NEVER goes degraded — that is the safety property.</summary>
+    public static string FlakeBudgetState(TrustMonitorRow r)
+    {
+        if (r.FlakeConsumed < SpuriousRedMinCount) return FlakeBudgetOk;    // a lone monitor-side red is noise
+        return r.FlakeConsumed > r.FlakeBudget ? FlakeBudgetDegraded : FlakeBudgetOk;
+    }
+
+    /// <summary>★ THE DIRECTED FIX TASK (never a mute). Non-null ONLY when the budget is degraded. It names the
+    /// failing DIMENSION and the EVIDENCE so an operator can act — e.g. "222: spurious-red 4.1% (budget 2%) — 2
+    /// monitor-side reds with no new first-party service error over 49 scheduled runs". It is a plain string
+    /// surfaced on the monitor; SynthWatch has no monitor-owner concept, so ROUTING is a separate decision — this
+    /// deliberately does NOT auto-suppress, auto-mute, or touch alert routing.</summary>
+    public static string? FlakeDirectedTask(TrustMonitorRow r)
+    {
+        if (FlakeBudgetState(r) != FlakeBudgetDegraded) return null;
+        var ratePct = SpuriousRedRate(r.FlakeConsumed, r.FlakeScheduledRuns) is decimal sr
+            ? (sr * 100m).ToString("0.#")
+            : "n/a";
+        var budgetPct = (r.FlakeTarget * 100m).ToString("0.#");
+        return $"{r.CheckName}: spurious-red {ratePct}% (budget {budgetPct}%) — {r.FlakeConsumed} monitor-side "
+             + $"red(s) with no new first-party service error over {r.FlakeScheduledRuns} scheduled runs. "
+             + "Fix the flaky assertion/selector — this is a MONITOR problem, not a service outage.";
+    }
+
+    /// <summary>The MONITOR trust budget DTO — consumed = monitor-side ONLY; service/indeterminate surfaced,
+    /// never consumed; the directed task (null unless degraded).</summary>
+    public static TrustFlakeBudgetDto FlakeBudget(TrustMonitorRow r) => new(
+        Target: r.FlakeTarget,
+        TargetIsDefault: r.FlakeTargetIsDefault,
+        ScheduledRuns: r.FlakeScheduledRuns,
+        MonitorSide: r.MonitorSideTransients,
+        ServiceSide: r.ServiceSideTransients,
+        Indeterminate: r.IndeterminateTransients,
+        Budget: r.FlakeBudget,
+        Consumed: r.FlakeConsumed,
+        Remaining: r.FlakeRemaining,
+        RemainingPct: r.FlakeRemainingPct,
+        BurnRate: r.FlakeBurnRate,
+        State: FlakeBudgetState(r),
+        DirectedTask: FlakeDirectedTask(r));
 
     /// <summary>
     /// The chip, DERIVED from the per-dimension states above. <paramref name="asOf"/> is the reference clock
@@ -226,5 +276,8 @@ public static class TrustReportProjection
         SpecProvenance: new TrustProvenanceDto(r.ExecutedSha256, r.SpecPath),
         // ★ B3-2: the distinct dimension states — the SURFACED replacement for the OR-collapse.
         Dimensions: Dimensions(r),
+        // ★ B3-3: the MONITOR trust budget (burns monitor-side ONLY) + the directed fix task. NOT an input to the
+        // chip / not routed anywhere — a reporting field with a task, never a mute.
+        FlakeBudget: FlakeBudget(r),
         Trust: DeriveChip(r, asOf));
 }
