@@ -341,7 +341,10 @@ CREATE TABLE public.runs (
     -- Confirmation-retry (runner migration 0077). Kept in sync with the runner schema for the parity gate.
     confirmation_of_run_id bigint,
     superseded_by_run_id bigint,
-    CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text, 'error'::text, 'infra_error'::text, 'running'::text])))
+    -- B3-2 stage 2 transient classification (runner migration 0079). Set only on a superseded transient.
+    transient_class text,
+    CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text, 'error'::text, 'infra_error'::text, 'running'::text]))),
+    CONSTRAINT runs_transient_class_check CHECK (((transient_class IS NULL) OR (transient_class = ANY (ARRAY['monitor-side'::text, 'service-side'::text, 'indeterminate'::text]))))
 );
 
 

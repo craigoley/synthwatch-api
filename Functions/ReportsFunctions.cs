@@ -436,6 +436,9 @@ public class ReportsFunctions
                   coalesce(rc.retried_passes, 0) AS retried_passes,
                   coalesce(rc.flap_count, 0) AS flap_count,
                   coalesce(rc.scheduled_count, 0) AS scheduled_count,
+                  coalesce(rc.monitor_side_transients, 0) AS monitor_side_transients,
+                  coalesce(rc.service_side_transients, 0) AS service_side_transients,
+                  coalesce(rc.indeterminate_transients, 0) AS indeterminate_transients,
                   coalesce(ic.total, 0) AS incident_total,
                   coalesce(ic.real_outage, 0) AS real_outage,
                   coalesce(ic.flaky_transient, 0) AS flaky_transient,
@@ -459,6 +462,12 @@ public class ReportsFunctions
                       -- VISIBLE, measured signal. Same window; same index scan (free — one more FILTER on rc's rows).
                       count(*) FILTER (WHERE r.superseded_by_run_id IS NOT NULL)::bigint AS flap_count,
                       count(*) FILTER (WHERE NOT r.sandbox)::bigint AS scheduled_count,
+                      -- ★ B3-2 stage 2 (runner 0079): the superseded transients split by WHOSE FAULT. monitor_side
+                      -- is the spurious-red signal (the monitor cried wolf); service_side is a real brief outage
+                      -- the monitor caught (must NOT burn the monitor); indeterminate had no signals to tell.
+                      count(*) FILTER (WHERE r.transient_class = 'monitor-side')::bigint AS monitor_side_transients,
+                      count(*) FILTER (WHERE r.transient_class = 'service-side')::bigint AS service_side_transients,
+                      count(*) FILTER (WHERE r.transient_class = 'indeterminate')::bigint AS indeterminate_transients,
                       max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
                FROM runs r
                WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')
@@ -508,6 +517,9 @@ public class ReportsFunctions
                   coalesce(rc.retried_passes, 0) AS retried_passes,
                   coalesce(rc.flap_count, 0) AS flap_count,
                   coalesce(rc.scheduled_count, 0) AS scheduled_count,
+                  coalesce(rc.monitor_side_transients, 0) AS monitor_side_transients,
+                  coalesce(rc.service_side_transients, 0) AS service_side_transients,
+                  coalesce(rc.indeterminate_transients, 0) AS indeterminate_transients,
                   coalesce(ic.total, 0) AS incident_total,
                   coalesce(ic.real_outage, 0) AS real_outage,
                   coalesce(ic.flaky_transient, 0) AS flaky_transient,
@@ -531,6 +543,12 @@ public class ReportsFunctions
                       -- VISIBLE, measured signal. Same window; same index scan (free — one more FILTER on rc's rows).
                       count(*) FILTER (WHERE r.superseded_by_run_id IS NOT NULL)::bigint AS flap_count,
                       count(*) FILTER (WHERE NOT r.sandbox)::bigint AS scheduled_count,
+                      -- ★ B3-2 stage 2 (runner 0079): the superseded transients split by WHOSE FAULT. monitor_side
+                      -- is the spurious-red signal (the monitor cried wolf); service_side is a real brief outage
+                      -- the monitor caught (must NOT burn the monitor); indeterminate had no signals to tell.
+                      count(*) FILTER (WHERE r.transient_class = 'monitor-side')::bigint AS monitor_side_transients,
+                      count(*) FILTER (WHERE r.transient_class = 'service-side')::bigint AS service_side_transients,
+                      count(*) FILTER (WHERE r.transient_class = 'indeterminate')::bigint AS indeterminate_transients,
                       max(r.started_at) FILTER (WHERE r.status = 'pass') AS last_green_at
                FROM runs r
                WHERE r.check_id = c.id AND r.started_at >= now() - ({days} * INTERVAL '1 day')

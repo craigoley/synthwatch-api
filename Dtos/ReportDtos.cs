@@ -145,7 +145,21 @@ public record TrustRedTestDto(
 public record TrustDimensionsDto(
     [property: JsonPropertyName("flap")] TrustDimensionDto Flap,
     [property: JsonPropertyName("retry")] TrustDimensionDto Retry,
-    [property: JsonPropertyName("monitorNoise")] TrustDimensionDto MonitorNoise);
+    [property: JsonPropertyName("monitorNoise")] TrustDimensionDto MonitorNoise,
+    // ★ B3-2 stage 2: monitor-side transients ÷ scheduled (the "cried wolf on a monitor-side red" axis 222
+    // needed). ONLY monitor-side counts — a service-side transient (a real brief outage) never flags this.
+    [property: JsonPropertyName("spuriousRed")] TrustDimensionDto SpuriousRed);
+
+/// <summary>★ B3-2 stage 2 — the window's SUPERSEDED transients split by WHOSE FAULT (runner 0079). monitorSide
+/// = the monitor cried wolf (feeds spuriousRed + burns B3-3's flake budget); serviceSide = a real brief outage
+/// the monitor caught (must NOT penalise it); indeterminate = no signals to tell. spuriousRedRate = monitorSide
+/// ÷ scheduled (null when no scheduled runs). indeterminate is surfaced so an operator can judge trust — a rate
+/// over mostly-indeterminate data is not reliable.</summary>
+public record TrustTransientsDto(
+    [property: JsonPropertyName("monitorSide")] long MonitorSide,
+    [property: JsonPropertyName("serviceSide")] long ServiceSide,
+    [property: JsonPropertyName("indeterminate")] long Indeterminate,
+    [property: JsonPropertyName("spuriousRedRate")] decimal? SpuriousRedRate);
 
 /// <summary>One trust dimension's graded verdict. <c>state</c> ∈ {ok, elevated, flaky} — see
 /// TrustReportProjection for the exact per-axis thresholds the legend renders verbatim.</summary>
@@ -183,6 +197,8 @@ public record TrustMonitorDto(
     [property: JsonPropertyName("flapCount")] long FlapCount,
     [property: JsonPropertyName("scheduledCount")] long ScheduledCount,
     [property: JsonPropertyName("flapRate")] decimal? FlapRate,
+    // ★ B3-2 stage 2: the flap's transients split monitor-side / service-side / indeterminate + the spurious-red rate.
+    [property: JsonPropertyName("transients")] TrustTransientsDto Transients,
     [property: JsonPropertyName("incidents")] TrustIncidentsDto Incidents,
     [property: JsonPropertyName("redTest")] TrustRedTestDto RedTest,
     [property: JsonPropertyName("specProvenance")] TrustProvenanceDto SpecProvenance,

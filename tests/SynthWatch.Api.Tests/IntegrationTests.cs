@@ -677,6 +677,77 @@ public class IntegrationTests
         Assert.Equal("ok", TrustReportProjection.FlapState(m342));                        // ★ flap honestly ok — no longer contradicting
     }
 
+    // ★★ B3-2 stage 2 — THE SAFETY PROPERTY (the gate B3-3's flake budget depends on): the spurious-red
+    // dimension is graded on MONITOR-SIDE transients ONLY. A monitor whose transients are SERVICE-side (355's
+    // Wegmans "Failed to fetch" blips) must NOT flag spurious-red — the monitor CAUGHT a real outage and told
+    // the truth; penalising it would mean "the flakier your service, the quieter your monitoring". The revert
+    // proof (`NaiveAllTransients`, counting every transient regardless of fault) shows dropping the gate makes
+    // 355 flag → the test hard-fails if the monitor-side-only gate is removed.
+    [Fact]
+    public void Trust_spurious_red_burns_only_monitor_side_transients_never_service_side()
+    {
+        var asOf = new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero);
+
+        // The gate stripped: a spurious-red rate over ALL transients (monitor + service + indeterminate). This
+        // is exactly what would penalise 355 for Wegmans being flaky — the inversion we refuse.
+        static string NaiveAllTransientsState(TrustMonitorRow r)
+        {
+            var all = r.MonitorSideTransients + r.ServiceSideTransients + r.IndeterminateTransients;
+            if (all < TrustReportProjection.SpuriousRedMinCount) return "ok";
+            if (TrustReportProjection.SpuriousRedRate(all, r.ScheduledCount) is not decimal sr) return "ok";
+            return sr >= TrustReportProjection.SpuriousRedFlakyRate ? "flaky"
+                 : sr >= TrustReportProjection.SpuriousRedElevatedRate ? "elevated" : "ok";
+        }
+
+        // ── 355: a SERVICE-flaky monitor — 4 service-side transients / 48 scheduled (8.3%), zero monitor-side.
+        //    Otherwise clean (fresh green, no retries/noise). ──
+        var m355 = new TrustMonitorRow
+        {
+            CheckId = 355, CheckName = "355 shop-flow", IntervalSeconds = 1800,
+            RunCount = 96, RetryCount = 0, LastGreenAt = asOf.AddMinutes(-20),
+            ScheduledCount = 48, FlapCount = 4, ServiceSideTransients = 4, MonitorSideTransients = 0,
+        };
+        // ★★ THE SAFETY PROPERTY: the spurious-red dimension — the axis B3-3's flake budget burns on — is OK for
+        // a purely service-flaky monitor. Its transients were REAL blips it caught; its MONITOR trust is intact.
+        Assert.Equal("ok", TrustReportProjection.SpuriousRedState(m355));
+        Assert.Equal(0m, TrustReportProjection.SpuriousRedRate(m355.MonitorSideTransients, m355.ScheduledCount)); // 0/48
+        // ★ revert proof: a naive rate over ALL transients (dropping the monitor-side gate) WOULD flag 355 —
+        //   i.e. would burn its budget for Wegmans being flaky. This asserts the gate is load-bearing.
+        Assert.Equal("flaky", NaiveAllTransientsState(m355));
+        // (The coarse FLAP dimension does still note it flaps — honest; but the MONITOR-trust verdict spares it.)
+        Assert.Equal("flaky", TrustReportProjection.FlapState(m355));
+
+        // ── 222: a MONITOR-flaky monitor — 3 monitor-side transients / 50 scheduled (6%). ──
+        var m222 = new TrustMonitorRow
+        {
+            CheckId = 222, CheckName = "222 dashboard", IntervalSeconds = 900,
+            RunCount = 3000, RetryCount = 0, LastGreenAt = asOf.AddSeconds(-30),
+            ScheduledCount = 50, FlapCount = 3, MonitorSideTransients = 3, ServiceSideTransients = 0,
+        };
+        Assert.Equal("flaky", TrustReportProjection.SpuriousRedState(m222));              // ★ monitor-side DOES burn
+        Assert.Equal("flaky", TrustReportProjection.DeriveChip(m222, asOf));              // → degraded as a monitor
+        Assert.Equal(0.06m, TrustReportProjection.SpuriousRedRate(3, 50));
+
+        // ── INDETERMINATE burns nothing: 10 indeterminate / 50, zero monitor-side → spurious-red ok. ──
+        var mIndet = new TrustMonitorRow
+        {
+            CheckId = 999, CheckName = "indet", IntervalSeconds = 900,
+            RunCount = 3000, RetryCount = 0, LastGreenAt = asOf.AddSeconds(-30),
+            ScheduledCount = 50, FlapCount = 10, IndeterminateTransients = 10, MonitorSideTransients = 0,
+        };
+        Assert.Equal("ok", TrustReportProjection.SpuriousRedState(mIndet));               // ★ indeterminate burns nothing
+        Assert.Equal(0m, TrustReportProjection.SpuriousRedRate(0, 50));                   // monitor-side numerator is 0
+
+        // one monitor-side transient is noise, not a pattern (the ≥ 2 count floor).
+        var mOne = new TrustMonitorRow
+        {
+            CheckId = 998, CheckName = "one", IntervalSeconds = 900,
+            RunCount = 100, RetryCount = 0, LastGreenAt = asOf.AddSeconds(-30),
+            ScheduledCount = 10, FlapCount = 1, MonitorSideTransients = 1,
+        };
+        Assert.Equal("ok", TrustReportProjection.SpuriousRedState(mOne));
+    }
+
     // ★ B3-2 end-to-end: retriedPasses is a DISPLAY annotation (never itself a chip input, the #152 class), but
     // the RETRIES it counts DO grade the retry dimension honestly. A monitor working at 6% retry to stay green
     // is retry-`elevated` → nominal (NOT hidden behind proven-live, as the old collapse did) AND still surfaces
@@ -953,6 +1024,72 @@ public class IntegrationTests
         finally
         {
             await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'trust-flap';");
+        }
+    }
+
+    // ★★ B3-2 stage 2 end-to-end (the SAFETY property, over real SQL): the trust SQL splits a check's superseded
+    // transients by runs.transient_class, the projection grades spurious-red on MONITOR-SIDE only, and the
+    // counts (incl. indeterminate) are surfaced. Two monitors, identical except WHOSE FAULT their transients
+    // were: the monitor-side one goes "degraded as a monitor" (spurious-red flaky); the service-side one stays
+    // proven-live (it caught real blips — never penalised). Indeterminate burns nothing.
+    [SkippableFact]
+    public async Task Trust_spurious_red_dimension_reflects_transient_class_and_spares_service_side()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE mon bigint; svc bigint;
+            BEGIN
+              -- MONITOR-side: 3 superseded transients classified monitor-side (the monitor cried wolf) / 50 scheduled.
+              INSERT INTO checks (name, kind, target_url, flow_name) VALUES ('trust-mon','browser','https://m.ex','shop') RETURNING id INTO mon;
+              FOR i IN 1..3 LOOP
+                INSERT INTO runs (check_id, status, started_at, transient_class)
+                  VALUES (mon, 'error', now() - (i || ' minutes')::interval, 'monitor-side');
+              END LOOP;
+              FOR i IN 1..47 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (mon, 'pass', now() - (i || ' minutes')::interval); END LOOP;
+
+              -- SERVICE-side: 4 superseded transients classified service-side (real brief outages it caught) / 50.
+              INSERT INTO checks (name, kind, target_url, flow_name) VALUES ('trust-svc','browser','https://s.ex','shop') RETURNING id INTO svc;
+              FOR i IN 1..4 LOOP
+                INSERT INTO runs (check_id, status, started_at, transient_class)
+                  VALUES (svc, 'error', now() - (i || ' minutes')::interval, 'service-side');
+              END LOOP;
+              -- plus 2 indeterminate transients (no signals) — must burn nothing.
+              FOR i IN 1..2 LOOP
+                INSERT INTO runs (check_id, status, started_at, transient_class)
+                  VALUES (svc, 'error', now() - ((i+10) || ' minutes')::interval, 'indeterminate');
+              END LOOP;
+              FOR i IN 1..44 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (svc, 'pass', now() - (i || ' minutes')::interval); END LOOP;
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var all = Assert.IsType<TrustReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetTrustReport(Request("?window=30d"), default)).Value!);
+            var m = all.Monitors.Where(x => x.CheckName.StartsWith("trust-")).ToDictionary(x => x.CheckName);
+
+            // ── MONITOR-side → degraded as a monitor. spurious-red 3/50 = 6% ≥ 5% flaky. ──
+            var mon = m["trust-mon"];
+            Assert.Equal(3, mon.Transients.MonitorSide);
+            Assert.Equal(0, mon.Transients.ServiceSide);
+            Assert.Equal(0.06m, mon.Transients.SpuriousRedRate);
+            Assert.Equal("flaky", mon.Dimensions.SpuriousRed.State);
+            Assert.Equal("flaky", mon.Trust);              // ★ the chip names it
+
+            // ── SERVICE-side → NEVER penalised. spurious-red rate 0 (monitor-side numerator is 0). ──
+            var svc = m["trust-svc"];
+            Assert.Equal(4, svc.Transients.ServiceSide);
+            Assert.Equal(0, svc.Transients.MonitorSide);
+            Assert.Equal(2, svc.Transients.Indeterminate); // ★ surfaced so the operator sees the unclassified share
+            Assert.Equal(0m, svc.Transients.SpuriousRedRate);
+            Assert.Equal("ok", svc.Dimensions.SpuriousRed.State);   // ★★ SAFETY: the service-flaky monitor is NOT flagged
+            Assert.Equal("proven-live", svc.Trust);        // ★ it caught real blips — it is trustworthy
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name IN ('trust-mon','trust-svc');");
         }
     }
 
