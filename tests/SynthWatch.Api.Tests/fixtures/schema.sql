@@ -379,17 +379,27 @@ CREATE TABLE public.schema_migrations (
 --
 -- Name: countable_run; Type: VIEW; Schema: public; Owner: -
 --
--- ★ countable_run (runner migration 0081): the ONE canonical "countable scheduled observation" — a
--- real-result, non-superseded, non-sandbox run, MINUS redundant DOWN confirmation re-checks. Consumed by
--- sla_availability + slo_status (their bodies LEFT JOIN it). Placed AFTER the runs table (a view validates
--- its FROM at CREATE time, unlike the deferred SQL-function bodies above). Mirrors runner db/schema.sql.
-
+-- ★ countable_run (runner migrations 0081 + 0083): the ONE canonical "countable scheduled observation" — a
+-- real-result, non-superseded, non-CONFIRMATION, non-sandbox run. Consumed by sla_availability + slo_status
+-- (their bodies LEFT JOIN it). Placed AFTER the runs table (a view validates its FROM at CREATE time, unlike
+-- the deferred SQL-function bodies above). Mirrors runner db/schema.sql. Two 0083 corrections vs 0081:
+--   • EXPLICIT column list, NOT SELECT * — SELECT * pinned every runs column into the view's contract
+--     (incl. retry_count), which is why the self-test below no longer needs a CASCADE. The five consumers
+--     read exactly these six.
+--   • SYMMETRIC confirmation exclusion (confirmation_of_run_id IS NULL) — a confirmation is a re-check of a
+--     sample already in the window, neither a new up nor a new down; the prior "keep a passing confirmation
+--     as up" inflated availability. See runner db/migrations/0083 for the ruling.
 CREATE OR REPLACE VIEW public.countable_run AS
-    SELECT *
+    SELECT id,
+           check_id,
+           status,
+           started_at,
+           location,
+           duration_ms
       FROM runs
      WHERE status NOT IN ('running', 'infra_error')
        AND superseded_by_run_id IS NULL
-       AND NOT (confirmation_of_run_id IS NOT NULL AND status IN ('fail', 'error'))
+       AND confirmation_of_run_id IS NULL
        AND NOT sandbox;
 
 

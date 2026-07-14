@@ -218,11 +218,12 @@ run_self_test() {
   echo "  identical → GREEN ✓"
   # Drop a real column from B and confirm the engine flags exactly it. runs.retry_count is a runner-added
   # column the API reads (the #152 attempt-count semantics) — a faithful stand-in for a real drift.
-  # CASCADE: the fixture's countable_run view (runner 0081) is `SELECT * FROM runs`, so it pins a hard
-  # dependency on EVERY runs column; a bare DROP now errors under `bash -e`. CASCADE also drops the view, but
-  # the `col|runs|retry_count|` drift line is still emitted, so the grep assertion below is unchanged — this
-  # adapts the negative control to the new (faithful) view, it does NOT weaken what it proves.
-  psql_db st_b -c "ALTER TABLE runs DROP COLUMN retry_count CASCADE;" >/dev/null
+  # BARE drop (no CASCADE): as of runner 0083 the fixture's countable_run view is an EXPLICIT column list, not
+  # `SELECT *`, so it no longer pins a hard dependency on every runs column. A bare `DROP COLUMN retry_count`
+  # now succeeds — and KEEPING it bare is deliberate: if a future change reintroduces the `SELECT *` coupling,
+  # this line errors and the self-test goes red, catching the regression. (This unblocks the dead-retries
+  # cleanup: dropping retry_count for real is no longer gated on a view rewrite.)
+  psql_db st_b -c "ALTER TABLE runs DROP COLUMN retry_count;" >/dev/null
   snapshot st_b "$WORK/b2.txt"
   local drift
   drift="$(diff_missing_in_fixture "$WORK/a.txt" "$WORK/b2.txt" || true)"
