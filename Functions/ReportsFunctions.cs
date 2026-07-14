@@ -398,14 +398,14 @@ public class ReportsFunctions
             .FirstOrDefault();
         if (row is null) return ApiResults.NotFound($"Monitor {checkId} not found.");
 
-        var series = await _db.TrustRetryDays.FromSql(
+        var series = await _db.TrustRecheckDays.FromSql(
             $@"SELECT d.day::date AS day,
                       coalesce(rc.run_count, 0) AS run_count,
-                      coalesce(rc.retry_count, 0) AS retry_count
+                      coalesce(rc.recheck_count, 0) AS recheck_count
                FROM generate_series((CURRENT_DATE - ({days} - 1))::date, CURRENT_DATE, INTERVAL '1 day') d(day)
                LEFT JOIN LATERAL (
                    SELECT count(*)::bigint AS run_count,
-                          count(*) FILTER (WHERE r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retry_count
+                          count(*) FILTER (WHERE r.confirmation_of_run_id IS NOT NULL /* confirmation re-checks issued (migration 0077) — the monitor needed a SECOND LOOK. Re-sourced from the retry_count fossil (frozen at 1 since #291/#304, so retry_count>1 is structurally zero forever) to the mechanism that ACTUALLY runs. */)::bigint AS recheck_count
                    FROM runs r
                    WHERE r.check_id = {checkId} AND r.started_at::date = d.day::date
                ) rc ON true
@@ -414,8 +414,8 @@ public class ReportsFunctions
         var asOf = DateTimeOffset.UtcNow;
         var monitor = TrustReportProjection.ToDto(row, asOf);
         var points = series
-            .Select(s => new TrustRetryPointDto(s.Day, s.RunCount, s.RetryCount,
-                TrustReportProjection.RetryRate(s.RetryCount, s.RunCount)))
+            .Select(s => new TrustRecheckPointDto(s.Day, s.RunCount, s.RecheckCount,
+                TrustReportProjection.RecheckRate(s.RecheckCount, s.RunCount)))
             .ToList();
 
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
@@ -432,8 +432,8 @@ public class ReportsFunctions
         $@"SELECT c.id AS check_id, c.name AS check_name, c.kind AS kind, c.sensitive AS sensitive,
                   c.interval_seconds AS interval_seconds, c.last_run_at AS last_run_at,
                   rc.last_green_at AS last_green_at,
-                  coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
-                  coalesce(rc.retried_passes, 0) AS retried_passes,
+                  coalesce(rc.run_count, 0) AS run_count, coalesce(rc.recheck_count, 0) AS recheck_count,
+                  coalesce(rc.rechecked_passes, 0) AS rechecked_passes,
                   coalesce(rc.flap_count, 0) AS flap_count,
                   coalesce(rc.scheduled_count, 0) AS scheduled_count,
                   coalesce(rc.monitor_side_transients, 0) AS monitor_side_transients,
@@ -455,11 +455,11 @@ public class ReportsFunctions
            FROM checks c
            LEFT JOIN LATERAL (
                SELECT count(*)::bigint AS run_count,
-                      count(*) FILTER (WHERE r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retry_count,
-                      -- ★ degrading-but-green early warning: a PASS/WARN run that STILL needed a real retry. A
-                      -- DISPLAY-ONLY annotation — NEVER an input to DeriveChip (the #152 class must not recur).
-                      -- Counted over the SAME window as retry_count.
-                      count(*) FILTER (WHERE r.status IN ('pass','warn') AND r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retried_passes,
+                      count(*) FILTER (WHERE r.confirmation_of_run_id IS NOT NULL /* confirmation re-checks issued (migration 0077) — the monitor needed a SECOND LOOK. Re-sourced from the retry_count fossil (frozen at 1 since #291/#304, so retry_count>1 is structurally zero forever) to the mechanism that ACTUALLY runs. */)::bigint AS recheck_count,
+                      -- ★ degrading-but-green early warning: a PASS/WARN confirmation re-check — the monitor
+                      -- needed a SECOND LOOK and it RECOVERED (the confirmation itself passed). A DISPLAY-ONLY
+                      -- annotation — NEVER an input to DeriveChip (the #152 class must not recur). Same window.
+                      count(*) FILTER (WHERE r.status IN ('pass','warn') AND r.confirmation_of_run_id IS NOT NULL /* confirmation re-checks issued (migration 0077) — the monitor needed a SECOND LOOK. Re-sourced from the retry_count fossil (frozen at 1 since #291/#304, so retry_count>1 is structurally zero forever) to the mechanism that ACTUALLY runs. */)::bigint AS rechecked_passes,
                       -- ★ Flakiness surfaced (confirmation-retry P2, migration 0077): a superseded TRANSIENT — a
                       -- scheduled failure whose fresh confirmation PASSED, so it was excluded from health signal.
                       -- Counting it (÷ non-sandbox runs = flap rate) turns a silently-self-healed failure into a
@@ -521,8 +521,8 @@ public class ReportsFunctions
         $@"SELECT c.id AS check_id, c.name AS check_name, c.kind AS kind, c.sensitive AS sensitive,
                   c.interval_seconds AS interval_seconds, c.last_run_at AS last_run_at,
                   rc.last_green_at AS last_green_at,
-                  coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
-                  coalesce(rc.retried_passes, 0) AS retried_passes,
+                  coalesce(rc.run_count, 0) AS run_count, coalesce(rc.recheck_count, 0) AS recheck_count,
+                  coalesce(rc.rechecked_passes, 0) AS rechecked_passes,
                   coalesce(rc.flap_count, 0) AS flap_count,
                   coalesce(rc.scheduled_count, 0) AS scheduled_count,
                   coalesce(rc.monitor_side_transients, 0) AS monitor_side_transients,
@@ -544,11 +544,11 @@ public class ReportsFunctions
            FROM checks c
            LEFT JOIN LATERAL (
                SELECT count(*)::bigint AS run_count,
-                      count(*) FILTER (WHERE r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retry_count,
-                      -- ★ degrading-but-green early warning: a PASS/WARN run that STILL needed a real retry. A
-                      -- DISPLAY-ONLY annotation — NEVER an input to DeriveChip (the #152 class must not recur).
-                      -- Counted over the SAME window as retry_count.
-                      count(*) FILTER (WHERE r.status IN ('pass','warn') AND r.retry_count > 1 /* attempt count (runner migration 0048): 1 = first try / NO retry; > 1 = an ACTUAL retry. > 0 would count every clean pass as retried. */)::bigint AS retried_passes,
+                      count(*) FILTER (WHERE r.confirmation_of_run_id IS NOT NULL /* confirmation re-checks issued (migration 0077) — the monitor needed a SECOND LOOK. Re-sourced from the retry_count fossil (frozen at 1 since #291/#304, so retry_count>1 is structurally zero forever) to the mechanism that ACTUALLY runs. */)::bigint AS recheck_count,
+                      -- ★ degrading-but-green early warning: a PASS/WARN confirmation re-check — the monitor
+                      -- needed a SECOND LOOK and it RECOVERED (the confirmation itself passed). A DISPLAY-ONLY
+                      -- annotation — NEVER an input to DeriveChip (the #152 class must not recur). Same window.
+                      count(*) FILTER (WHERE r.status IN ('pass','warn') AND r.confirmation_of_run_id IS NOT NULL /* confirmation re-checks issued (migration 0077) — the monitor needed a SECOND LOOK. Re-sourced from the retry_count fossil (frozen at 1 since #291/#304, so retry_count>1 is structurally zero forever) to the mechanism that ACTUALLY runs. */)::bigint AS rechecked_passes,
                       -- ★ Flakiness surfaced (confirmation-retry P2, migration 0077): a superseded TRANSIENT — a
                       -- scheduled failure whose fresh confirmation PASSED, so it was excluded from health signal.
                       -- Counting it (÷ non-sandbox runs = flap rate) turns a silently-self-healed failure into a

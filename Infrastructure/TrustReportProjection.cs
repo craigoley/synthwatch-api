@@ -21,14 +21,15 @@ namespace SynthWatch.Api.Infrastructure;
 /// on its OWN state ∈ {ok, elevated, flaky} from a NAMED threshold, and the chip is a DERIVATION over those
 /// states that always surfaces WHICH dimension flagged (see <see cref="Dimensions"/>):
 ///   • flap    — superseded transients ÷ scheduled runs (confirmation-retry P2). Browser/multistep only —
-///               http/dns/ssl produce no superseded runs, so their flap is honestly 0 (they flag on retry).
-///   • retry   — runs needing a real retry (retry_count &gt; 1) ÷ runs. Covers ALL kinds.
+///               http/dns/ssl produce no superseded runs, so their flap is honestly 0 (they flag on recheck).
+///   • recheck — confirmation re-checks issued (confirmation_of_run_id) ÷ runs — "needed a SECOND LOOK".
+///               Covers ALL kinds. Re-sourced from the dead retry_count > 1 (#291/#304); gated on ≥ 2.
 ///   • monitor-noise — RCA "cry wolf" incidents (flaky-transient + selector-drift). A COUNT, not a rate.
 ///
 /// ★ THE CHIP RULES (evaluated top-to-bottom; first match wins — the precedence IS the contract):
 ///   1. "unverified"  — never green (lastGreenAt == null) OR no runs in the window (runCount == 0).
 ///                      No live evidence to trust; this truth dominates, so it is checked first.
-///   2. "flaky"       — ANY dimension is `flaky` (flap ≥ 5% with ≥ 2 transients, OR retry ≥ 10%, OR any
+///   2. "flaky"       — ANY dimension is `flaky` (flap ≥ 5% with ≥ 2 transients, OR recheck ≥ 10% with ≥ 2, OR any
 ///                      monitor-noise incident). The OR is now over NAMED, SURFACED dimensions — the chip
 ///                      names which one, it does not swallow it.
 ///   3. "proven-live" — last green within 2 check intervals AND EVERY dimension `ok` (no flaky, NO elevated).
@@ -39,7 +40,7 @@ namespace SynthWatch.Api.Infrastructure;
 /// ★ THE THRESHOLDS ARE DERIVED FROM THE MEASURED 30d FLEET DISTRIBUTION (2026-07-13), not round numbers —
 /// "9.7% reading clean is a bug, not a philosophy". Justifications sit on each constant below.
 ///
-/// ★ Honesty: retryRate/flapRate are null (never 0) when the denominator is 0; monitor-noise EXCLUDES
+/// ★ Honesty: recheckRate/flapRate are null (never 0) when the denominator is 0; monitor-noise EXCLUDES
 /// real-outage / perf-regression / environment-regional (those are reds the monitor correctly caught, not
 /// noise); redTest.captured is a hard <c>false</c> (Signal 1 has no data — a visible v2 contract slot).
 /// </summary>
@@ -55,17 +56,22 @@ public static class TrustReportProjection
     public const decimal FlapFlakyRate = 0.05m;
     public const long FlapMinCount = 2;
 
-    // RETRY — the fleet's retry rates cluster ≤ 0.6% (well-behaved), then jump to 3.9% (224), 6.4% (341),
-    // 11.3% (342). A 2% `elevated` floor separates the clean cluster from that trio; a 10% `flaky` floor
-    // isolates 342 (the only double-digit) and MATCHES the pre-existing proven-live boundary — retry < 10%
-    // was already required for proven-live, so ≥ 10% was already "not proven-live"; now it is correctly
-    // labelled flaky instead of silently "nominal". (The old 0.50 flaky floor was DEAD — nothing approached it.)
-    public const decimal RetryElevatedRate = 0.02m;
-    public const decimal RetryFlakyRate = 0.10m;
+    // RECHECK — confirmation re-checks ISSUED ÷ runs ("how often does this monitor need a SECOND LOOK?").
+    // ★ RE-SOURCED (#291/#304): the old signal was retry_count > 1, but checks.retries was DROPPED and
+    // runs.retry_count is frozen at 1 forever, so retry_count>1 is STRUCTURALLY ZERO — a fossil. This points the
+    // SAME dimension (a second look was needed) at the mechanism that ACTUALLY runs: confirmation_of_run_id.
+    // Bands unchanged from #232's calibration (elevated ≥ 2%, flaky ≥ 10%); the flaky arm is currently
+    // theoretical on live data (measured 2026-07-14 max is 355 at 3.68%, then ≤ 1.2%) but confirmation rates
+    // spike under real degradation, so it stays. ★ RecheckMinCount = 2 mirrors FlapMinCount / SpuriousRedMinCount —
+    // a volume floor #232 never had: a check with a single confirmation re-check (353: 1 recheck) is NOISE, not
+    // flaky. Without it a vacuous 1-of-1 reads 100% flaky (the 353 bug).
+    public const decimal RecheckElevatedRate = 0.02m;
+    public const decimal RecheckFlakyRate = 0.10m;
+    public const long RecheckMinCount = 2;
 
     // SPURIOUS-RED (B3-2 stage 2) — a MONITOR-SIDE transient (a superseded transient the monitor caused: no NEW
     // first-party service error, runner 0079) ÷ scheduled runs. This is the dimension 222's paint-race reds
-    // needed — flap/retry/monitor-noise all read it clean. Same band as flap (elevated ≥ 1%, flaky ≥ 5%, ≥ 2)
+    // needed — flap/recheck/monitor-noise all read it clean. Same band as flap (elevated ≥ 1%, flaky ≥ 5%, ≥ 2)
     // because it measures the same "the monitor cried wolf" concept, just restricted to the proven-monitor-side
     // subset. ★ SERVICE-side + indeterminate transients are DELIBERATELY excluded — a service-side transient is
     // a real, if brief, outage the monitor CAUGHT; penalising the monitor for it would invert monitoring.
@@ -145,9 +151,10 @@ public static class TrustReportProjection
     public static decimal? FlapRate(long flapCount, long scheduledCount) =>
         scheduledCount > 0 ? Math.Round((decimal)flapCount / scheduledCount, 4) : null;
 
-    /// <summary>retryRate = retryCount / runCount; null when runCount == 0 (honest empty, never a fake 0).</summary>
-    public static decimal? RetryRate(long retryCount, long runCount) =>
-        runCount > 0 ? Math.Round((decimal)retryCount / runCount, 4) : null;
+    /// <summary>recheckRate = recheckCount / runCount (confirmation re-checks issued ÷ runs); null when
+    /// runCount == 0 (honest empty, never a fake 0).</summary>
+    public static decimal? RecheckRate(long recheckCount, long runCount) =>
+        runCount > 0 ? Math.Round((decimal)recheckCount / runCount, 4) : null;
 
     /// <summary>spuriousRedRate = MONITOR-SIDE transients ÷ scheduledCount (service-side + indeterminate are
     /// NOT in the numerator — only proven monitor-caused reds). null when scheduledCount == 0.</summary>
@@ -167,13 +174,15 @@ public static class TrustReportProjection
         return StateOk;
     }
 
-    /// <summary>retry dimension: `elevated` in [2%, 10%), `flaky` at ≥ 10%. null denominator → ok (no runs;
-    /// the `unverified` chip rule handles the no-evidence case first).</summary>
-    public static string RetryState(TrustMonitorRow r)
+    /// <summary>recheck dimension: `elevated` in [2%, 10%), `flaky` at ≥ 10% — both gated on ≥ 2 confirmation
+    /// re-checks (RecheckMinCount; a single re-check is noise, not flakiness — the 353 vacuous-flaky guard). null
+    /// denominator → ok (no runs; the `unverified` chip rule handles the no-evidence case first).</summary>
+    public static string RecheckState(TrustMonitorRow r)
     {
-        if (RetryRate(r.RetryCount, r.RunCount) is not decimal rr) return StateOk;
-        if (rr >= RetryFlakyRate) return StateFlaky;
-        if (rr >= RetryElevatedRate) return StateElevated;
+        if (r.RecheckCount < RecheckMinCount) return StateOk;              // a pattern needs ≥ 2 (353's lone re-check = ok)
+        if (RecheckRate(r.RecheckCount, r.RunCount) is not decimal rr) return StateOk;
+        if (rr >= RecheckFlakyRate) return StateFlaky;
+        if (rr >= RecheckElevatedRate) return StateElevated;
         return StateOk;
     }
 
@@ -195,11 +204,11 @@ public static class TrustReportProjection
     }
 
     /// <summary>The graded dimensions for the row — the SURFACED replacement for the OR-collapse. The UI pairs
-    /// each state with the numeric value that already lives on the row (flapRate / retryRate / the incident +
+    /// each state with the numeric value that already lives on the row (flapRate / recheckRate / the incident +
     /// transient counts).</summary>
     public static TrustDimensionsDto Dimensions(TrustMonitorRow r) => new(
         Flap: new TrustDimensionDto(FlapState(r)),
-        Retry: new TrustDimensionDto(RetryState(r)),
+        Recheck: new TrustDimensionDto(RecheckState(r)),
         MonitorNoise: new TrustDimensionDto(MonitorNoiseState(r)),
         // ★ spurious-red is trace_signals-derived → THREE distinct surfaced states (DeriveChip UNCHANGED — it
         // consumes the raw SpuriousRedState, so a clean http/new-browser check is still proven-live; only this
@@ -277,20 +286,20 @@ public static class TrustReportProjection
             return ChipUnverified;
 
         var flap = FlapState(r);
-        var retry = RetryState(r);
+        var recheck = RecheckState(r);
         var noise = MonitorNoiseState(r);
         var spurious = SpuriousRedState(r);
 
         // 2. flaky — ANY dimension is pathological. The OR now names WHICH dimension (Dimensions), never hides it.
-        if (flap == StateFlaky || retry == StateFlaky || noise == StateFlaky || spurious == StateFlaky)
+        if (flap == StateFlaky || recheck == StateFlaky || noise == StateFlaky || spurious == StateFlaky)
             return ChipFlaky;
 
         // 3. proven-live — recent real green AND EVERY dimension clean (no `elevated`, no `flaky`). A monitor
-        //    flapping 6.25% (flap `flaky`), retrying 6% (retry `elevated`), or crying wolf on monitor-side reds
+        //    flapping 6.25% (flap `flaky`), re-checking 6% (recheck `elevated`), or crying wolf on monitor-side reds
         //    (spurious-red `flaky`) can NO LONGER read proven-live.
         var freshCutoff = asOf - TimeSpan.FromSeconds((double)r.IntervalSeconds * ProvenLiveMaxIntervalsSinceGreen);
         var greenIsFresh = r.LastGreenAt.Value >= freshCutoff;
-        if (greenIsFresh && flap == StateOk && retry == StateOk && noise == StateOk && spurious == StateOk)
+        if (greenIsFresh && flap == StateOk && recheck == StateOk && noise == StateOk && spurious == StateOk)
             return ChipProvenLive;
 
         // 4. nominal — green exists but stale, OR a dimension is `elevated` (watch it, not yet flaky).
@@ -304,10 +313,10 @@ public static class TrustReportProjection
         LastGreenAt: r.LastGreenAt,
         LastRunAt: r.LastRunAt,
         RunCount: r.RunCount,
-        RetryCount: r.RetryCount,
-        RetryRate: RetryRate(r.RetryCount, r.RunCount),
+        RecheckCount: r.RecheckCount,
+        RecheckRate: RecheckRate(r.RecheckCount, r.RunCount),
         // ★ Display-only annotation — carried straight from the row, NEVER routed through DeriveChip.
-        RetriedPasses: r.RetriedPasses,
+        RecheckedPasses: r.RecheckedPasses,
         // ★ Confirmation-retry P2: surface the flap counts + rate (transient failures ÷ scheduled runs). Raw
         // counts too, so the UI can say "6 transient failures in 142 runs". The flap DIMENSION (not this raw
         // field) feeds the chip — a repeated flap is real flakiness, surfaced by name.
