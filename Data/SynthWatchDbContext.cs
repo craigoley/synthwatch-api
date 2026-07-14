@@ -51,7 +51,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<ReportNarrativeRow> ReportNarratives => Set<ReportNarrativeRow>();
     public DbSet<IncidentBreakdownRow> IncidentBreakdown => Set<IncidentBreakdownRow>();
     public DbSet<TrustMonitorRow> TrustMonitors => Set<TrustMonitorRow>();
-    public DbSet<TrustRetryDayRow> TrustRetryDays => Set<TrustRetryDayRow>();
+    public DbSet<TrustRecheckDayRow> TrustRecheckDays => Set<TrustRecheckDayRow>();
     public DbSet<StatusCheckRow> StatusChecks => Set<StatusCheckRow>();
     public DbSet<EgressRunRow> EgressRuns => Set<EgressRunRow>();
     public DbSet<RegionHealthRow> RegionHealth => Set<RegionHealthRow>();
@@ -544,8 +544,8 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
             e.Property(x => x.LastGreenAt).HasColumnName("last_green_at");
             e.Property(x => x.RunCount).HasColumnName("run_count");
-            e.Property(x => x.RetryCount).HasColumnName("retry_count");
-            e.Property(x => x.RetriedPasses).HasColumnName("retried_passes");
+            e.Property(x => x.RecheckCount).HasColumnName("recheck_count");
+            e.Property(x => x.RecheckedPasses).HasColumnName("rechecked_passes");
             e.Property(x => x.FlapCount).HasColumnName("flap_count");             // confirmation-retry P2
             e.Property(x => x.ScheduledCount).HasColumnName("scheduled_count");
             e.Property(x => x.MonitorSideTransients).HasColumnName("monitor_side_transients");   // B3-2 stage 2
@@ -572,14 +572,14 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.RedTestMethod).HasColumnName("red_test_method");
         });
 
-        // Keyless: §D1 trust detail — daily retry-rate trend for one check (the detail sparkline). Raw SQL only.
-        modelBuilder.Entity<TrustRetryDayRow>(e =>
+        // Keyless: §D1 trust detail — daily recheck-rate trend for one check (the detail sparkline). Raw SQL only.
+        modelBuilder.Entity<TrustRecheckDayRow>(e =>
         {
             e.HasNoKey();
             e.ToView(null);
             e.Property(x => x.Day).HasColumnName("day");
             e.Property(x => x.RunCount).HasColumnName("run_count");
-            e.Property(x => x.RetryCount).HasColumnName("retry_count");
+            e.Property(x => x.RecheckCount).HasColumnName("recheck_count");
         });
 
         // Keyless: GET /status — area-tagged checks' current signal / SLA / recent incidents, raw SQL only.

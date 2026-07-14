@@ -73,8 +73,8 @@ public class IncidentBreakdownRow
     public long Count { get; set; }
 }
 
-/// <summary>§D1 trust scorecard — one raw row per ENABLED check: run/retry/last-green aggregates, the RCA
-/// verdict counts, and the latest run's spec provenance. All MEASURED facts; the trust chip + retryRate are
+/// <summary>§D1 trust scorecard — one raw row per ENABLED check: run/recheck/last-green aggregates, the RCA
+/// verdict counts, and the latest run's spec provenance. All MEASURED facts; the trust chip + recheckRate are
 /// derived in TrustReportProjection (kept out of SQL so the rules stay legible + unit-testable). Keyless,
 /// raw SQL only. LastGreenAt null = never verified green (a first-class state, not a missing row).</summary>
 public class TrustMonitorRow
@@ -91,13 +91,17 @@ public class TrustMonitorRow
     public DateTimeOffset? LastRunAt { get; set; }
     public DateTimeOffset? LastGreenAt { get; set; }
     public long RunCount { get; set; }
-    public long RetryCount { get; set; }
-    // ★ degrading-but-green early warning: PASS/WARN runs that still needed a real retry (display-only —
-    // NEVER an input to the chip). Same window + retry_count>1 semantics as RetryCount.
-    public long RetriedPasses { get; set; }
+    // ★ RECHECK (re-sourced from the retry_count fossil, #291/#304): confirmation re-checks ISSUED over the
+    // window (confirmation_of_run_id IS NOT NULL) — "how often did this monitor need a SECOND LOOK?". The old
+    // retry_count>1 can never be true again (checks.retries dropped, runs.retry_count frozen at 1), so it was a
+    // permanent zero; this points the SAME dimension at the mechanism that actually runs.
+    public long RecheckCount { get; set; }
+    // ★ degrading-but-green early warning: a PASS/WARN confirmation re-check — a second look that RECOVERED
+    // (display-only — NEVER an input to the chip). Same window + confirmation_of_run_id semantics as RecheckCount.
+    public long RecheckedPasses { get; set; }
     // ★ Flakiness surfaced (confirmation-retry P2): FlapCount = superseded TRANSIENT failures (a scheduled run
     // that failed then a fresh confirmation PASSED, so it was excluded from health signal) over the window;
-    // ScheduledCount = non-sandbox runs (the flap-rate denominator). Same window as RetryCount. FlapRate =
+    // ScheduledCount = non-sandbox runs (the flap-rate denominator). Same window as RecheckCount. FlapRate =
     // FlapCount/ScheduledCount makes a silently-self-healed failure VISIBLE and MEASURED.
     public long FlapCount { get; set; }
     public long ScheduledCount { get; set; }
@@ -135,11 +139,11 @@ public class TrustMonitorRow
     public string? RedTestMethod { get; set; }
 }
 
-/// <summary>§D1 trust detail — one day of the retry-rate trend for a single check (the detail sparkline).
-/// RetryCount = runs that day needing ≥1 retry; RunCount = total that day. Keyless, raw SQL only.</summary>
-public class TrustRetryDayRow
+/// <summary>§D1 trust detail — one day of the recheck-rate trend for a single check (the detail sparkline).
+/// RecheckCount = confirmation re-checks issued that day; RunCount = total that day. Keyless, raw SQL only.</summary>
+public class TrustRecheckDayRow
 {
     public DateOnly Day { get; set; }
     public long RunCount { get; set; }
-    public long RetryCount { get; set; }
+    public long RecheckCount { get; set; }
 }

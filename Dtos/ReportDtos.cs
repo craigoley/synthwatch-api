@@ -141,10 +141,12 @@ public record TrustRedTestDto(
 /// axis carries its OWN state ∈ {ok, elevated, flaky} from a NAMED threshold (TrustReportProjection); the chip
 /// is now a DERIVATION over these, and the scorecard surfaces WHICH dimension flags — never a lossy single
 /// verdict. proven-live requires EVERY dimension `ok`; ANY dimension `flaky` ⇒ the chip is `flaky`. The numeric
-/// value each dimension grades (flapRate / retryRate / the incident counts) already lives on the parent row.</summary>
+/// value each dimension grades (flapRate / recheckRate / the incident counts) already lives on the parent row.</summary>
 public record TrustDimensionsDto(
     [property: JsonPropertyName("flap")] TrustDimensionDto Flap,
-    [property: JsonPropertyName("retry")] TrustDimensionDto Retry,
+    // ★ RECHECK (was "retry", re-sourced #291/#304): confirmation re-checks issued ÷ runs — "how often does this
+    // monitor need a SECOND LOOK?". Renamed because retry_count>1 is a permanent zero now; the operator's word is recheck.
+    [property: JsonPropertyName("recheck")] TrustDimensionDto Recheck,
     [property: JsonPropertyName("monitorNoise")] TrustDimensionDto MonitorNoise,
     // ★ B3-2 stage 2: monitor-side transients ÷ scheduled (the "cried wolf on a monitor-side red" axis 222
     // needed). ONLY monitor-side counts — a service-side transient (a real brief outage) never flags this.
@@ -203,7 +205,7 @@ public record TrustFlakeBudgetDto(
     [property: JsonPropertyName("directedTask")] string? DirectedTask);
 
 /// <summary>One monitor's trust row: measured facts + the derived chip. <c>lastGreenAt</c> null = NEVER
-/// verified green (a first-class state). <c>retryRate</c> = retryCount/runCount, null when runCount = 0
+/// verified green (a first-class state). <c>recheckRate</c> = recheckCount/runCount, null when runCount = 0
 /// (honest empty, not 0). <c>trust</c> ∈ {proven-live, flaky, unverified, nominal} — see TrustReportProjection
 /// for the exact rules the chip legend renders.</summary>
 public record TrustMonitorDto(
@@ -213,12 +215,12 @@ public record TrustMonitorDto(
     [property: JsonPropertyName("lastGreenAt")] DateTimeOffset? LastGreenAt,
     [property: JsonPropertyName("lastRunAt")] DateTimeOffset? LastRunAt,
     [property: JsonPropertyName("runCount")] long RunCount,
-    [property: JsonPropertyName("retryCount")] long RetryCount,
-    [property: JsonPropertyName("retryRate")] decimal? RetryRate,
-    // ★ "degrading-but-green" early warning: PASS/WARN runs that STILL needed a real retry over the window. A
-    // DISPLAY-ONLY annotation — NOT an input to `trust` (DeriveChip). A proven-live monitor with retried passes
-    // STAYS proven-live; this only flags "watch it, it's working harder to stay green".
-    [property: JsonPropertyName("retriedPasses")] long RetriedPasses,
+    [property: JsonPropertyName("recheckCount")] long RecheckCount,
+    [property: JsonPropertyName("recheckRate")] decimal? RecheckRate,
+    // ★ "degrading-but-green" early warning: PASS/WARN confirmation re-checks — a SECOND LOOK that RECOVERED over
+    // the window. A DISPLAY-ONLY annotation — NOT an input to `trust` (DeriveChip). A proven-live monitor with
+    // rechecked passes STAYS proven-live; this only flags "watch it, it's working harder to stay green".
+    [property: JsonPropertyName("recheckedPasses")] long RecheckedPasses,
     // ★ Confirmation-retry P2 — flakiness surfaced: transient failures (superseded_by_run_id set, confirmed
     // not-real, excluded from health) ÷ scheduled (non-sandbox) runs. Raw counts + the rate so the UI can say
     // "6 transient failures in 142 runs (4.2%)". flapRate is null (never a fake 0) when scheduledCount == 0.
@@ -230,7 +232,7 @@ public record TrustMonitorDto(
     [property: JsonPropertyName("incidents")] TrustIncidentsDto Incidents,
     [property: JsonPropertyName("redTest")] TrustRedTestDto RedTest,
     [property: JsonPropertyName("specProvenance")] TrustProvenanceDto SpecProvenance,
-    // ★ B3-2: the distinct per-dimension states (flap / retry / monitor-noise) — the SURFACED replacement for
+    // ★ B3-2: the distinct per-dimension states (flap / recheck / monitor-noise) — the SURFACED replacement for
     // the OR-collapse. The chip is derived FROM these; the scorecard shows which dimension flagged.
     [property: JsonPropertyName("dimensions")] TrustDimensionsDto Dimensions,
     // ★ B3-3: the MONITOR trust budget — "degraded as a monitor" + the directed fix task. Burns MONITOR-SIDE only.
@@ -242,15 +244,15 @@ public record TrustReportDto(
     [property: JsonPropertyName("window")] string Window,
     [property: JsonPropertyName("monitors")] IReadOnlyList<TrustMonitorDto> Monitors);
 
-/// <summary>One day of the retry-rate trend for the detail sparkline. retryRate null when the day had no runs.</summary>
-public record TrustRetryPointDto(
+/// <summary>One day of the recheck-rate trend for the detail sparkline. recheckRate null when the day had no runs.</summary>
+public record TrustRecheckPointDto(
     [property: JsonPropertyName("day")] DateOnly Day,
     [property: JsonPropertyName("runCount")] long RunCount,
-    [property: JsonPropertyName("retryCount")] long RetryCount,
-    [property: JsonPropertyName("retryRate")] decimal? RetryRate);
+    [property: JsonPropertyName("recheckCount")] long RecheckCount,
+    [property: JsonPropertyName("recheckRate")] decimal? RecheckRate);
 
-/// <summary>GET /reports/trust/{checkId} — one monitor's trust row + its daily retry-rate series.</summary>
+/// <summary>GET /reports/trust/{checkId} — one monitor's trust row + its daily recheck-rate series.</summary>
 public record TrustMonitorDetailDto(
     [property: JsonPropertyName("window")] string Window,
     [property: JsonPropertyName("monitor")] TrustMonitorDto Monitor,
-    [property: JsonPropertyName("retrySeries")] IReadOnlyList<TrustRetryPointDto> RetrySeries);
+    [property: JsonPropertyName("recheckSeries")] IReadOnlyList<TrustRecheckPointDto> RecheckSeries);

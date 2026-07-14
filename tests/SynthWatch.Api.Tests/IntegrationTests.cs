@@ -540,17 +540,17 @@ public class IntegrationTests
     // ── §D1 Monitor-Trust Scorecard ────────────────────────────────────────────────────────────────────
     // ★ B3-2 — the chip rules are the contract, and they are now DERIVED FROM DISTINCT DIMENSIONS (no
     // OR-collapse). This pure test locks the exact per-dimension boundaries the dashboard legend renders:
-    // retry elevated at 0.02 / flaky at 0.10; green at 2×interval. proven-live requires EVERY dimension `ok`
-    // (an `elevated` dimension → nominal, not proven-live).
+    // recheck elevated at 0.02 / flaky at 0.10 (both ≥ 2 count floor); green at 2×interval. proven-live requires
+    // EVERY dimension `ok` (an `elevated` dimension → nominal, not proven-live).
     [Fact]
     public void Trust_chip_derives_from_stated_auditable_rules_including_boundaries()
     {
         var asOf = new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero);
-        static TrustMonitorRow Row(long run, long retry, DateTimeOffset? green,
+        static TrustMonitorRow Row(long run, long recheck, DateTimeOffset? green,
             long flaky = 0, long selector = 0, int interval = 300) => new()
         {
             CheckId = 1, CheckName = "x", IntervalSeconds = interval,
-            RunCount = run, RetryCount = retry, LastGreenAt = green,
+            RunCount = run, RecheckCount = recheck, LastGreenAt = green,
             FlakyTransient = flaky, SelectorDrift = selector,
         };
         static string Chip(TrustMonitorRow r, DateTimeOffset a) => TrustReportProjection.DeriveChip(r, a);
@@ -559,40 +559,40 @@ public class IntegrationTests
         Assert.Equal("unverified", Chip(Row(10, 0, null), asOf));                       // never green
         Assert.Equal("unverified", Chip(Row(0, 0, asOf.AddSeconds(-30)), asOf));        // no runs in window
 
-        // 2. flaky — retry dimension `flaky` at ≥ 0.10 (boundary: exactly 0.10), OR any monitor-noise incident.
-        Assert.Equal("flaky", Chip(Row(100, 10, asOf.AddSeconds(-30)), asOf));          // 0.10 exactly → retry flaky
-        Assert.Equal("flaky", Chip(Row(10, 5, asOf.AddSeconds(-30)), asOf));            // 0.50 → retry flaky
-        Assert.Equal("flaky", Chip(Row(100, 1, asOf.AddSeconds(-30), selector: 1), asOf)); // retry ok, but noise flaky
+        // 2. flaky — recheck dimension `flaky` at ≥ 0.10 (boundary: exactly 0.10, ≥ 2 count), OR any monitor-noise incident.
+        Assert.Equal("flaky", Chip(Row(100, 10, asOf.AddSeconds(-30)), asOf));          // 0.10 exactly → recheck flaky
+        Assert.Equal("flaky", Chip(Row(10, 5, asOf.AddSeconds(-30)), asOf));            // 0.50 → recheck flaky
+        Assert.Equal("flaky", Chip(Row(100, 1, asOf.AddSeconds(-30), selector: 1), asOf)); // recheck ok (count < 2), but noise flaky
 
-        // 3. proven-live — green within 2 intervals AND EVERY dimension ok (retry < 0.02, no flap, no noise).
-        Assert.Equal("proven-live", Chip(Row(100, 1, asOf.AddSeconds(-30)), asOf));     // 0.01 < 0.02 → retry ok
+        // 3. proven-live — green within 2 intervals AND EVERY dimension ok (recheck ok, no flap, no noise).
+        Assert.Equal("proven-live", Chip(Row(100, 1, asOf.AddSeconds(-30)), asOf));     // 1 recheck (count < 2) → recheck ok
         Assert.Equal("proven-live", Chip(Row(100, 0, asOf.AddSeconds(-600)), asOf));    // green EXACTLY at 2×interval → still fresh
 
-        // 4. nominal — a dimension is `elevated` (retry in [0.02, 0.10)) OR green just past 2 intervals. An
+        // 4. nominal — a dimension is `elevated` (recheck in [0.02, 0.10)) OR green just past 2 intervals. An
         //    ELEVATED dimension blocks proven-live but is not yet flaky — this is where the old collapse hid it.
-        Assert.Equal("nominal", Chip(Row(100, 2, asOf.AddSeconds(-30)), asOf));         // 0.02 → retry elevated → nominal (not proven-live)
-        Assert.Equal("nominal", Chip(Row(100, 9, asOf.AddSeconds(-30)), asOf));         // 0.09 → retry elevated → nominal
+        Assert.Equal("nominal", Chip(Row(100, 2, asOf.AddSeconds(-30)), asOf));         // 0.02 (count 2) → recheck elevated → nominal (not proven-live)
+        Assert.Equal("nominal", Chip(Row(100, 9, asOf.AddSeconds(-30)), asOf));         // 0.09 → recheck elevated → nominal
         Assert.Equal("nominal", Chip(Row(100, 0, asOf.AddSeconds(-601)), asOf));        // green 1s past 2×interval → stale
     }
 
-    // ★ MUST-GO-RED (the #152 class must not recur): retriedPasses is a DISPLAY-ONLY annotation and must NEVER
-    // feed DeriveChip. Two rows identical except for RetriedPasses (0 vs a huge value) derive the SAME chip.
-    // If anyone wires retriedPasses into the chip as a demotion input, the second assert flips and this fails.
+    // ★ MUST-GO-RED (the #152 class must not recur): recheckedPasses is a DISPLAY-ONLY annotation and must NEVER
+    // feed DeriveChip. Two rows identical except for RecheckedPasses (0 vs a huge value) derive the SAME chip.
+    // If anyone wires recheckedPasses into the chip as a demotion input, the second assert flips and this fails.
     [Fact]
-    public void Trust_retriedPasses_is_display_only_and_never_feeds_the_chip()
+    public void Trust_recheckedPasses_is_display_only_and_never_feeds_the_chip()
     {
         var asOf = new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero);
-        // A proven-live row: retryRate 0.01 (< 0.02 → retry ok), fresh green, no flap, no noise. RetriedPasses
-        // is set INDEPENDENTLY of RetryCount here (the display field is not derived from it in this pure row),
-        // so the two rows differ ONLY in RetriedPasses — isolating the "never an input" invariant.
-        TrustMonitorRow ProvenLive(long retriedPasses) => new()
+        // A proven-live row: 1 recheck (count < 2 floor → recheck ok), fresh green, no flap, no noise. RecheckedPasses
+        // is set INDEPENDENTLY of RecheckCount here (the display field is not derived from it in this pure row),
+        // so the two rows differ ONLY in RecheckedPasses — isolating the "never an input" invariant.
+        TrustMonitorRow ProvenLive(long recheckedPasses) => new()
         {
             CheckId = 1, CheckName = "x", IntervalSeconds = 300,
-            RunCount = 100, RetryCount = 1, LastGreenAt = asOf.AddSeconds(-30),
-            RetriedPasses = retriedPasses,
+            RunCount = 100, RecheckCount = 1, LastGreenAt = asOf.AddSeconds(-30),
+            RecheckedPasses = recheckedPasses,
         };
         Assert.Equal("proven-live", TrustReportProjection.DeriveChip(ProvenLive(0), asOf));
-        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(ProvenLive(99), asOf)); // ★ 99 retried passes → STILL proven-live
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(ProvenLive(99), asOf)); // ★ 99 rechecked passes → STILL proven-live
     }
 
     // ★ B3-2 flap DIMENSION boundaries (derived from the fleet distribution): ok below the band, `elevated`
@@ -607,7 +607,7 @@ public class IntegrationTests
         TrustMonitorRow Row(long flaps, long scheduled) => new()
         {
             CheckId = 1, CheckName = "x", IntervalSeconds = 300,
-            RunCount = scheduled, RetryCount = 0, LastGreenAt = asOf.AddSeconds(-30),
+            RunCount = scheduled, RecheckCount = 0, LastGreenAt = asOf.AddSeconds(-30),
             FlapCount = flaps, ScheduledCount = scheduled,
         };
 
@@ -626,55 +626,57 @@ public class IntegrationTests
     // trustworthy monitors read trustworthy-LOOKING under the OR-collapse, and the distinct dimensions fix it,
     // NAMING which axis flags. The revert proof (`OldCollapseChip` = the exact pre-B3-2 rule) shows the collapse
     // makes them read clean again — so this test HARD-FAILS if anyone reinstates the collapse.
-    //   • 355 (shop-flow): flap 6.25% (3/48), retry 0, fresh green, no noise → OLD collapse: "proven live" (it
+    //   • 355 (shop-flow): flap 6.25% (3/48), recheck 0, fresh green, no noise → OLD collapse: "proven live" (it
     //     missed the 10% flap cutoff). NEW: flaky, flap dimension = flaky.
-    //   • 342 (kitting API): retry 11.3% (310/2747), flap 0, fresh green, no noise → OLD: "nominal" (retry ≥ 10%
-    //     blocked proven-live but < 50% wasn't flaky — a silent middle). NEW: flaky on RETRY, flap honestly ok —
-    //     two signals that used to read as one flat verdict are now surfaced separately, not contradicting.
+    //   • a HIGH-RECHECK monitor (recheck 11.3%, flap 0, fresh green, no noise) → OLD: "nominal" (the old retry
+    //     ≥ 10% blocked proven-live but < 50% wasn't flaky — a silent middle). NEW: flaky on RECHECK, flap honestly
+    //     ok — two signals that used to read as one flat verdict are now surfaced separately, not contradicting.
+    //     (★ Note: 342 read 11.3% on the PRE-#291 retry signal; post-re-source its live recheck is ~0.07%, so the
+    //     310/2747 here is SYNTHETIC — it exercises the recheck flaky arm, currently theoretical on live data.)
     // (222's paint-race spurious reds are a dimension nothing measures yet — they land in stage 2.)
     [Fact]
-    public void Trust_distinct_dimensions_flag_355_and_342_that_the_OR_collapse_hid()
+    public void Trust_distinct_dimensions_flag_355_and_a_high_recheck_monitor_that_the_OR_collapse_hid()
     {
         var asOf = new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero);
 
-        // The EXACT pre-B3-2 OR-collapse rule (retry ≥ 0.50 OR noise OR flap ≥ 10% w/ ≥ 2; proven-live if
-        // green-fresh AND retry < 0.10 AND no noise). Inlined so the revert is provable without a git revert.
+        // The EXACT pre-B3-2 OR-collapse rule (recheck ≥ 0.50 OR noise OR flap ≥ 10% w/ ≥ 2; proven-live if
+        // green-fresh AND recheck < 0.10 AND no noise). Inlined so the revert is provable without a git revert.
         static string OldCollapseChip(TrustMonitorRow r, DateTimeOffset a)
         {
             if (r.LastGreenAt is null || r.RunCount == 0) return "unverified";
-            var retry = TrustReportProjection.RetryRate(r.RetryCount, r.RunCount);
+            var recheck = TrustReportProjection.RecheckRate(r.RecheckCount, r.RunCount);
             var noise = TrustReportProjection.MonitorNoise(r);
             var flapRate = TrustReportProjection.FlapRate(r.FlapCount, r.ScheduledCount);
             var oldFlappy = r.FlapCount >= 2 && flapRate is decimal fr && fr >= 0.10m;
-            if ((retry is decimal rr && rr >= 0.50m) || noise > 0 || oldFlappy) return "flaky";
+            if ((recheck is decimal rr && rr >= 0.50m) || noise > 0 || oldFlappy) return "flaky";
             var fresh = r.LastGreenAt.Value >= a - TimeSpan.FromSeconds(r.IntervalSeconds * 2);
-            if (fresh && retry is decimal rr2 && rr2 < 0.10m && noise == 0) return "proven-live";
+            if (fresh && recheck is decimal rr2 && rr2 < 0.10m && noise == 0) return "proven-live";
             return "nominal";
         }
 
-        // 355 — flap 6.25% (3/48), retry 0, fresh green (interval 1800s), no noise.
+        // 355 — flap 6.25% (3/48), recheck 0, fresh green (interval 1800s), no noise.
         var m355 = new TrustMonitorRow
         {
             CheckId = 355, CheckName = "355 shop-flow", IntervalSeconds = 1800,
-            RunCount = 96, RetryCount = 0, LastGreenAt = asOf.AddMinutes(-20),
+            RunCount = 96, RecheckCount = 0, LastGreenAt = asOf.AddMinutes(-20),
             FlapCount = 3, ScheduledCount = 48,
         };
         Assert.Equal("proven-live", OldCollapseChip(m355, asOf));                         // ★ the bug: reverting reads it clean
         Assert.Equal("flaky", TrustReportProjection.DeriveChip(m355, asOf));              // ★ fixed: not proven-live
         Assert.Equal("flaky", TrustReportProjection.FlapState(m355));                     // ★ NAMES the flap dimension
-        Assert.Equal("ok", TrustReportProjection.RetryState(m355));                       // (retry honestly clean)
+        Assert.Equal("ok", TrustReportProjection.RecheckState(m355));                     // (recheck honestly clean)
 
-        // 342 — retry 11.3% (310/2747), flap 0, fresh green (interval 900s), no noise.
-        var m342 = new TrustMonitorRow
+        // a high-recheck monitor — recheck 11.3% (310/2747), flap 0, fresh green (interval 900s), no noise.
+        var mHiRecheck = new TrustMonitorRow
         {
-            CheckId = 342, CheckName = "342 kitting", IntervalSeconds = 900,
-            RunCount = 2747, RetryCount = 310, LastGreenAt = asOf.AddSeconds(-30),
+            CheckId = 342, CheckName = "high-recheck monitor", IntervalSeconds = 900,
+            RunCount = 2747, RecheckCount = 310, LastGreenAt = asOf.AddSeconds(-30),
             FlapCount = 0, ScheduledCount = 2747,
         };
-        Assert.Equal("nominal", OldCollapseChip(m342, asOf));                             // ★ the old silent middle
-        Assert.Equal("flaky", TrustReportProjection.DeriveChip(m342, asOf));              // ★ fixed: flaky on retry
-        Assert.Equal("flaky", TrustReportProjection.RetryState(m342));                    // ★ NAMES the retry dimension
-        Assert.Equal("ok", TrustReportProjection.FlapState(m342));                        // ★ flap honestly ok — no longer contradicting
+        Assert.Equal("nominal", OldCollapseChip(mHiRecheck, asOf));                        // ★ the old silent middle
+        Assert.Equal("flaky", TrustReportProjection.DeriveChip(mHiRecheck, asOf));         // ★ fixed: flaky on recheck
+        Assert.Equal("flaky", TrustReportProjection.RecheckState(mHiRecheck));             // ★ NAMES the recheck dimension
+        Assert.Equal("ok", TrustReportProjection.FlapState(mHiRecheck));                   // ★ flap honestly ok — no longer contradicting
     }
 
     // ★★ B3-2 stage 2 — THE SAFETY PROPERTY (the gate B3-3's flake budget depends on): the spurious-red
@@ -704,7 +706,7 @@ public class IntegrationTests
         var m355 = new TrustMonitorRow
         {
             CheckId = 355, CheckName = "355 shop-flow", IntervalSeconds = 1800,
-            RunCount = 96, RetryCount = 0, LastGreenAt = asOf.AddMinutes(-20),
+            RunCount = 96, RecheckCount = 0, LastGreenAt = asOf.AddMinutes(-20),
             ScheduledCount = 48, FlapCount = 4, ServiceSideTransients = 4, MonitorSideTransients = 0,
         };
         // ★★ THE SAFETY PROPERTY: the spurious-red dimension — the axis B3-3's flake budget burns on — is OK for
@@ -721,7 +723,7 @@ public class IntegrationTests
         var m222 = new TrustMonitorRow
         {
             CheckId = 222, CheckName = "222 dashboard", IntervalSeconds = 900,
-            RunCount = 3000, RetryCount = 0, LastGreenAt = asOf.AddSeconds(-30),
+            RunCount = 3000, RecheckCount = 0, LastGreenAt = asOf.AddSeconds(-30),
             ScheduledCount = 50, FlapCount = 3, MonitorSideTransients = 3, ServiceSideTransients = 0,
         };
         Assert.Equal("flaky", TrustReportProjection.SpuriousRedState(m222));              // ★ monitor-side DOES burn
@@ -732,7 +734,7 @@ public class IntegrationTests
         var mIndet = new TrustMonitorRow
         {
             CheckId = 999, CheckName = "indet", IntervalSeconds = 900,
-            RunCount = 3000, RetryCount = 0, LastGreenAt = asOf.AddSeconds(-30),
+            RunCount = 3000, RecheckCount = 0, LastGreenAt = asOf.AddSeconds(-30),
             ScheduledCount = 50, FlapCount = 10, IndeterminateTransients = 10, MonitorSideTransients = 0,
         };
         Assert.Equal("ok", TrustReportProjection.SpuriousRedState(mIndet));               // ★ indeterminate burns nothing
@@ -742,7 +744,7 @@ public class IntegrationTests
         var mOne = new TrustMonitorRow
         {
             CheckId = 998, CheckName = "one", IntervalSeconds = 900,
-            RunCount = 100, RetryCount = 0, LastGreenAt = asOf.AddSeconds(-30),
+            RunCount = 100, RecheckCount = 0, LastGreenAt = asOf.AddSeconds(-30),
             ScheduledCount = 10, FlapCount = 1, MonitorSideTransients = 1,
         };
         Assert.Equal("ok", TrustReportProjection.SpuriousRedState(mOne));
@@ -755,7 +757,7 @@ public class IntegrationTests
     public void Trust_dimension_states_at_exact_thresholds_kill_boundary_mutants()
     {
         static TrustMonitorRow Flap(long c, long sched) => new() { FlapCount = c, ScheduledCount = sched };
-        static TrustMonitorRow Retry(long c, long runs) => new() { RetryCount = c, RunCount = runs };
+        static TrustMonitorRow Recheck(long c, long runs) => new() { RecheckCount = c, RunCount = runs };
         static TrustMonitorRow Spur(long ms, long sched) => new() { MonitorSideTransients = ms, ScheduledCount = sched };
 
         // FLAP — elevated ≥ 1% (0.01), flaky ≥ 5% (0.05), ≥ 2 count.
@@ -765,10 +767,14 @@ public class IntegrationTests
         Assert.Equal("flaky", TrustReportProjection.FlapState(Flap(5, 100)));     // 5/100 = 0.05 EXACT → flaky (kills ≥→>)
         Assert.Equal("ok", TrustReportProjection.FlapState(Flap(1, 2)));          // 1 flap (50%) but count < 2 → ok
 
-        // RETRY — elevated ≥ 2% (0.02), flaky ≥ 10% (0.10).
-        Assert.Equal("ok", TrustReportProjection.RetryState(Retry(1, 100)));       // 0.01 < 0.02 → ok
-        Assert.Equal("elevated", TrustReportProjection.RetryState(Retry(2, 100))); // 0.02 EXACT → elevated
-        Assert.Equal("flaky", TrustReportProjection.RetryState(Retry(10, 100)));   // 0.10 EXACT → flaky
+        // RECHECK — elevated ≥ 2% (0.02), flaky ≥ 10% (0.10), gated on ≥ 2 confirmation re-checks (RecheckMinCount).
+        Assert.Equal("ok", TrustReportProjection.RecheckState(Recheck(1, 100)));       // 0.01 < 0.02 → ok
+        Assert.Equal("elevated", TrustReportProjection.RecheckState(Recheck(2, 100))); // 0.02 EXACT → elevated (count 2 = floor)
+        Assert.Equal("flaky", TrustReportProjection.RecheckState(Recheck(10, 100)));   // 0.10 EXACT → flaky
+        // ★ THE VOLUME FLOOR (the 353 fix), both directions — kills a mutant that drops the `< RecheckMinCount` guard:
+        Assert.Equal("ok", TrustReportProjection.RecheckState(Recheck(1, 1)));         // 1 re-check = 100% BUT count < 2 → ok (NOT vacuous-flaky)
+        Assert.Equal("ok", TrustReportProjection.RecheckState(Recheck(1, 9)));         // 353's shape: 1 re-check / 9 runs = 11% → would be flaky w/o floor; ok
+        Assert.Equal("flaky", TrustReportProjection.RecheckState(Recheck(2, 20)));     // 2 re-checks / 20 = 10% at the floor → genuinely flaky
 
         // SPURIOUS-RED — elevated ≥ 1%, flaky ≥ 5%, ≥ 2 monitor-side.
         Assert.Equal("ok", TrustReportProjection.SpuriousRedState(Spur(2, 300)));       // 0.0067 < 0.01 → ok
@@ -833,7 +839,7 @@ public class IntegrationTests
         // ★ DeriveChip UNCHANGED: a clean http check is STILL proven-live — the marker must not block the chip.
         var httpClean = new TrustMonitorRow
         {
-            Kind = "http", RunCount = 100, RetryCount = 0, ScheduledCount = 100,
+            Kind = "http", RunCount = 100, RecheckCount = 0, ScheduledCount = 100,
             LastGreenAt = new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero), IntervalSeconds = 900,
         };
         Assert.Equal("proven-live", TrustReportProjection.DeriveChip(httpClean, new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero)));
@@ -981,33 +987,35 @@ public class IntegrationTests
         Assert.Equal("ok", dto.State);
     }
 
-    // ★ B3-2 end-to-end: retriedPasses is a DISPLAY annotation (never itself a chip input, the #152 class), but
-    // the RETRIES it counts DO grade the retry dimension honestly. A monitor working at 6% retry to stay green
-    // is retry-`elevated` → nominal (NOT hidden behind proven-live, as the old collapse did) AND still surfaces
-    // retriedPasses = 5. Also proves retriedPasses counts ONLY pass/warn retries (a failed run's retry is in
-    // retryCount, NOT here). A truly clean monitor (0 retries) stays proven-live.
+    // ★ B3-2 end-to-end (RE-SOURCED #291/#304): recheckedPasses is a DISPLAY annotation (never itself a chip input,
+    // the #152 class), but the CONFIRMATION RE-CHECKS it counts DO grade the recheck dimension honestly. A monitor
+    // needing a second look on 6% of runs is recheck-`elevated` → nominal (NOT hidden behind proven-live). It still
+    // surfaces recheckedPasses = 5 (confirmations that RECOVERED). Also proves recheckedPasses counts ONLY pass/warn
+    // confirmations (a FAILED confirmation is in recheckCount, NOT here). A monitor with 0 confirmations stays proven-live.
     [SkippableFact]
-    public async Task Trust_retriedPasses_surfaces_and_its_retries_grade_the_retry_dimension()
+    public async Task Trust_recheckedPasses_surfaces_and_confirmations_grade_the_recheck_dimension()
     {
         RequireDocker();
         await using var db = _pg.NewDbContext();
         await db.Database.ExecuteSqlRawAsync("""
             DO $$
-            DECLARE degrading bigint; solid bigint;
+            DECLARE degrading bigint; solid bigint; anchor bigint;
             BEGIN
               INSERT INTO checks (name, kind, target_url) VALUES ('trust-degrading','http','https://d.ex') RETURNING id INTO degrading;
               INSERT INTO checks (name, kind, target_url) VALUES ('trust-solid','http','https://s.ex')     RETURNING id INTO solid;
 
-              -- degrading: 100 recent runs, retryRate 0.06 (< 0.10 → PROVEN-LIVE), but 5 PASS/WARN runs needed a
-              -- real retry (retry_count = 2) → retriedPasses = 5 (the annotation). One FAILED run also retried
-              -- (retry_count = 3): it lifts retryCount to 6 but is EXCLUDED from retriedPasses (pass/warn only).
-              FOR i IN 1..4  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (degrading, 'pass', now() - (i*10 || ' seconds')::interval, 2); END LOOP;
-              INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (degrading, 'warn', now() - interval '50 seconds', 2);   -- warn counts as a pass for the annotation
-              FOR i IN 1..94 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (degrading, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
-              INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (degrading, 'fail', now() - interval '60 seconds', 3);   -- retried FAIL → in retryCount, NOT retriedPasses
+              -- degrading: 100 runs, recheckRate 0.06 (6 confirmation re-checks ISSUED ÷ 100 → elevated). 5 of those
+              -- confirmations PASSED (a second look that recovered → recheckedPasses = 5); 1 confirmation FAILED (it
+              -- lifts recheckCount to 6 but is EXCLUDED from recheckedPasses — pass/warn only). anchor = the scheduled
+              -- fail the confirmations re-check (confirmation_of_run_id FK target).
+              INSERT INTO runs (check_id, status, started_at) VALUES (degrading, 'fail', now() - interval '200 seconds') RETURNING id INTO anchor;
+              FOR i IN 1..93 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (degrading, 'pass', now() - (i*10 || ' seconds')::interval); END LOOP;
+              FOR i IN 1..4  LOOP INSERT INTO runs (check_id, status, started_at, confirmation_of_run_id) VALUES (degrading, 'pass', now() - (i || ' seconds')::interval, anchor); END LOOP;
+              INSERT INTO runs (check_id, status, started_at, confirmation_of_run_id) VALUES (degrading, 'warn', now() - interval '5 seconds', anchor);   -- warn counts as a pass for the annotation
+              INSERT INTO runs (check_id, status, started_at, confirmation_of_run_id) VALUES (degrading, 'fail', now() - interval '6 seconds', anchor);   -- FAILED confirmation → recheckCount, NOT recheckedPasses
 
-              -- solid: 20 clean first-try passes → proven-live with ZERO retried passes (the annotation is absent).
-              FOR i IN 1..20 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (solid, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
+              -- solid: 20 clean passes, NO confirmations → proven-live with ZERO rechecked passes (annotation absent).
+              FOR i IN 1..20 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (solid, 'pass', now() - (i*10 || ' seconds')::interval); END LOOP;
             END $$;
             """);
         try
@@ -1018,26 +1026,26 @@ public class IntegrationTests
             var m = all.Monitors.Where(x => x.CheckName.StartsWith("trust-")).ToDictionary(x => x.CheckName);
 
             var degrading = m["trust-degrading"];
-            Assert.Equal("nominal", degrading.Trust);           // ★ 6% retry → retry ELEVATED → nominal (no longer hidden as proven-live)
-            Assert.Equal("elevated", degrading.Dimensions.Retry.State); // ★ the dimension names it
+            Assert.Equal("nominal", degrading.Trust);           // ★ 6% recheck → recheck ELEVATED → nominal (no longer hidden as proven-live)
+            Assert.Equal("elevated", degrading.Dimensions.Recheck.State); // ★ the dimension names it
             Assert.Equal("ok", degrading.Dimensions.Flap.State);
             Assert.Equal("ok", degrading.Dimensions.MonitorNoise.State);
-            Assert.Equal(5, degrading.RetriedPasses);           // ★ the display annotation still fires (> 0)
-            Assert.Equal(6, degrading.RetryCount);              // the failed run's retry IS counted here...
-            Assert.NotEqual(degrading.RetriedPasses, degrading.RetryCount); // ...but NOT in retriedPasses
-            Assert.Equal(0.06m, degrading.RetryRate);
+            Assert.Equal(5, degrading.RecheckedPasses);           // ★ the display annotation still fires (> 0)
+            Assert.Equal(6, degrading.RecheckCount);              // the FAILED confirmation IS counted here...
+            Assert.NotEqual(degrading.RecheckedPasses, degrading.RecheckCount); // ...but NOT in recheckedPasses
+            Assert.Equal(0.06m, degrading.RecheckRate);
 
             var solid = m["trust-solid"];
-            Assert.Equal("proven-live", solid.Trust);           // 0 retries → every dimension ok
-            Assert.Equal("ok", solid.Dimensions.Retry.State);
-            Assert.Equal(0, solid.RetriedPasses);               // zero retried passes → annotation absent
+            Assert.Equal("proven-live", solid.Trust);           // 0 confirmations → every dimension ok
+            Assert.Equal("ok", solid.Dimensions.Recheck.State);
+            Assert.Equal(0, solid.RecheckedPasses);               // zero rechecked passes → annotation absent
 
             // the detail endpoint carries the same fields (its Monitor is a TrustMonitorDto)
             var detail = Assert.IsType<TrustMonitorDetailDto>(Assert.IsType<OkObjectResult>(
                 await reports.GetTrustMonitorDetail(Request("?window=30d"), degrading.CheckId, default)).Value!);
             Assert.Equal("nominal", detail.Monitor.Trust);
-            Assert.Equal("elevated", detail.Monitor.Dimensions.Retry.State);
-            Assert.Equal(5, detail.Monitor.RetriedPasses);
+            Assert.Equal("elevated", detail.Monitor.Dimensions.Recheck.State);
+            Assert.Equal(5, detail.Monitor.RecheckedPasses);
         }
         finally
         {
@@ -1055,7 +1063,7 @@ public class IntegrationTests
         // Seven monitors, one per trust profile. All facts are measured; the chip is derived server-side.
         await db.Database.ExecuteSqlRawAsync("""
             DO $$
-            DECLARE clean bigint; flaky bigint; noise bigint; verdicts bigint; nominal bigint; unver bigint; empty bigint;
+            DECLARE clean bigint; flaky bigint; noise bigint; verdicts bigint; nominal bigint; unver bigint; empty bigint; fanchor bigint;
             BEGIN
               INSERT INTO checks (name, kind, target_url)            VALUES ('trust-clean','http','https://c.ex')       RETURNING id INTO clean;
               INSERT INTO checks (name, kind, target_url, sensitive) VALUES ('trust-flaky','http','https://f.ex', true) RETURNING id INTO flaky;
@@ -1065,44 +1073,44 @@ public class IntegrationTests
               INSERT INTO checks (name, kind, target_url)            VALUES ('trust-unverified','http','https://u.ex')  RETURNING id INTO unver;
               INSERT INTO checks (name, kind, target_url)            VALUES ('trust-empty','http','https://e.ex')       RETURNING id INTO empty;
 
-              -- clean: ★ THE RED-TEST for the retry-count fix. 20 recent pass, ALL retry_count = 1 — where
-              -- 1 = a clean FIRST-TRY / NO retry (runner migration 0048; retry_count is an ATTEMPT count, and
-              -- 0 never occurs in real data). A monitor that NEVER actually retried must be proven-live with
-              -- retryRate 0.00. Under the OLD `> 0` SQL these 20 count as "retried" → retryRate 1.0 → flaky
-              -- (the exact shipped bug Craig saw). Under the corrected `> 1` → 0 retries → proven-live.
-              FOR i IN 1..20 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (clean, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
+              -- clean: ★ THE RED-TEST for the RE-SOURCE (#291/#304). 20 recent pass carrying retry_count = 5 — a
+              -- FOSSIL value that WOULD read "retried" under the dead `retry_count > 1` SQL — but ZERO confirmation
+              -- re-checks. recheck is now sourced from confirmation_of_run_id, so this monitor NEVER needed a second
+              -- look → recheckRate 0.00 → proven-live. If anyone reverts the SQL to retry_count > 1, all 20 count →
+              -- recheckRate 1.0 → flaky (the must-go-red). retry_count is frozen at 1 in prod; 5 is deliberately
+              -- impossible-in-prod so the fossil-INDEPENDENCE is unmistakable.
+              FOR i IN 1..20 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (clean, 'pass', now() - (i*10 || ' seconds')::interval, 5); END LOOP;
               UPDATE runs SET spec_provenance = jsonb_build_object('executed_sha256','abc123','spec_path','monitors/clean/home.spec.ts')
                 WHERE check_id = clean AND started_at = (SELECT max(started_at) FROM runs WHERE check_id = clean);
 
-              -- flaky: 10 recent pass — 6 with an ACTUAL retry (retry_count = 2), 4 clean first-try (= 1).
-              -- retryRate = 6/10 = 0.60 → flaky (via real retries). Under OLD `> 0` this is 10/10 = 1.0 (still
-              -- flaky, but the COUNT is wrong) — so the retryCount==6 / retryRate==0.60 asserts below fail on `> 0`.
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (flaky, 'pass', now() - (i*10 || ' seconds')::interval, CASE WHEN i <= 6 THEN 2 ELSE 1 END); END LOOP;
+              -- flaky: 10 runs, 6 of them CONFIRMATION re-checks (confirmation_of_run_id set) → recheckRate 6/10 =
+              -- 0.60 → flaky (≥ 0.10, and ≥ 2 count floor). fanchor = the scheduled fail they re-check (FK target).
+              INSERT INTO runs (check_id, status, started_at) VALUES (flaky, 'fail', now() - interval '200 seconds') RETURNING id INTO fanchor;
+              FOR i IN 1..3 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (flaky, 'pass', now() - (i*10 || ' seconds')::interval); END LOOP;
+              FOR i IN 1..6 LOOP INSERT INTO runs (check_id, status, started_at, confirmation_of_run_id) VALUES (flaky, 'pass', now() - (i || ' seconds')::interval, fanchor); END LOOP;
 
-              -- noise: 10 recent clean-first-try pass (retry_count = 1 → retryRate 0.00), but a selector-drift
-              -- incident → flaky via monitor-noise ALONE (proves noise flags even with zero actual retries).
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (noise, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
+              -- noise: 10 recent pass, ZERO confirmations (recheckRate 0.00), but a selector-drift incident → flaky
+              -- via monitor-noise ALONE (proves noise flags even with zero re-checks).
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (noise, 'pass', now() - (i*10 || ' seconds')::interval); END LOOP;
               INSERT INTO incidents (check_id, status, severity, opened_at, rca) VALUES (noise, 'open','critical', now()-interval '1 day', jsonb_build_object('classification','selector-drift'));
 
-              -- verdicts: 10 recent clean-first-try pass (retry_count = 1), full verdict spread (NO noise) → proven-live.
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (verdicts, 'pass', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
+              -- verdicts: 10 recent pass, no confirmations, full verdict spread (NO noise) → proven-live.
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (verdicts, 'pass', now() - (i*10 || ' seconds')::interval); END LOOP;
               INSERT INTO incidents (check_id, status, severity, opened_at, rca) VALUES
                 (verdicts,'resolved','critical', now()-interval '2 days', jsonb_build_object('classification','real-outage')),
                 (verdicts,'resolved','warning',  now()-interval '2 days', jsonb_build_object('classification','perf-regression')),
                 (verdicts,'resolved','critical', now()-interval '2 days', jsonb_build_object('classification','environment-regional')),
                 (verdicts,'resolved','critical', now()-interval '2 days', NULL);
 
-              -- nominal: STALE green (2 days) + recent fails. Mixed retry_count — clean-first-try (1) AND
-              -- pre-migration NULL. NEITHER is an actual retry, so retryRate stays 0.00 and the NULL runs are
-              -- counted in runCount but never as a retry. Stale green (no fresh pass) → nominal.
-              FOR i IN 1..5  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'pass', now() - interval '2 days' - (i || ' minutes')::interval, 1); END LOOP;
-              FOR i IN 1..7  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'fail', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
-              FOR i IN 1..3  LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (nominal, 'fail', now() - (i*10 || ' seconds')::interval, NULL); END LOOP;
+              -- nominal: STALE green (2 days) + recent fails, ZERO confirmations → recheckRate 0.00. runCount 15.
+              -- Stale green (no fresh pass) → nominal.
+              FOR i IN 1..5  LOOP INSERT INTO runs (check_id, status, started_at) VALUES (nominal, 'pass', now() - interval '2 days' - (i || ' minutes')::interval); END LOOP;
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (nominal, 'fail', now() - (i*10 || ' seconds')::interval); END LOOP;
 
-              -- unverified: recent runs, all fail (clean first-try), never green → unverified
-              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at, retry_count) VALUES (unver, 'fail', now() - (i*10 || ' seconds')::interval, 1); END LOOP;
+              -- unverified: recent runs, all fail, never green → unverified
+              FOR i IN 1..10 LOOP INSERT INTO runs (check_id, status, started_at) VALUES (unver, 'fail', now() - (i*10 || ' seconds')::interval); END LOOP;
 
-              -- empty: no runs at all → unverified + retryRate NULL (honest empty)
+              -- empty: no runs at all → unverified + recheckRate NULL (honest empty)
             END $$;
             """);
         try
@@ -1114,33 +1122,34 @@ public class IntegrationTests
             var m = all.Monitors.Where(x => x.CheckName.StartsWith("trust-")).ToDictionary(x => x.CheckName);
             Assert.Equal(7, m.Count);
 
-            // ── ★ THE RED-TEST: a monitor whose 20 runs are ALL retry_count = 1 (clean first-try / NO retry)
-            //    must be proven-live with retryRate 0.00 and retryCount 0. This FAILS on the old `> 0` SQL
-            //    (which reads 20/20 "retried" → retryRate 1.0 → flaky — the shipped bug) and PASSES on `> 1`. ──
+            // ── ★ THE RED-TEST: a monitor whose 20 runs carry the retry_count = 5 FOSSIL but ZERO confirmation
+            //    re-checks must be proven-live with recheckRate 0.00 and recheckCount 0. This FAILS on the dead
+            //    `retry_count > 1` SQL (which reads 20/20 → recheckRate 1.0 → flaky) and PASSES on the re-sourced
+            //    `confirmation_of_run_id IS NOT NULL` — proving the recheck dimension IGNORES the frozen fossil. ──
             var clean = m["trust-clean"];
             Assert.Equal("proven-live", clean.Trust);
             Assert.Equal(20, clean.RunCount);
-            Assert.Equal(0, clean.RetryCount);                  // ★ retry_count = 1 is NOT a retry
-            Assert.Equal(0m, clean.RetryRate);                  // ★ 0.00, not 1.0 — the bug's fingerprint
+            Assert.Equal(0, clean.RecheckCount);                  // ★ retry_count=5 fossil IGNORED — no confirmations issued
+            Assert.Equal(0m, clean.RecheckRate);                  // ★ 0.00, not 1.0 — the fossil's fingerprint would be 1.0
             Assert.NotNull(clean.LastGreenAt);
             Assert.Equal("abc123", clean.SpecProvenance.ExecutedSha256);
             Assert.Equal("monitors/clean/home.spec.ts", clean.SpecProvenance.SpecPath);
             Assert.False(clean.Sensitive);
 
-            // ── flaky via ACTUAL retries: 6 of 10 runs have retry_count = 2 → retryRate 0.60. The COUNT (6,
-            //    not 10) and RATE (0.60, not 1.0) also fail on the old `> 0` SQL. Sensitive flag flows through. ──
+            // ── flaky via CONFIRMATION re-checks: 6 of 10 runs are confirmations → recheckRate 0.60. The COUNT (6)
+            //    and RATE (0.60) come from confirmation_of_run_id, not the fossil. Sensitive flag flows through. ──
             var flaky = m["trust-flaky"];
             Assert.Equal("flaky", flaky.Trust);
-            Assert.Equal(6, flaky.RetryCount);                  // ★ only the retry_count = 2 runs count
-            Assert.Equal(0.6m, flaky.RetryRate);
+            Assert.Equal(6, flaky.RecheckCount);                  // ★ the 6 confirmation re-checks
+            Assert.Equal(0.6m, flaky.RecheckRate);
             Assert.True(flaky.Sensitive);
             Assert.Null(flaky.SpecProvenance.ExecutedSha256);   // no provenance seeded → honest null
 
-            // ── flaky via monitor-noise (a selector-drift incident) despite ZERO actual retries. retryRate
-            //    0.00 (all runs retry_count = 1) also fails on the old `> 0` SQL, which would read 1.0. ──
+            // ── flaky via monitor-noise (a selector-drift incident) despite ZERO confirmations → recheckRate
+            //    0.00 (no re-checks issued). Proves noise flags independently of the recheck axis. ──
             var noise = m["trust-noise"];
             Assert.Equal("flaky", noise.Trust);
-            Assert.Equal(0m, noise.RetryRate);                  // ★ clean first-try runs → 0.00, not 1.0
+            Assert.Equal(0m, noise.RecheckRate);                  // ★ no confirmations → 0.00
             Assert.Equal(1, noise.Incidents.SelectorDrift);
 
             // ── proven-live WITH a full verdict breakdown: real-outage/perf/env/unclassified are NOT noise ──
@@ -1158,15 +1167,14 @@ public class IntegrationTests
                 v.Incidents.RealOutage + v.Incidents.FlakyTransient + v.Incidents.SelectorDrift
                 + v.Incidents.EnvironmentRegional + v.Incidents.PerfRegression + v.Incidents.Unclassified);
 
-            // ── nominal: has green but it's stale (older than 2 intervals). ★ Mixed retry_count = 1 AND
-            //    pre-migration NULL — NEITHER is an actual retry: NULL runs are counted in runCount (15) but
-            //    retryRate stays 0.00 and retryCount 0 (NULL never satisfies `> 1`). ──
+            // ── nominal: has green but it's stale (older than 2 intervals). ZERO confirmations → recheckRate 0.00
+            //    and recheckCount 0 over its 15 runs; stale green (no fresh pass) is what makes it nominal. ──
             var nominal = m["trust-nominal"];
             Assert.Equal("nominal", nominal.Trust);
             Assert.NotNull(nominal.LastGreenAt);
-            Assert.Equal(15, nominal.RunCount);                 // 5 pass + 7 fail(=1) + 3 fail(NULL)
-            Assert.Equal(0, nominal.RetryCount);                // ★ retry_count = 1 AND NULL both → not a retry
-            Assert.Equal(0m, nominal.RetryRate);
+            Assert.Equal(15, nominal.RunCount);                 // 5 pass + 10 fail
+            Assert.Equal(0, nominal.RecheckCount);                // ★ no confirmations issued
+            Assert.Equal(0m, nominal.RecheckRate);
 
             // ── unverified: never passed → lastGreenAt null (a first-class state, not an error) ──
             var unver = m["trust-unverified"];
@@ -1174,11 +1182,11 @@ public class IntegrationTests
             Assert.Null(unver.LastGreenAt);
             Assert.Equal(10, unver.RunCount);
 
-            // ── ★ HONEST-EMPTY: no runs → retryRate NULL (never a fake 0), unverified ──
+            // ── ★ HONEST-EMPTY: no runs → recheckRate NULL (never a fake 0), unverified ──
             var empty = m["trust-empty"];
             Assert.Equal("unverified", empty.Trust);
             Assert.Equal(0, empty.RunCount);
-            Assert.Null(empty.RetryRate);
+            Assert.Null(empty.RecheckRate);
             Assert.Null(empty.LastGreenAt);
 
             // ── ★ redTest.captured=false is the HONEST DEFAULT — none of these monitors has a red_tests row, so
@@ -1191,17 +1199,17 @@ public class IntegrationTests
                 Assert.Null(x.RedTest.Method);
             });
 
-            // ── detail endpoint: same row + a daily retry-rate series (null on run-less days) ──
+            // ── detail endpoint: same row + a daily recheck-rate series (null on run-less days) ──
             var detail = Assert.IsType<TrustMonitorDetailDto>(Assert.IsType<OkObjectResult>(
                 await reports.GetTrustMonitorDetail(Request("?window=7d"), clean.CheckId, default)).Value!);
             Assert.Equal("7d", detail.Window);
             Assert.Equal("trust-clean", detail.Monitor.CheckName);
             Assert.Equal("proven-live", detail.Monitor.Trust);
-            Assert.Equal(7, detail.RetrySeries.Count);                  // 7d → 7 daily points
-            Assert.Equal(20, detail.RetrySeries[^1].RunCount);         // today: the 20 runs
-            Assert.Equal(0m, detail.RetrySeries[^1].RetryRate);        // ★ red-test: 0.00 (all retry_count=1), not 1.0 on `> 0`
-            Assert.Equal(0, detail.RetrySeries[0].RunCount);           // 6 days ago: no runs
-            Assert.Null(detail.RetrySeries[0].RetryRate);              // ★ null, not 0
+            Assert.Equal(7, detail.RecheckSeries.Count);                  // 7d → 7 daily points
+            Assert.Equal(20, detail.RecheckSeries[^1].RunCount);         // today: the 20 runs
+            Assert.Equal(0m, detail.RecheckSeries[^1].RecheckRate);        // ★ red-test: 0.00 (fossil retry_count=5 ignored), not 1.0 on the dead `> 1`
+            Assert.Equal(0, detail.RecheckSeries[0].RunCount);           // 6 days ago: no runs
+            Assert.Null(detail.RecheckSeries[0].RecheckRate);              // ★ null, not 0
 
             // ── 404 for an unknown monitor; 400 for a bad window ──
             Assert.IsType<NotFoundObjectResult>(await reports.GetTrustMonitorDetail(Request(), 999999999, default));
