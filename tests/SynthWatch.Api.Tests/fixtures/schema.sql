@@ -359,9 +359,14 @@ CREATE TABLE public.runs (
 --
 
 CREATE VIEW public.countable_run AS
- SELECT *
+ SELECT id,
+    check_id,
+    status,
+    started_at,
+    location,
+    duration_ms
    FROM runs
-  WHERE ((status <> ALL (ARRAY['running'::text, 'infra_error'::text])) AND (superseded_by_run_id IS NULL) AND (NOT ((confirmation_of_run_id IS NOT NULL) AND (status = ANY (ARRAY['fail'::text, 'error'::text])))) AND (NOT sandbox));
+  WHERE ((status <> ALL (ARRAY['running'::text, 'infra_error'::text])) AND (superseded_by_run_id IS NULL) AND (confirmation_of_run_id IS NULL) AND (NOT sandbox));
 
 
 --
