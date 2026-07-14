@@ -1,0 +1,31 @@
+name: Mutation gate (Stryker)
+
+# Mutation-tests the two highest-risk pure-logic files — TrustReportProjection (the trust chip + flake
+# budget) and ErrorDiff (the fingerprint + net-status severity chain the never-auto-suppress safety property
+# rests on). Fails below `thresholds.break` in stryker-config.json (a floor DERIVED from a measured run, not
+# invented — see the PR that introduced this). ci-gate aggregates this, so a regression in test strength on
+# these files holds the merge. Scoped to two files so a per-PR run stays bounded.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  stryker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Setup .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: Install Stryker.NET
+        run: dotnet tool install -g dotnet-stryker
+      - name: Run mutation gate (scoped; break threshold in stryker-config.json)
+        working-directory: tests/SynthWatch.Api.Tests
+        run: dotnet-stryker
