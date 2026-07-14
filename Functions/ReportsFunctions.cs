@@ -429,7 +429,7 @@ public class ReportsFunctions
     // buckets ALL reconcile to incident_total (perf-regression is its own bucket; nothing counted goes unshown).
     // The taxonomy strings are the fixed runner enum (reconcile.ts), not user input — safe as SQL literals.
     private static FormattableString TrustFleetSql(int days) =>
-        $@"SELECT c.id AS check_id, c.name AS check_name, c.sensitive AS sensitive,
+        $@"SELECT c.id AS check_id, c.name AS check_name, c.kind AS kind, c.sensitive AS sensitive,
                   c.interval_seconds AS interval_seconds, c.last_run_at AS last_run_at,
                   rc.last_green_at AS last_green_at,
                   coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,
@@ -518,7 +518,7 @@ public class ReportsFunctions
     // Same row shape as the fleet SQL, scoped to one check (enabled or not — a detail view resolves disabled
     // monitors too). Returns 0 or 1 row.
     private static FormattableString TrustDetailSql(int days, long checkId) =>
-        $@"SELECT c.id AS check_id, c.name AS check_name, c.sensitive AS sensitive,
+        $@"SELECT c.id AS check_id, c.name AS check_name, c.kind AS kind, c.sensitive AS sensitive,
                   c.interval_seconds AS interval_seconds, c.last_run_at AS last_run_at,
                   rc.last_green_at AS last_green_at,
                   coalesce(rc.run_count, 0) AS run_count, coalesce(rc.retry_count, 0) AS retry_count,

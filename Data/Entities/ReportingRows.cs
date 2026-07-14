@@ -81,6 +81,11 @@ public class TrustMonitorRow
 {
     public long CheckId { get; set; }
     public string CheckName { get; set; } = "";
+    // ★ The check kind (http/browser/ssl/dns/tcp/ping/multistep) — drives per-dimension APPLICABILITY: a kind
+    // that captures no trace_signals can't classify a monitor-side transient, so spurious-red / the flake
+    // budget are "not-applicable", not a vacuous "ok". Selected from checks.kind; NOT re-shipped raw in the DTO
+    // (the rule lives here, so the dashboard can't re-derive-and-drift it).
+    public string Kind { get; set; } = "";
     public bool Sensitive { get; set; }
     public int IntervalSeconds { get; set; }
     public DateTimeOffset? LastRunAt { get; set; }

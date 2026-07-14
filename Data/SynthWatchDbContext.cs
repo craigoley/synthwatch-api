@@ -538,6 +538,7 @@ public class SynthWatchDbContext : DbContext
             e.ToView(null);
             e.Property(x => x.CheckId).HasColumnName("check_id");
             e.Property(x => x.CheckName).HasColumnName("check_name");
+            e.Property(x => x.Kind).HasColumnName("kind");   // per-dimension applicability (trace_signals kinds)
             e.Property(x => x.Sensitive).HasColumnName("sensitive");
             e.Property(x => x.IntervalSeconds).HasColumnName("interval_seconds");
             e.Property(x => x.LastRunAt).HasColumnName("last_run_at");
