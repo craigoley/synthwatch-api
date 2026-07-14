@@ -70,8 +70,8 @@ The single allowed origin is the Vercel dashboard URL, configured via the
 
 - Entities map 1:1 to the live schema. **Ground truth is the runner's `db/schema.sql`**
   (`craigoley/synthwatch`) — the schema-parity CI gate already enforces it as source of truth
-  against the test fixture, so it cannot silently drift. (Do **not** consult the old
-  `docs/SCHEMA.md` snapshot — it lags prod by many migrations.) `bigint` identity PKs are
+  against the test fixture, so it cannot silently drift. (The old `docs/SCHEMA.md` hand-copy
+  was **deleted** in the runner — it had drifted ~52 migrations; use `db/schema.sql`.) `bigint` identity PKs are
   `ValueGeneratedOnAdd` (never set on insert);
   `transfer_bytes` / `js_heap_bytes` / `perf_budget_transfer_bytes` map to `long`.
 - The SLA data comes from the existing `sla_availability(p_from, p_to)` function and the
