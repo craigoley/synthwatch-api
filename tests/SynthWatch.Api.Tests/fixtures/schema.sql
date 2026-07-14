@@ -711,6 +711,8 @@ AS $function$
     WITH agg AS (
         SELECT
             c.id AS check_id,
+            -- ★ FLEET DEFAULT 2% (0.02) — justified by the measured flap distribution (p95 ≤0.016% → ~125×
+            -- headroom; worst non-service flapper 1.1%) + stage-1 spurious-red bands (elevated 1%, flaky 5%).
             COALESCE(c.flake_target, 0.02)::numeric AS flake_target,
             (c.flake_target IS NULL)                AS target_is_default,
             count(*) FILTER (
@@ -725,7 +727,7 @@ AS $function$
                 WHERE r.superseded_by_run_id IS NOT NULL AND r.transient_class = 'indeterminate'
                   AND r.confirmation_of_run_id IS NULL AND NOT r.sandbox) AS indeterminate
         FROM checks c
-        LEFT JOIN countable_run r
+        LEFT JOIN runs r
                ON r.check_id   = c.id
               AND r.started_at >= p_from
               AND r.started_at <  p_to
@@ -757,8 +759,7 @@ AS $function$
              THEN round((monitor_side::numeric / scheduled_runs) / flake_target, 4)
              ELSE 0 END                                  AS burn_rate
     FROM agg
-$function$
-;
+$function$;
 
 -- cost_projection(rate) (0069, +run-count columns 0078) — the shared cost model /reports/cost calls (mirrors
 -- the runner migration). The rate is now a DERIVED $/active-second (two ACA meters × the live allocation).
