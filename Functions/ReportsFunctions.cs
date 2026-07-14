@@ -141,9 +141,13 @@ public class ReportsFunctions
                GROUP BY l.name
                ORDER BY l.name").AsNoTracking().ToListAsync(ct);
 
-        // The staleness threshold keys off the fleet's MIN enabled check interval (× a named-constant
-        // multiplier). coalesce to 300 so an empty fleet degrades to the interval floor rather than NULL.
-        var minInterval = await _db.Checks.Where(c => c.Enabled).MinAsync(c => (int?)c.IntervalSeconds, ct) ?? 300;
+        // The staleness threshold keys off the fleet's MIN LIVE check interval (× a named-constant
+        // multiplier). LIVE = enabled AND not archived: an archived-but-still-enabled check must NOT tighten
+        // the region-staleness floor (it produces no live health — same active-check leak #313 fixed in
+        // cost_projection and #316 in the narrative loop; `Enabled` alone is the reportable predicate, not the
+        // live one). coalesce to 300 so an empty fleet degrades to the interval floor rather than NULL.
+        var minInterval = await _db.Checks.Where(c => c.Enabled && c.ArchivedAt == null)
+            .MinAsync(c => (int?)c.IntervalSeconds, ct) ?? 300;
 
         var dto = RegionHealthProjection.Build(minInterval, rows, DateTimeOffset.UtcNow);
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=30";
