@@ -5707,6 +5707,36 @@ public class IntegrationTests
         }
     }
 
+    // ★ Prove-can-fail: an ARCHIVED (but still enabled) check must NOT tighten the region-staleness floor.
+    // The floor = N × MIN LIVE interval; a retired check with a tiny interval would otherwise shrink the
+    // threshold and falsely flag fresh regions stale. With the pre-fix `Where(c => c.Enabled)` this reds at
+    // min=5; with `Enabled && ArchivedAt == null` the archived check is excluded and the floor stays 300.
+    [SkippableFact]
+    public async Task Region_health_min_interval_excludes_archived_checks()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO checks (name, kind, target_url, interval_seconds, enabled, archived_at) VALUES
+              ('rh-live-300', 'http', 'https://rh.test', 300, true, NULL),
+              ('rh-arch-5',   'http', 'https://rh.test', 5,   true, now());
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var dto = Assert.IsType<RegionHealthReportDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetRegionHealth(Request(), default)).Value!);
+
+            // The archived 5s check is EXCLUDED — the floor stays at the live 300s min, NOT 5.
+            Assert.NotEqual(5, dto.MinIntervalSeconds);
+            Assert.Equal(300, dto.MinIntervalSeconds);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name IN ('rh-live-300','rh-arch-5');");
+        }
+    }
+
     // Reconcile-apply Phase 1: the APPROVE endpoint, against the real schema (the test #127 was missing).
     [SkippableFact]
     public async Task Approve_pending_plan_transitions_to_approved_and_writes_decision()
