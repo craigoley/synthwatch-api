@@ -192,4 +192,92 @@ public class ErrorDiffTests
         Assert.Empty(d2.New);
         Assert.Contains(d2.Resolved, e => e.Message.Contains("was here"));
     }
+
+    // ★ NetKind (ErrorDiff.cs) was NoCoverage — zero tests — yet it drives the first-party-5xx severity that the
+    // "NEW first-party service error" signal (→ transient classification → spuriousRed → the never-auto-suppress
+    // safety property) rests on. Pin EVERY status class AND the two boundaries (399/400, 499/500). Distinct URLs
+    // → distinct fingerprints so each network failure is its own NEW item (not folded).
+    [Fact]
+    public void NetKind_classifies_every_status_class_and_both_boundaries()
+    {
+        var d = Compute(RS(10, Sig(failed: [
+            Req("https://www.wegmans.com/a500", 500, thirdParty: false), // 5xx floor
+            Req("https://www.wegmans.com/a503", 503, thirdParty: false),
+            Req("https://www.wegmans.com/a499", 499, thirdParty: false), // ★ 499 → 4xx (not 5xx)
+            Req("https://www.wegmans.com/a400", 400, thirdParty: false), // ★ 400 → 4xx (not abort)
+            Req("https://www.wegmans.com/a404", 404, thirdParty: false),
+            Req("https://www.wegmans.com/a399", 399, thirdParty: false), // ★ 399 → abort (not 4xx)
+            Req("https://www.wegmans.com/a0", 0, thirdParty: false),     // abort
+            Req("https://www.wegmans.com/aneg", -1, thirdParty: false),  // network failure → abort
+        ])));
+        ErrorItemDto by(int status) => Assert.Single(d.New, e => e.Status == status);
+
+        // 5xx (kind + label + severity all asserted — the CLASSIFICATION, not just "returns something")
+        Assert.Equal("net-5xx", by(500).Kind); Assert.Equal("first-party-5xx", by(500).SeverityLabel); Assert.Equal(6, by(500).Severity);
+        Assert.Equal("net-5xx", by(503).Kind);
+        // 4xx — including the 499/500 and 399/400 boundaries
+        Assert.Equal("net-4xx", by(499).Kind); Assert.Equal("first-party-4xx", by(499).SeverityLabel); Assert.Equal(5, by(499).Severity);
+        Assert.Equal("net-4xx", by(400).Kind);
+        Assert.Equal("net-4xx", by(404).Kind);
+        // abort — 399 and non-positive statuses
+        Assert.Equal("net-abort", by(399).Kind); Assert.Equal("abort", by(399).SeverityLabel); Assert.Equal(3, by(399).Severity);
+        Assert.Equal("net-abort", by(0).Kind);
+        Assert.Equal("net-abort", by(-1).Kind);
+    }
+
+    // ★ Severity: any THIRD-PARTY error is the lowest tier (1) REGARDLESS of status — the consumer defaults to
+    // first-party and hides tracker noise. A third-party 500 must NOT read as a first-party-5xx regression.
+    [Fact]
+    public void ThirdParty_is_always_lowest_severity_even_for_a_5xx()
+    {
+        var d = Compute(RS(10, Sig(failed: [Req("https://tracker.doubleclick.net/x", 500, thirdParty: true)])));
+        var tp = Assert.Single(d.New, e => e.Origin == "third-party");
+        Assert.Equal(1, tp.Severity);            // ★ floored, not 6
+        Assert.Equal("third-party", tp.SeverityLabel);
+        Assert.Equal("net-5xx", tp.Kind);        // kind still reflects the status; severity/label are the floor
+    }
+
+    // ★ Console severity labels (kill the label survivors): console-error/pageerror → first-party-error(4);
+    // warning → warning(2); a CSP-refusal error is downgraded to warning(2), NOT first-party-error.
+    [Fact]
+    public void Console_severity_labels_and_csp_downgrade_are_pinned()
+    {
+        var d = Compute(RS(10, Sig(console: [
+            Con("error", "site", "www.wegmans.com", "TypeError: cannot read x"),                       // console-error
+            Con("pageerror", "site", "www.wegmans.com", "Uncaught ReferenceError: y"),                 // pageerror
+            Con("warning", "site", "www.wegmans.com", "deprecation notice"),                           // warning
+            Con("error", "site", "www.wegmans.com", "Refused to load the script — Content Security Policy"), // csp
+        ])));
+        // Message is the CANONICAL text (Canonicalize lowercases), so match lowercase needles.
+        ErrorItemDto byMsg(string needle) => Assert.Single(d.New, e => e.Message.Contains(needle));
+        Assert.Equal((4, "first-party-error"), (byMsg("typeerror").Severity, byMsg("typeerror").SeverityLabel));
+        Assert.Equal((4, "first-party-error"), (byMsg("uncaught").Severity, byMsg("uncaught").SeverityLabel));
+        Assert.Equal((2, "warning"), (byMsg("deprecation").Severity, byMsg("deprecation").SeverityLabel));
+        Assert.Equal("csp", byMsg("refused").Kind);                                    // ★ classified csp…
+        Assert.Equal((2, "warning"), (byMsg("refused").Severity, byMsg("refused").SeverityLabel)); // …→ warning tier, not error(4)
+    }
+
+    // ★ Rank tie-break (kill the Rank survivors): buckets sort severity-desc, then count-desc, then fingerprint
+    // ordinal (stable). Prove all three keys — a mutated comparator reorders one of these.
+    [Fact]
+    public void Rank_orders_by_severity_then_count_then_fingerprint()
+    {
+        // severity desc: a 5xx (6) must rank before a 4xx (5) before an abort (3), whatever input order.
+        var sev = Compute(RS(10, Sig(failed: [
+            Req("https://www.wegmans.com/z", 0, thirdParty: false),    // abort (3)
+            Req("https://www.wegmans.com/y", 400, thirdParty: false),  // 4xx (5)
+            Req("https://www.wegmans.com/x", 500, thirdParty: false),  // 5xx (6)
+        ])));
+        Assert.Equal(new[] { "net-5xx", "net-4xx", "net-abort" }, sev.New.Select(e => e.Kind).ToArray());
+
+        // count desc within equal severity: the same first-party console error folded 3× outranks a single one.
+        var cnt = Compute(RS(10, Sig(console: [
+            Con("error", "site", "a.wegmans.com", "solo error"),
+            Con("error", "site", "b.wegmans.com", "repeated error"),
+            Con("error", "site", "b.wegmans.com", "repeated error"),
+            Con("error", "site", "b.wegmans.com", "repeated error"),
+        ])));
+        // both are severity 4; "repeated" (count 3) must come before "solo" (count 1).
+        Assert.Equal(new[] { "repeated error", "solo error" }, cnt.New.Select(e => e.Message).ToArray());
+    }
 }

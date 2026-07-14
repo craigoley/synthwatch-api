@@ -748,6 +748,66 @@ public class IntegrationTests
         Assert.Equal("ok", TrustReportProjection.SpuriousRedState(mOne));
     }
 
+    // ★ B — the `>=` boundary mutants: existing tests assert ABOVE and BELOW each threshold but never AT the
+    // cutoff, so `>=` → `>` survives. Pin EVERY threshold pair AT its exact rate (the ≥-inclusive result), plus
+    // the count floors. A `>=`→`>` mutant flips the at-boundary state and reds here.
+    [Fact]
+    public void Trust_dimension_states_at_exact_thresholds_kill_boundary_mutants()
+    {
+        static TrustMonitorRow Flap(long c, long sched) => new() { FlapCount = c, ScheduledCount = sched };
+        static TrustMonitorRow Retry(long c, long runs) => new() { RetryCount = c, RunCount = runs };
+        static TrustMonitorRow Spur(long ms, long sched) => new() { MonitorSideTransients = ms, ScheduledCount = sched };
+
+        // FLAP — elevated ≥ 1% (0.01), flaky ≥ 5% (0.05), ≥ 2 count.
+        Assert.Equal("ok", TrustReportProjection.FlapState(Flap(2, 300)));        // 2/300 = 0.0067 < 0.01 → ok
+        Assert.Equal("elevated", TrustReportProjection.FlapState(Flap(2, 200)));  // 2/200 = 0.01 EXACT → elevated (kills ≥→>)
+        Assert.Equal("elevated", TrustReportProjection.FlapState(Flap(4, 100)));  // 0.04 → elevated
+        Assert.Equal("flaky", TrustReportProjection.FlapState(Flap(5, 100)));     // 5/100 = 0.05 EXACT → flaky (kills ≥→>)
+        Assert.Equal("ok", TrustReportProjection.FlapState(Flap(1, 2)));          // 1 flap (50%) but count < 2 → ok
+
+        // RETRY — elevated ≥ 2% (0.02), flaky ≥ 10% (0.10).
+        Assert.Equal("ok", TrustReportProjection.RetryState(Retry(1, 100)));       // 0.01 < 0.02 → ok
+        Assert.Equal("elevated", TrustReportProjection.RetryState(Retry(2, 100))); // 0.02 EXACT → elevated
+        Assert.Equal("flaky", TrustReportProjection.RetryState(Retry(10, 100)));   // 0.10 EXACT → flaky
+
+        // SPURIOUS-RED — elevated ≥ 1%, flaky ≥ 5%, ≥ 2 monitor-side.
+        Assert.Equal("ok", TrustReportProjection.SpuriousRedState(Spur(2, 300)));       // 0.0067 < 0.01 → ok
+        Assert.Equal("elevated", TrustReportProjection.SpuriousRedState(Spur(2, 200))); // 0.01 EXACT → elevated
+        Assert.Equal("flaky", TrustReportProjection.SpuriousRedState(Spur(5, 100)));    // 0.05 EXACT → flaky
+        Assert.Equal("ok", TrustReportProjection.SpuriousRedState(Spur(1, 10)));        // count < 2 → ok
+    }
+
+    // ★ B — FlakeBudgetState's ≥ 2 floor (NoCoverage at the boundary) + FlakeDirectedTask's operator-facing
+    // string (FULLY survived — the one string a human reads was unverified). Pin both.
+    [Fact]
+    public void Trust_flake_budget_floor_and_directed_task_content_are_pinned()
+    {
+        static TrustMonitorRow Fb(long consumed, decimal budget) => new() { FlakeConsumed = consumed, FlakeBudget = budget };
+
+        // ★ the ≥ 2 floor: 1 consumed is noise even when it exceeds the budget; 2 is the first that can degrade.
+        Assert.Equal("ok", TrustReportProjection.FlakeBudgetState(Fb(1, 0m)));                     // 1 > 0 but < 2 floor → ok
+        Assert.Equal("degraded-as-a-monitor", TrustReportProjection.FlakeBudgetState(Fb(2, 1m)));  // 2 ≥ floor AND 2 > 1 → degraded (kills <→<=)
+        Assert.Equal("ok", TrustReportProjection.FlakeBudgetState(Fb(2, 2m)));                     // 2 > 2 false → ok (kills >→>=)
+        Assert.Equal("ok", TrustReportProjection.FlakeBudgetState(Fb(3, 5m)));                     // under budget → ok
+
+        // ★ the directed task: NON-null only when degraded, and it NAMES the monitor, the rate, the budget, the
+        //   count, the evidence, and the "MONITOR problem, not a service outage" framing.
+        Assert.Null(TrustReportProjection.FlakeDirectedTask(Fb(0, 1m)));   // not degraded → no task
+        var r = new TrustMonitorRow
+        {
+            CheckName = "222", FlakeConsumed = 2, FlakeBudget = 0.98m, FlakeTarget = 0.02m, FlakeScheduledRuns = 49,
+        };
+        var task = TrustReportProjection.FlakeDirectedTask(r);
+        Assert.NotNull(task);
+        Assert.Contains("222:", task);                                    // the monitor
+        Assert.Contains("spurious-red 4.1%", task);                       // rate = 2/49 = 4.08% → "4.1"
+        Assert.Contains("(budget 2%)", task);                             // FlakeTarget 0.02 → "2%"
+        Assert.Contains("2 monitor-side", task);                          // the consumed count
+        Assert.Contains("no new first-party service error", task);        // the evidence
+        Assert.Contains("over 49 scheduled runs", task);                  // the denominator
+        Assert.Contains("MONITOR problem, not a service outage", task);   // the never-a-service-outage framing
+    }
+
     // ★★ B3-3 THE SAFETY PROPERTY, extended to the BUDGET: the MONITOR trust budget consumes MONITOR-SIDE
     // transients ONLY. 355 (service-flaky) must NOT go "degraded-as-a-monitor" for Wegmans being flaky; 222
     // (monitor-flaky) MUST, and must surface a directed FIX task; indeterminate burns nothing. The revert proof

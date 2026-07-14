@@ -1,0 +1,10 @@
+{
+  "stryker-config": {
+    "mutate": [
+      "**/Infrastructure/TrustReportProjection.cs",
+      "**/Infrastructure/ErrorDiff.cs"
+    ],
+    "reporters": ["cleartext", "json"],
+    "thresholds": { "high": 95, "low": 88, "break": 85 }
+  }
+}
