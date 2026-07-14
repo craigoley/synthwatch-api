@@ -1,3 +1,6 @@
+> **✅ IMPLEMENTED — historical design record.** Shipped: see `Functions/LocationDiffFunctions.cs`
+> (`GET /runs/{runId}/baseline-diff`) + `Infrastructure/LocationDiffInsight.cs`. Kept for design rationale only.
+
 # Design — location comparison via trace-diff + AI insight
 
 **Status:** recon + design + a **proven pure diff core** (`TraceSignalsDiff`, this PR). The endpoint + AI-over-diff

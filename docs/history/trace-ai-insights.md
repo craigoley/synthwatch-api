@@ -1,3 +1,6 @@
+> **✅ IMPLEMENTED — historical design record.** Shipped: see `Functions/AiInsightsFunctions.cs`
+> (`GET /runs/{id}/ai-insights`) + `Infrastructure/AiInsights.cs`. Kept for design rationale only.
+
 # Design spike — "Get AI insights" from a run's Playwright trace
 
 **Status:** recon + design + **proven extraction prototype**. Not yet built — the full feature spans 2-3 PRs
