@@ -92,6 +92,22 @@ public static class TrustReportProjection
     // rule (it knows the kind); the dashboard must render it distinctly, never as a calm "ok".
     public const string StateNotApplicable = "not-applicable";
 
+    // ★ NO-DATA-YET — the THIRD applicability state, and the one #244 left conflated with "ok". A MEASURABLE
+    // dimension (browser/multistep) that simply lacks enough history to certify: we've barely run this monitor,
+    // so a "0% spurious-red" reading is UNPROVEN, not "measured and fine". Crucially DISTINCT from not-applicable:
+    // not-applicable is structurally dead and NEVER fills in (http has no trace_signals, ever); no-data-yet WILL
+    // resolve as scheduled runs accumulate — "ask again later", not "don't look here". Reporting "ok" for a
+    // barely-run monitor is the same false-confidence a vacuous green is; reporting "no data" (what the dashboard
+    // showed) implies it's the same dead-end as not-applicable. It is neither. NEVER a health verdict.
+    public const string StateNoDataYet = "no-data-yet";
+
+    // The scheduled-run sample below which a CLEAN spurious-red read (fewer than the ≥2 monitor-side count floor)
+    // is "no data yet", not "ok": you need enough runs to have plausibly CAUGHT a flaky-level pattern before a 0%
+    // reading means anything. Derived as ceil(SpuriousRedMinCount / SpuriousRedFlakyRate) = ceil(2 / 0.05) = 40 —
+    // the smallest sample in which the flaky floor's ≥2 transients is expected. A mature monitor clears 40 runs in
+    // hours; a brand-new one honestly reads no-data-yet until it does. (Applied only AFTER the kind is applicable.)
+    public const long SpuriousRedMinScheduledForConfidence = 40;
+
     // Kinds that DON'T capture trace_signals → spurious-red / flake-budget cannot classify a monitor-side
     // transient. Verified in prod: 0 of dns/http/ssl runs carry trace_signals. tcp/ping are network probes,
     // same story. Only browser/multistep (the trace-capturing kinds) can produce a monitor-side red — an
@@ -102,6 +118,19 @@ public static class TrustReportProjection
     /// <summary>Whether a trace-signal-derived dimension (spurious-red, the flake budget) CAN fire for this
     /// kind. False for http/dns/ssl/tcp/ping (no trace_signals ⇒ monitor_side unreachable ⇒ structurally dead).</summary>
     public static bool TraceSignalDimensionsApply(string? kind) => !NonTraceSignalKinds.Contains(kind ?? "");
+
+    /// <summary>Whether the spurious-red axis has enough evidence to certify a CLEAN read as `ok` (rather than
+    /// `no-data-yet`). True when EITHER a real monitor-side pattern already exists (≥ the count floor — the axis is
+    /// gradeable NOW as elevated/flaky), OR the scheduled-run sample clears the confidence floor (a 0% read over
+    /// that many runs is trustworthy). Evaluated only AFTER the kind is known applicable. False ⇒ no-data-yet.</summary>
+    public static bool SpuriousRedHasEnoughData(TrustMonitorRow r) =>
+        r.MonitorSideTransients >= SpuriousRedMinCount || r.ScheduledCount >= SpuriousRedMinScheduledForConfidence;
+
+    /// <summary>The flake budget's analogue: gradeable if it already consumed a real monitor-side pattern (≥ the
+    /// floor — it can be `degraded`), OR its own scheduled-run denominator clears the confidence floor; else
+    /// `no-data-yet` (a budget over a handful of runs is not yet a verdict). Only AFTER the kind is applicable.</summary>
+    public static bool FlakeBudgetHasEnoughData(TrustMonitorRow r) =>
+        r.FlakeConsumed >= SpuriousRedMinCount || r.FlakeScheduledRuns >= SpuriousRedMinScheduledForConfidence;
 
     // ★ B3-3 flake-budget states — DELIBERATELY DISTINCT idiom from a service outage: "degraded as a MONITOR"
     // (my monitor is unreliable) vs "the SERVICE is down". Different problems, different owners.
@@ -172,12 +201,17 @@ public static class TrustReportProjection
         Flap: new TrustDimensionDto(FlapState(r)),
         Retry: new TrustDimensionDto(RetryState(r)),
         MonitorNoise: new TrustDimensionDto(MonitorNoiseState(r)),
-        // ★ spurious-red is trace_signals-derived → NOT-APPLICABLE for kinds that carry none (http/dns/ssl/tcp/
-        // ping): reporting "ok" there is a lie (the dimension is structurally dead, not clean). DeriveChip is
-        // UNCHANGED — it consumes the raw SpuriousRedState (which is "ok" for those kinds since monitor_side is
-        // 0), so a clean http check is still proven-live; only the SURFACED dimension marker changes.
+        // ★ spurious-red is trace_signals-derived → THREE distinct surfaced states (DeriveChip UNCHANGED — it
+        // consumes the raw SpuriousRedState, so a clean http/new-browser check is still proven-live; only this
+        // SURFACED marker changes):
+        //   • not-applicable — the kind carries no trace_signals (http/dns/ssl/tcp/ping): structurally dead, never
+        //                      fills in. "ok" here is a lie (the axis can only ever read a vacuous 0%).
+        //   • no-data-yet    — a MEASURABLE kind we've barely run: a 0% read is unproven. Resolves as runs land.
+        //   • ok/elevated/flaky — enough evidence to grade for real.
         SpuriousRed: new TrustDimensionDto(
-            TraceSignalDimensionsApply(r.Kind) ? SpuriousRedState(r) : StateNotApplicable));
+            !TraceSignalDimensionsApply(r.Kind) ? StateNotApplicable
+            : SpuriousRedHasEnoughData(r) ? SpuriousRedState(r)
+            : StateNoDataYet));
 
     /// <summary>★★ THE MONITOR TRUST BUDGET STATE. "degraded-as-a-monitor" when the monitor has spent MORE than
     /// its budget on MONITOR-SIDE transients — i.e. <c>FlakeConsumed</c> (monitor-side ONLY, from flake_status'
@@ -221,10 +255,14 @@ public static class TrustReportProjection
         Remaining: r.FlakeRemaining,
         RemainingPct: r.FlakeRemainingPct,
         BurnRate: r.FlakeBurnRate,
-        // ★ A budget that CANNOT be consumed is not a healthy budget. For kinds with no trace_signals the
-        // consumed can only ever be 0 (monitor_side unreachable), so a "0% consumed → ok" reads as a perfect
-        // score for a meter that will never move. Mark it not-applicable instead of vacuously-green.
-        State: TraceSignalDimensionsApply(r.Kind) ? FlakeBudgetState(r) : StateNotApplicable,
+        // ★ Same THREE surfaced states as spurious-red (DeriveChip is untouched — it never reads this):
+        //   • not-applicable — no trace_signals: consumed can only ever be 0 (monitor_side unreachable), so a
+        //                      "0% consumed → ok" is a perfect score for a meter that will NEVER move.
+        //   • no-data-yet    — a measurable kind whose budget spans too few scheduled runs to be a verdict yet.
+        //   • ok/degraded    — enough evidence to grade.
+        State: !TraceSignalDimensionsApply(r.Kind) ? StateNotApplicable
+             : FlakeBudgetHasEnoughData(r) ? FlakeBudgetState(r)
+             : StateNoDataYet,
         DirectedTask: FlakeDirectedTask(r));
 
     /// <summary>

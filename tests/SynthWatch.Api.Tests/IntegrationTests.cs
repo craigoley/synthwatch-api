@@ -854,6 +854,58 @@ public class IntegrationTests
         Assert.DoesNotContain("\"spuriousRed\":{\"state\":\"ok\"}", json);       // ★ never the lie
     }
 
+    // ★★ THREE STATES, THREE VALUES — the state the dashboard was FLATTENING into "no data". A measured axis has
+    // three genuinely different truths that must NOT collapse: MEASURED-AND-FINE ("ok" — I checked, it's healthy),
+    // NOT-MEASURABLE ("not-applicable" — structurally impossible for this kind, NEVER fills in), and NO-DATA-YET
+    // ("no-data-yet" — measurable but too little history, WILL fill in). The client must not have to INFER the
+    // third from a null; the API emits a distinct value. This pins all three + the confidence boundary so a
+    // mutant that conflates them (or shifts the ≥ floor) reds.
+    [Fact]
+    public void Trust_spurious_red_and_flake_budget_distinguish_ok_not_applicable_and_no_data_yet()
+    {
+        // ── B. NOT-MEASURABLE — an http check: not-applicable regardless of sample (the kind gate wins FIRST, so
+        //    even a low-sample http row is not-applicable, never no-data-yet — the two markers never cross). ──
+        var http = new TrustMonitorRow { Kind = "http", MonitorSideTransients = 0, ScheduledCount = 5, FlakeConsumed = 0, FlakeScheduledRuns = 5 };
+        Assert.Equal("not-applicable", TrustReportProjection.Dimensions(http).SpuriousRed.State);
+        Assert.Equal("not-applicable", TrustReportProjection.FlakeBudget(http).State);
+
+        // ── C. NO-DATA-YET — a NEW browser check: measurable kind, < 2 monitor-side transients AND too few
+        //    scheduled runs to have caught a flaky pattern. NOT "ok" (unproven), NOT "not-applicable" (it fills in). ──
+        var newBrowser = new TrustMonitorRow { Kind = "browser", MonitorSideTransients = 0, ScheduledCount = 10, FlakeConsumed = 0, FlakeScheduledRuns = 10 };
+        Assert.Equal("no-data-yet", TrustReportProjection.Dimensions(newBrowser).SpuriousRed.State);
+        Assert.Equal("no-data-yet", TrustReportProjection.FlakeBudget(newBrowser).State);
+
+        // ── A. MEASURED-AND-FINE — a MATURE browser check: enough scheduled runs, zero monitor-side → genuinely ok. ──
+        var mature = new TrustMonitorRow { Kind = "browser", MonitorSideTransients = 0, ScheduledCount = 100, FlakeConsumed = 0, FlakeScheduledRuns = 100 };
+        Assert.Equal("ok", TrustReportProjection.Dimensions(mature).SpuriousRed.State);
+        Assert.Equal("ok", TrustReportProjection.FlakeBudget(mature).State);
+
+        // ── the CONFIDENCE boundary at exactly 40 scheduled runs (kills the ≥ → > mutant): 39 is still no-data-yet,
+        //    40 is enough to certify a clean read. ──
+        Assert.Equal("no-data-yet", TrustReportProjection.Dimensions(
+            new TrustMonitorRow { Kind = "browser", MonitorSideTransients = 0, ScheduledCount = 39 }).SpuriousRed.State);
+        Assert.Equal("ok", TrustReportProjection.Dimensions(
+            new TrustMonitorRow { Kind = "browser", MonitorSideTransients = 0, ScheduledCount = 40 }).SpuriousRed.State); // EXACT 40 → ok
+        Assert.Equal("no-data-yet", TrustReportProjection.FlakeBudget(
+            new TrustMonitorRow { Kind = "browser", FlakeConsumed = 0, FlakeScheduledRuns = 39 }).State);
+        Assert.Equal("ok", TrustReportProjection.FlakeBudget(
+            new TrustMonitorRow { Kind = "browser", FlakeConsumed = 0, FlakeScheduledRuns = 40 }).State);            // EXACT 40 → ok
+
+        // ── the OTHER "enough data" arm: a real monitor-side pattern (≥ 2) grades for real even on a SMALL sample —
+        //    2 monitor-side reds in 10 runs is 20% → flaky, NOT no-data-yet (we DO have data: it's bad). ──
+        Assert.Equal("flaky", TrustReportProjection.Dimensions(
+            new TrustMonitorRow { Kind = "browser", MonitorSideTransients = 2, ScheduledCount = 10 }).SpuriousRed.State);
+        Assert.Equal("degraded-as-a-monitor", TrustReportProjection.FlakeBudget(
+            new TrustMonitorRow { Kind = "browser", FlakeConsumed = 2, FlakeScheduledRuns = 10, FlakeBudget = 0.2m }).State);
+
+        // ── the SERIALIZED wire carries all three distinct values (the dashboard reads these verbatim, no inference). ──
+        var asOf = new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero);
+        string Spur(TrustMonitorRow r) => JsonSerializer.Serialize(TrustReportProjection.ToDto(r, asOf));
+        Assert.Contains("\"spuriousRed\":{\"state\":\"not-applicable\"}", Spur(http));
+        Assert.Contains("\"spuriousRed\":{\"state\":\"no-data-yet\"}", Spur(newBrowser));
+        Assert.Contains("\"spuriousRed\":{\"state\":\"ok\"}", Spur(mature));
+    }
+
     // ★★ B3-3 THE SAFETY PROPERTY, extended to the BUDGET: the MONITOR trust budget consumes MONITOR-SIDE
     // transients ONLY. 355 (service-flaky) must NOT go "degraded-as-a-monitor" for Wegmans being flaky; 222
     // (monitor-flaky) MUST, and must surface a directed FIX task; indeterminate burns nothing. The revert proof

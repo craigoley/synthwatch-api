@@ -161,8 +161,12 @@ public record TrustTransientsDto(
     [property: JsonPropertyName("indeterminate")] long Indeterminate,
     [property: JsonPropertyName("spuriousRedRate")] decimal? SpuriousRedRate);
 
-/// <summary>One trust dimension's graded verdict. <c>state</c> ∈ {ok, elevated, flaky} — see
-/// TrustReportProjection for the exact per-axis thresholds the legend renders verbatim.</summary>
+/// <summary>One trust dimension's graded verdict. <c>state</c> ∈ {ok, elevated, flaky} for a measured axis, plus
+/// two APPLICABILITY markers (not health verdicts) the client must render DISTINCTLY: <c>not-applicable</c> = the
+/// axis is structurally dead for this monitor kind (no trace_signals — NEVER fills in); <c>no-data-yet</c> = a
+/// measurable axis with too little history to certify (WILL fill in — "ask again later", not the same dead-end as
+/// not-applicable). "ok" is reserved for MEASURED-and-fine — never emitted for either marker. See
+/// TrustReportProjection for the exact per-axis thresholds + the applicability rules the legend renders.</summary>
 public record TrustDimensionDto(
     [property: JsonPropertyName("state")] string State);
 
@@ -176,7 +180,9 @@ public record TrustProvenanceDto(
 
 /// <summary>★ B3-3 — the MONITOR trust budget. <c>consumed</c> = MONITOR-SIDE transients ONLY (the safety gate: a
 /// service-side transient is a real, if brief, blip the monitor CAUGHT and must NEVER burn its budget); serviceSide
-/// + indeterminate are surfaced, never consumed. <c>state</c> ∈ {ok, degraded-as-a-monitor} — DELIBERATELY DISTINCT
+/// + indeterminate are surfaced, never consumed. <c>state</c> ∈ {ok, degraded-as-a-monitor} for a measured budget,
+/// plus the same two applicability markers as a dimension (<c>not-applicable</c> = no trace_signals, the meter can
+/// never move; <c>no-data-yet</c> = too few scheduled runs to be a verdict yet) — DELIBERATELY DISTINCT
 /// from a service outage: this says "MY MONITOR is unreliable", a different problem with a different owner than
 /// "Wegmans is down". <c>directedTask</c> (non-null only when degraded) names the failing dimension + the evidence
 /// — a FIX task, NEVER a mute/auto-suppression (the flake budget has no write path to alerting). <c>targetIsDefault</c>
