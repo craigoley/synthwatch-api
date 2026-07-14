@@ -32,16 +32,18 @@ Two layers:
 
 | Surface | Endpoints | Gate | Mechanism |
 |---|---|---|---|
-| Reports ×10 (`/reports/*`), `/sla`, `/status`, `/flows`, `/specs`, `/locations`, `/tags` (+`/suggested`), `/checks/{id}/runs`, `/checks/{id}/metrics`, `/checks/{id}/availability-series`, `/checks/{id}/locations` GET, `/checks/{id}/tags` GET, `/incidents` (+detail), `/channels/{id}/test/status`, `/notifications/health`, `/routing` GET, `/runs/{id}/steps`, `/health` | GET | **anon** | GET/HEAD open in the verb-gate; aggregate/status data is the public surface |
+| Reports ×10 (`/reports/*`), `/sla`, `/status`, `/flows`, `/specs`, `/locations`, `/tags`, `/tags/suggested`, `/checks/{id}/runs`, `/checks/{id}/metrics`, `/checks/{id}/availability-series`, `/checks/{id}/locations` GET, `/checks/{id}/tags` GET, `/incidents`, `/incidents/{id}`, `/channels/{id}/test/status`, `/notifications/health`, `/routing` GET, `/runs/{id}/steps`, `/health` | GET | **anon** | GET/HEAD open in the verb-gate; aggregate/status data is the public surface |
+| `/checks/{id}/spec-cache`, `/cred-key/fingerprint` | GET | **anon** | metadata only — spec-cache surfaces the cached commit SHA + fetched-at (NEVER the spec body; the API is DB-denied `spec_cache` writes, migration 0041 — an API-writable cache is an RCE bypass); cred-key/fingerprint is the key's sha256, never the key |
 | `/checks` (list), `/checks/{id}` (detail) | GET | **anon + field\*** | endpoint open; `requestHeaders` serves only to a session (`SessionReadGate.HasWriteSessionAsync` — validation never scans request_headers for secrets, so the readback is gated instead) |
 | `/channels` | GET | **editor\*** | `SessionReadGate` — `ChannelDto.config.authHeader` is a live webhook credential |
 | `/reconcile/plan`, `/reconcile/drift` | GET | **editor\*** | `SessionReadGate` — plan carries the verbatim runner-emitted SQL apply executes; drift carries before/after config diffs. Responses are `Cache-Control: no-store` |
-| `/runs/{id}/trace`, `/checks/{id}/success-trace`, `/runs/{id}/screenshot`, `/runs/{id}/trace-signals` | GET | **editor\*** (#154) | `SessionReadGate` (via `ArtifactsFunctions`) |
-| checks/channels/routing/tags/locations CRUD; `/checks/{id}/run`; `/channels/{id}/test`; `/reconcile/trigger|approve|reject|apply`; `/runs/{id}/ai-insights`; `/runs/{runId}/baseline-diff`; `/checks/parse-intent` | POST/PUT/PATCH/DELETE | **editor\*** | middleware verb-gate (fail-closed by verb — new writes are gated automatically) |
+| `/runs/{id}/trace`, `/checks/{id}/success-trace`, `/runs/{id}/screenshot`, `/runs/{id}/trace-signals`, `/runs/{id}/trace-sas`, `/checks/{id}/success-trace-sas` | GET | **editor\*** (#154/#217) | `SessionReadGate` (via `ArtifactsFunctions`); the `-sas` routes mint a user-delegation SAS to the trace blob |
+| `/checks/{id}/error-diff`, `/checks/{id}/error-mutes` (GET), `/env-domain-map` (GET) | GET | **editor\*** | `SessionReadGate` — forensic error text (#218) / mute config / env→domain rules; the write verbs on these same paths ride the verb-gate below |
+| checks/channels/routing/tags/locations CRUD; `/channels/{id}`; `/checks/{id}/run`; `/channels/{id}/test`; `/checks/{id}/credentials`; `/checks/{id}/environment`; `/checks/{id}/error-mutes` (POST/DELETE); `/env-domain-map` (POST); `/env-domain-map/{id}`; `/reconcile/trigger`, `/reconcile/approve`, `/reconcile/reject`, `/reconcile/apply`; `/runs/{id}/ai-insights`; `/runs/{runId}/baseline-diff`; `/checks/parse-intent` | POST/PUT/PATCH/DELETE | **editor\*** | middleware verb-gate (fail-closed by verb — new writes are gated automatically) |
 | `/auth/request-code`, `/auth/verify`, `/auth/request-access` | POST | **anon (allowlisted)** | `AuthGate.UnauthWriteAllowlist` — you need these to obtain a session |
 | `/auth/logout` | POST | **session (any role)\*** | `AuthGate.SessionFloorWriteRoutes` — a demoted editor can revoke their own session; no-token still 401 |
 | `/auth/me` | GET | **session (always)** | handler check |
-| `/editors` GET/POST/DELETE, `/access-requests` GET/DELETE | all | **admin (always)** | `EditorsFunctions.RequireAdminAsync` (flag-independent) + middleware admin-route for writes |
+| `/editors`, `/editors/{email}`, `/access-requests`, `/access-requests/{email}` | GET/POST/DELETE | **admin (always)** | `EditorsFunctions.RequireAdminAsync` (flag-independent) + middleware admin-route for writes |
 
 ## Verifying the gates against a live deployment
 

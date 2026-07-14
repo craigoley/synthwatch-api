@@ -138,6 +138,14 @@ public static class CheckValidation
     /// <summary>Applies an in-place patch to an existing entity; returns validation errors, if any.</summary>
     public static Dictionary<string, string> ApplyPatch(UpdateCheckRequest req, Check check)
     {
+        // ★ RECONCILE OWNERSHIP (before adding a new patchable field here): a field that is GIT-AUTHORITATIVE in
+        //   the runner's reconcile (`GIT_AUTHORITATIVE_COLUMNS`: name, kind, target_url, flow_name, sensitive,
+        //   redact_patterns, environment, rewrite_from_origin) is SILENTLY CLOBBERED by an API PATCH on a
+        //   git-managed check (`source_key IS NOT NULL`) — the next reconcile reads it as drift vs the manifest and
+        //   its apply-UPDATE writes the manifest value back. Such a write survives ONLY on hand-made checks
+        //   (`source_key IS NULL`); the canonical write-path for a git-owned field is the MANIFEST, not this API.
+        //   (This is why there is no `environment` case here — `PUT /checks/{id}/environment` writes the
+        //   dashboard-owned `environment_override` column, deliberately DISJOINT from the git-owned `environment`.)
         var errors = new Dictionary<string, string>();
 
         if (req.Name is not null)

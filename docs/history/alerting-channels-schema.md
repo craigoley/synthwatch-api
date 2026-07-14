@@ -1,3 +1,7 @@
+> **✅ IMPLEMENTED — historical design record.** Shipped: see `Functions/ChannelsFunctions.cs`,
+> `Functions/ChannelTestFunctions.cs`, `Functions/RoutingFunctions.cs` (and the runner owns dispatch).
+> The gates are in [`../auth-gates.md`](../auth-gates.md). Kept for the design rationale only.
+
 # Proposal: dashboard-managed alerting v1 — channels + routing schema (RUNNER-owned)
 
 **Status:** DRAFT / coordination spec. **Owner of the actual migration: the runner** (`craigoley/synthwatch`,

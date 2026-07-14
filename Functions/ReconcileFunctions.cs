@@ -306,6 +306,11 @@ public class ReconcileFunctions
         var text = stmt?.Text;
         var normalized = text is null ? null : new string(text.Where(c => !char.IsWhiteSpace(c)).ToArray());
         // ★ Contract: exactly ONE statement — a soft-disable UPDATE by source_key with one value, never a delete.
+        // ★ DO NOT delete the `normalized is null` clause. CodeQL (cs/constant-condition #151/#152) flags it as
+        //   always-false — it IS, by construction (normalized is null ⟺ text is null, already short-circuited by
+        //   the first clause) — but it is a COMPILER-REQUIRED null-flow guard: remove it and the `.Contains()`
+        //   below fails `-warnaserror` with CS8602. The destructive-SQL refusal (DELETE ban + required-UPDATE
+        //   shape) is enforced by the SIBLING clauses, independent of this one. Adjudicated false-positive.
         if (text is null || stmt!.Values is not { Count: 1 } vals || normalized is null
             || !normalized.Contains("UPDATEchecksSETenabled=falseWHEREsource_key=$1", StringComparison.OrdinalIgnoreCase)
             || normalized.Contains("DELETE", StringComparison.OrdinalIgnoreCase))
@@ -338,6 +343,9 @@ public class ReconcileFunctions
         var normalized = text is null ? null : new string(text.Where(c => !char.IsWhiteSpace(c)).ToArray());
         // ★ Contract + STRIP-SAFETY: a scoped `UPDATE checks SET … WHERE source_key = $1` that NEVER touches the
         //   redaction columns and is never a delete. Anything else → refuse.
+        // ★ DO NOT drop `normalized is null` — same as ApplyMissingAsync's guard above: it's a compiler-required
+        //   null-flow guard (removing it → CS8602 under `-warnaserror`), NOT redundant despite CodeQL #151/#152;
+        //   the STRIP-SAFETY / DELETE refusals live in the sibling clauses. Adjudicated false-positive.
         if (text is null || stmt!.Values is not { Count: > 0 } vals || normalized is null
             || !normalized.StartsWith("UPDATEchecksSET", StringComparison.OrdinalIgnoreCase)
             || !normalized.Contains("WHEREsource_key=$1", StringComparison.OrdinalIgnoreCase)

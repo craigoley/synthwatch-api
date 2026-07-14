@@ -9,10 +9,12 @@ It runs as an Azure Function inside the same Azure network as the Postgres serve
 database never needs to accept connections from outside Azure. Consumers: the Vercel
 dashboard first; later a status page, a Prometheus exporter, and AI root-cause.
 
-> **Scope of this PR:** API MVP only. Authn/authz hardening (the security stack) and
-> `claude-review` wiring are deliberately separate follow-up PRs. Every endpoint here is
-> currently `AuthorizationLevel.Anonymous` and is expected to be locked down in that
-> follow-up.
+> **Status: production.** **Auth IS enforced** — the `AuthorizationMiddleware` verb-gate +
+> handler self-guards require an editor/admin session for every write and for credential /
+> forensic reads (fail-closed via `AUTH_ENFORCEMENT_ENABLED`; `/editors*` + `/access-requests*`
+> are admin-only). The gate for **every** endpoint is in [`docs/auth-gates.md`](docs/auth-gates.md).
+> This service **auto-deploys on merge to `main`** (CI publishes the Function App) — there is no
+> "deploy later" step.
 
 ## Operations / On-call
 
@@ -39,32 +41,19 @@ Runbooks for a paged operator — reach for these first during a live incident:
 - **Flex Consumption** plan only — .NET 10 cannot run on Linux Consumption. Flex scales to
   zero (≈free at this traffic).
 - **EF Core is read-mostly.** This API does **not** own migrations — the runner does. The
-  `DbContext` maps to the existing tables and never mutates the schema. The only writes are
-  to the `checks` table (create / edit / pause / delete).
+  `DbContext` maps to the existing tables and never mutates the schema. Its writes are scoped to
+  the operator/config tables it owns — `checks`, `channels`, `alert_routes`/`tag_routes`,
+  `editors`, `access_requests`, `sessions`, `error_mutes`, `env_domain_map`, and
+  `reconcile_apply_plan` (approve/apply) — never the runner-owned run/incident data.
 
 ## Endpoints
 
-All routes are prefixed with `/api`. JSON in/out.
-
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/checks` | List checks + derived current status (from the latest run) |
-| `GET` | `/api/checks/{id}` | One check + recent runs |
-| `POST` | `/api/checks` | Create a check (omit `id`) |
-| `PATCH` | `/api/checks/{id}` | Partial edit / pause (`enabled`) |
-| `DELETE` | `/api/checks/{id}` | Soft delete (`enabled=false`); `?hard=true` removes the row (cascades) |
-| `GET` | `/api/checks/{id}/runs` | Paginated run history (`?page=&pageSize=`) |
-| `GET` | `/api/runs/{id}/steps` | `run_steps` for the funnel |
-| `GET` | `/api/checks/{id}/metrics` | `run_metrics` series (`?page=&pageSize=`) |
-| `GET` | `/api/incidents` | Open + resolved (`?status=open\|resolved`, `?checkId=`) |
-| `GET` | `/api/flows` | Distinct `flow_name` values |
-| `GET` | `/api/sla?window=24h\|7d\|30d` | Per-check availability from the SLA views |
-| `GET` | `/api/reconcile/drift` | Latest monitors-as-code drift snapshot (read-only; reconcile runs in report mode) |
-| `GET` | `/api/specs` | Spec catalog: every manifest spec LEFT JOIN checks (coverage + runnable + health), read-only |
-| `GET` | `/api/editors` | List the editor allowlist — **admin-only** (Phase 12 slice 3) |
-| `POST` | `/api/editors` | Add an editor `{ email }` — **admin-only**, audited (409 if already an editor) |
-| `DELETE` | `/api/editors/{email}` | Remove an editor — **admin-only**, audited (revokes write access on their next request) |
-| `GET` | `/api/access-requests` | Pending edit-access requests (excludes existing editors/admins) — **admin-only** |
+All routes are prefixed with `/api`, JSON in/out. **The authoritative, gate-annotated route
+list is [`docs/auth-gates.md`](docs/auth-gates.md)** — every endpoint, the gate that protects it,
+and the mechanism. It is kept honest by a reflection test (`AuthGatesDocParityTests`) that fails
+the build if any `[Function]` route is missing from it (or listed but deleted). This README does
+**not** duplicate the route table on purpose: a hand-maintained copy with no tripwire is exactly
+the thing that rots into a lie.
 
 Request bodies are validated against the live DB CHECK constraints (kind, severity,
 form factor, positive intervals/timeouts, `browser` requires `flow_name`, …) and rejected
@@ -79,8 +68,11 @@ The single allowed origin is the Vercel dashboard URL, configured via the
 
 ## Data model & managed-identity auth
 
-- Entities map 1:1 to the live schema (ground truth: `craigoleyagent/synthwatch`
-  `docs/SCHEMA.md`). `bigint` identity PKs are `ValueGeneratedOnAdd` (never set on insert);
+- Entities map 1:1 to the live schema. **Ground truth is the runner's `db/schema.sql`**
+  (`craigoley/synthwatch`) — the schema-parity CI gate already enforces it as source of truth
+  against the test fixture, so it cannot silently drift. (Do **not** consult the old
+  `docs/SCHEMA.md` snapshot — it lags prod by many migrations.) `bigint` identity PKs are
+  `ValueGeneratedOnAdd` (never set on insert);
   `transfer_bytes` / `js_heap_bytes` / `perf_budget_transfer_bytes` map to `long`.
 - The SLA data comes from the existing `sla_availability(p_from, p_to)` function and the
   `sla_availability_24h/7d/30d` views, read through a keyless entity — not reimplemented.
@@ -121,7 +113,9 @@ func start
 
 ## Deploy
 
-> **Do not deploy from this PR.** Recorded here for the follow-up.
+> **This service auto-deploys on merge to `main`** (CI publishes the Function App). The commands
+> below are the underlying one-time provisioning / publish steps CI runs — an operator rarely runs
+> them by hand.
 
 ```bash
 # 1. Provision infra into the EXISTING resource group (creates storage, Flex plan,
