@@ -67,4 +67,36 @@ public class TraceSignalsGoldenParityTests
             "C# TraceExtractor.FromZip diverged from the shared golden — the runner/API extractors are out of sync.\n" +
             $"expected: {expectedJson?.ToJsonString()}\nactual:   {actualJson?.ToJsonString()}");
     }
+
+    /// <summary>
+    /// ★ The SECOND cross-repo canonicalizer contract (#299). TraceSignalsDiff.Canonicalize (here) and
+    /// canonicalizeConsole (runner/transientClass.ts) are a hand-ported pair that MUST produce byte-identical
+    /// output — else the flake budget (runner) and the error diff (api) disagree about what counts as "the same
+    /// error". Asserts the C# impl against the SAME shared golden the runner's traceSignals.test.ts asserts.
+    /// A drift in EITHER regex/order fails ITS repo's CI on a canonicalize.json case.
+    /// </summary>
+    [SkippableFact]
+    public void Canonicalize_golden_input_matches_canonicalize_json()
+    {
+        var dir = GoldenDir();
+        Skip.If(dir is null,
+            "runner golden fixtures not available — set RUNNER_GOLDEN_DIR (the trace-parity CI job does) or check out craigoley/synthwatch as a sibling.");
+
+        var path = Path.Combine(dir!, "canonicalize.json");
+        Skip.If(!File.Exists(path), "canonicalize.json not present in the runner golden dir (older runner checkout).");
+
+        var cases = JsonNode.Parse(File.ReadAllText(path))!["cases"]!.AsArray();
+        Assert.True(cases.Count >= 6, "the canonicalizer golden must cover the cases that matter (>= 6)");
+        foreach (var c in cases)
+        {
+            var name = (string)c!["name"]!;
+            var input = (string)c!["input"]!;
+            var expected = (string)c!["expected"]!;
+            var actual = TraceSignalsDiff.Canonicalize(input);
+            Assert.True(
+                actual == expected,
+                $"C# TraceSignalsDiff.Canonicalize diverged from the shared golden on case \"{name}\" — the runner/API canonicalizers are out of sync.\n" +
+                $"input:    {input}\nexpected: {expected}\nactual:   {actual}");
+        }
+    }
 }
