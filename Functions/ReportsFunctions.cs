@@ -200,7 +200,7 @@ public class ReportsFunctions
                CROSS JOIN LATERAL slo_burn_status(c.id) b
                WHERE c.slo_target IS NOT NULL
                  -- ★ Archived-EXCLUDE (#259 parity, now at the source): an archived monitor never enters the
-                 -- error-budget fleet — its stale slo_target read "Budget blown" for a monitor nobody runs.
+                 -- error-budget fleet — its stale slo_target read Budget-blown for a monitor nobody runs.
                  AND c.archived_at IS NULL
                  -- ★ Pre-prod default-EXCLUDE (arc S1c): a non-prod check never enters the prod SLO/error-budget
                  -- fleet. EFFECTIVE env = coalesce(environment_override, environment, 'prod'): a dashboard
@@ -332,7 +332,7 @@ public class ReportsFunctions
                FROM incidents
                WHERE opened_at >= now() - ({days} * INTERVAL '1 day')
                  -- ★ Archived-EXCLUDE (#259 parity, at the source): an archived monitor's incidents never enter the
-                 -- alert-precision breakdown (a dead demo check was the sole classified red → a fake "25%"). NOT IN
+                 -- alert-precision breakdown (a dead demo check was the sole classified red → a fake 25%). NOT IN
                  -- keeps ORPHAN incidents (check_id absent from checks) — only archived checks are removed.
                  AND check_id NOT IN (SELECT id FROM checks WHERE archived_at IS NOT NULL)
                  AND (cardinality({tags}) = 0 OR check_id IN (
