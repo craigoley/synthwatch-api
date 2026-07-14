@@ -36,16 +36,13 @@ CREATE FUNCTION public.sla_availability(p_from timestamp with time zone, p_to ti
             4
         ) AS availability_pct
     FROM checks c
-    LEFT JOIN runs r
+    -- ★ countable_run (0081): status / superseded / confirmation / sandbox are now filtered by the view
+    -- (was an inline `LEFT JOIN runs r … AND NOT r.sandbox AND r.superseded_by_run_id IS NULL`, which
+    -- missed confirmation runs → a confirmed outage double-counted). One canonical predicate now.
+    LEFT JOIN countable_run r
            ON r.check_id   = c.id
           AND r.started_at >= p_from
           AND r.started_at <  p_to
-          -- SANDBOX EXCLUSION (0070): a paused monitor's on-demand validation persists a runs row but
-          -- skipped evaluate() — not a scheduled health signal, so it must never move availability. In the
-          -- JOIN (not a WHERE) so a check whose only window runs are sandbox keeps its LEFT-JOIN null-run row.
-          AND NOT r.sandbox
-          -- SUPERSEDED-TRANSIENT EXCLUSION (0077): a failed run whose confirmation PASSED was transient.
-          AND r.superseded_by_run_id IS NULL
     -- MAINTENANCE-WINDOW EXCLUSION (additive anti-join, mirrors 0004): drop runs
     -- that fall inside an active window for this check (check_id = c.id) OR a
     -- fleet-wide window (check_id IS NULL). Uncovered runs keep mw.id NULL and
@@ -380,6 +377,23 @@ CREATE TABLE public.schema_migrations (
 
 
 --
+-- Name: countable_run; Type: VIEW; Schema: public; Owner: -
+--
+-- ★ countable_run (runner migration 0081): the ONE canonical "countable scheduled observation" — a
+-- real-result, non-superseded, non-sandbox run, MINUS redundant DOWN confirmation re-checks. Consumed by
+-- sla_availability + slo_status (their bodies LEFT JOIN it). Placed AFTER the runs table (a view validates
+-- its FROM at CREATE time, unlike the deferred SQL-function bodies above). Mirrors runner db/schema.sql.
+
+CREATE OR REPLACE VIEW public.countable_run AS
+    SELECT *
+      FROM runs
+     WHERE status NOT IN ('running', 'infra_error')
+       AND superseded_by_run_id IS NULL
+       AND NOT (confirmation_of_run_id IS NOT NULL AND status IN ('fail', 'error'))
+       AND NOT sandbox;
+
+
+--
 -- Name: sla_availability_24h; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -656,12 +670,13 @@ AS $function$
             count(*) FILTER (WHERE r.status IN ('pass', 'warn', 'fail', 'error')) AS total_runs,
             count(*) FILTER (WHERE r.status IN ('fail', 'error'))                 AS down_runs
         FROM checks c
-        LEFT JOIN runs r
+        -- ★ countable_run (0081): also excludes confirmation runs AND sandbox runs — BOTH were missing
+        -- here (only superseded was excluded), so a confirmed outage double-counted its burn and a paused
+        -- monitor's sandbox run consumed the error budget. slo_status drives paging, so this was the worst.
+        LEFT JOIN countable_run r
                ON r.check_id   = c.id
               AND r.started_at >= p_from
               AND r.started_at <  p_to
-              -- SUPERSEDED-TRANSIENT EXCLUSION (0077): a confirmed-transient failure must not burn the budget.
-              AND r.superseded_by_run_id IS NULL
         -- Maintenance-window anti-join (mirrors sla_availability): drop runs inside
         -- an active window for this check OR a fleet-wide window.
         LEFT JOIN maintenance_windows mw
