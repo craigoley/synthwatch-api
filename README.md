@@ -16,6 +16,11 @@ dashboard first; later a status page, a Prometheus exporter, and AI root-cause.
 > This service **auto-deploys on merge to `main`** (CI publishes the Function App) — there is no
 > "deploy later" step.
 
+*Doc honesty: the **Endpoints** and **Data model** sections point at gated sources that cannot silently
+drift — `docs/auth-gates.md` (guarded by the `AuthGatesDocParityTests` reflection test) and the runner's
+`db/schema.sql` (guarded by the schema-parity CI gate). Everything else here is prose with no automated
+check: **if the code disagrees, the code is authoritative.** The Rollback section is explicitly unrehearsed.*
+
 ## Operations / On-call
 
 Runbooks for a paged operator — reach for these first during a live incident:
@@ -83,19 +88,8 @@ The single allowed origin is the Vercel dashboard URL, configured via the
   connection string carries only host / database / username (= the MI principal name).
   **If a password were present, the managed-identity token would be ignored.**
 
-### Structured SSL cert days-remaining
-
-The dashboard / status page / alert profiles need cert **days-remaining** as a typed field so
-they don't regex-parse prose. Two structured cert columns are surfaced:
-
-- `checks.cert_expiry_warn_days` (`int NOT NULL DEFAULT 30`) — the per-check warn *threshold*
-  (config input). Exposed as `certExpiryWarnDays` on the check DTOs and accepted on write.
-- `runs.cert_days_remaining` (`int NULL`, populated on ssl runs) — the measured value. Exposed
-  additively as `certDaysRemaining` (`number | null`; null for non-ssl runs) on `RunDto`, and as
-  `lastCertDaysRemaining` (latest run's value) on the check summary.
-
-We deliberately do **not** parse `error_message` in the API (fragile; breaks on wording changes) —
-it stays the human-readable text alongside the structured field.
+The structured SSL cert **days-remaining** fields (`certExpiryWarnDays` / `certDaysRemaining` /
+`lastCertDaysRemaining`) are field-level reference — see [`docs/ssl-cert-days.md`](docs/ssl-cert-days.md).
 
 ## Local development
 
@@ -113,26 +107,34 @@ func start
 
 ## Deploy
 
-> **This service auto-deploys on merge to `main`** (CI publishes the Function App). The commands
-> below are the underlying one-time provisioning / publish steps CI runs — an operator rarely runs
-> them by hand.
+**This service auto-deploys on merge to `main`.** The CD workflow
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) is the source of truth: it builds
+(`dotnet publish -c Release`) and publishes the package to the Function App via `Azure/functions-action`
+(OIDC federated login — no publish profile or stored secret), serialized so two merges can't race. The
+infra — **Flex Consumption** (`FC1`) in `synthwatch-rg` / `eastus2`, a **system-assigned managed
+identity**, the `Postgres__*` + `Cors__AllowedOrigin` app settings, and identity-based storage — is
+defined in [`infra/main.bicep`](infra/main.bicep).
 
-```bash
-# 1. Provision infra into the EXISTING resource group (creates storage, Flex plan,
-#    App Insights, and the Function App with a system-assigned identity).
-az deployment group create -g synthwatch-rg -f infra/main.bicep \
-  -p pgHost=<server>.postgres.database.azure.com \
-     allowedCorsOrigin=https://<dashboard>.vercel.app
+Don't hand-copy the `az` / `func` commands into this README: a duplicated command block drifts (the old
+one already did — CD publishes via `functions-action`, not `func azure functionapp publish`). Read
+`deploy.yml`.
 
-# 2. Publish the code to the Function App.
-func azure functionapp publish synthwatch-api
-```
+## Rollback
 
-The Bicep targets **Flex Consumption** (`FC1` / `FlexConsumption`) in `synthwatch-rg` /
-`eastus2`, gives the app a **system-assigned managed identity**, sets the `Postgres__*` and
-`Cors__AllowedOrigin` app settings, and uses identity-based storage (no account keys).
+> ★ **DRAFT · UNREHEARSED · NEVER EXECUTED.** Inferred from code, not run. Do not trust it as a verified
+> runbook until it has been rehearsed against a real deploy.
 
-Outputs: `functionAppUrl`, `apiBaseUrl`, `functionAppPrincipalId`, `functionAppNameOut`.
+There are **no deployment slots** and no "deploy the previous package" button (Flex Consumption package
+deploy). Rollback is roll-forward-to-previous:
+
+1. `git revert <bad-merge-commit>` on `main` (or a revert PR + auto-merge).
+2. The push re-triggers [`deploy.yml`](.github/workflows/deploy.yml), which re-`dotnet publish`es and
+   republishes the **prior** code. The CORS / app-settings reconcile step re-runs on every deploy.
+
+⚠️ **The revert redeploys against the CURRENT (possibly newer) runner schema** — this API does not own
+migrations (the runner does). A revert to code that reads a column the runner has since dropped or
+renamed will **break** — the inverse of "merged ≠ migrated". Diff the reverted code against the live
+`db/schema.sql` before relying on this path.
 
 ## ⚠️ Manual one-time steps (cannot be automated here)
 
