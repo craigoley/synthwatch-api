@@ -5406,6 +5406,88 @@ public class IntegrationTests
         }
     }
 
+    // ★ ARCHIVED EXCLUSION at the AGGREGATE source (issues 1+2 — #259 parity swept from /status to /incidents +
+    // /reports/*). A dead demo check (rca-demo class: archived + disabled) was the SOLE "Open (1)" incident, the
+    // SOLE error-budget row, and the only classified red in alert-precision — "0% available, Budget blown" for a
+    // monitor nobody runs. This proves the filter can FAIL both ways: a NON-archived check appears on all five
+    // surfaces; archiving it makes it VANISH from every one. Reverting ANY single `archived_at IS NULL` /
+    // `NOT IN (…archived…)` predicate fails the matching assertion below.
+    [SkippableFact]
+    public async Task Archived_checks_are_excluded_from_incidents_and_report_aggregates()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE ck bigint;
+            BEGIN
+              -- A PROD, enabled, NON-archived check WITH an slo_target + a full run history (so the SLO/trust
+              -- LATERAL functions produce a row) and a classified real-outage incident. It must appear on every
+              -- aggregate now; archiving it (below) must remove it from all of them.
+              INSERT INTO checks (name, kind, target_url, severity, enabled, environment, slo_target)
+                VALUES ('arch-agg','http','https://agg.ex','critical', true, 'prod', 0.99) RETURNING id INTO ck;
+              INSERT INTO check_tags (check_id, key, value) VALUES (ck,'team','archagg');
+              FOR i IN 1..100 LOOP
+                INSERT INTO runs (check_id, status, started_at) VALUES (ck, 'pass', now() - (i || ' minutes')::interval);
+              END LOOP;
+              INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures, rca) VALUES
+                (ck,'resolved','critical', now()-interval '5 days', now()-interval '5 days'+interval '90 seconds', 2,
+                 jsonb_build_object('classification','real-outage'));
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var incidents = new IncidentsFunctions(db);
+
+            // (bool onIncidents, bool onSlo, bool onMttr, bool onTrust, long breakdownClassified)
+            async Task<(bool inc, bool slo, bool mttr, bool trust, long brk)> Snapshot()
+            {
+                var inc = Assert.IsType<CursorPage<IncidentDto>>(Assert.IsType<OkObjectResult>(
+                    await incidents.ListIncidents(Request("?window=30d"), default)).Value!);
+                var slo = Assert.IsType<SloReportResponseDto>(Assert.IsType<OkObjectResult>(
+                    await reports.GetSloReport(Request("?window=30d&tag=team:archagg"), default)).Value!);
+                var mttr = Assert.IsType<MttrReportResponseDto>(Assert.IsType<OkObjectResult>(
+                    await reports.GetMttrReport(Request("?window=30d&tag=team:archagg"), default)).Value!);
+                var trust = Assert.IsType<TrustReportDto>(Assert.IsType<OkObjectResult>(
+                    await reports.GetTrustReport(Request("?window=30d"), default)).Value!);
+                var brk = Assert.IsType<IncidentBreakdownDto>(Assert.IsType<OkObjectResult>(
+                    await reports.GetIncidentBreakdown(Request("?window=30d&tag=team:archagg"), default)).Value!);
+                return (
+                    inc.Items.Any(i => i.CheckName == "arch-agg"),
+                    slo.Items.Any(i => i.CheckName == "arch-agg"),
+                    mttr.Items.Any(i => i.CheckName == "arch-agg"),
+                    trust.Monitors.Any(m => m.CheckName == "arch-agg"),
+                    brk.Classified);
+            }
+
+            // (1) NOT archived → the check appears on every surface (the filter's "un-archived shows" half).
+            var before = await Snapshot();
+            Assert.True(before.inc, "incident should list while the check is active");
+            Assert.True(before.slo, "error-budget should include the active SLO check");
+            Assert.True(before.mttr, "MTTR should include the active check's incident");
+            Assert.True(before.trust, "trust scorecard should include the active check");
+            Assert.True(before.brk >= 1, "the classified real-outage should count in alert-precision");
+
+            // (2) Archive it → it must VANISH from all five (the fix; the "archived hides" half).
+            await db.Database.ExecuteSqlRawAsync("UPDATE checks SET archived_at = now() WHERE name = 'arch-agg';");
+            var after = await Snapshot();
+            Assert.False(after.inc, "archived check's incident must NOT list");
+            Assert.False(after.slo, "archived check must leave the error-budget fleet");
+            Assert.False(after.mttr, "archived check must leave MTTR");
+            Assert.False(after.trust, "archived check must leave the trust scorecard");
+            Assert.Equal(0L, after.brk); // its classified real-outage drops out of alert-precision
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name = 'arch-agg'); " +
+                "DELETE FROM runs WHERE check_id IN (SELECT id FROM checks WHERE name = 'arch-agg'); " +
+                "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name = 'arch-agg'); " +
+                "DELETE FROM checks WHERE name = 'arch-agg';");
+        }
+    }
+
     // ★ GET /reports/deploys — the deploy-marker overlay source (deploy-markers v1). Proves: host-scoped;
     // a git-sha marker exposes its sha, a non-sha (etag) marker exposes NULL sha + is_sha=false (honest);
     // window filtering; host required (400); and the wire shape.

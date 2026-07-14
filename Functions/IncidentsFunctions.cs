@@ -77,6 +77,11 @@ public class IncidentsFunctions
             from i in query
             join c in _db.Checks.AsNoTracking() on i.CheckId equals c.Id into cj
             from c in cj.DefaultIfEmpty()
+            // ★ Archived monitors must not dominate the incidents list — the SAME exclusion #259 applied to the
+            // status grid, now at the source (a dead demo check owned "Open (1)" here). Drop incidents whose check
+            // is archived, but KEEP orphans (check row missing → c == null) so a deleted check's incident still
+            // surfaces — same defensive posture as the LEFT JOIN above. `removed_at` stays visible (its purge clock).
+            where c == null || c.ArchivedAt == null
             orderby i.OpenedAt descending, i.Id descending
             select new { Incident = i, Name = c != null ? c.Name : null, Kind = c != null ? c.Kind : null })
             .Take(range.PageSize + 1)

@@ -199,6 +199,9 @@ public class ReportsFunctions
                -- (read == page). Its own fixed 1h/6h/30m windows (NOT the report window), so no from/to args.
                CROSS JOIN LATERAL slo_burn_status(c.id) b
                WHERE c.slo_target IS NOT NULL
+                 -- ★ Archived-EXCLUDE (#259 parity, now at the source): an archived monitor never enters the
+                 -- error-budget fleet — its stale slo_target read Budget-blown for a monitor nobody runs.
+                 AND c.archived_at IS NULL
                  -- ★ Pre-prod default-EXCLUDE (arc S1c): a non-prod check never enters the prod SLO/error-budget
                  -- fleet. EFFECTIVE env = coalesce(environment_override, environment, 'prod'): a dashboard
                  -- override (env PR-3) WINS over the git-derived env; the trailing 'prod' covers a row written
@@ -287,6 +290,8 @@ public class ReportsFunctions
                FROM incidents i
                JOIN checks c ON c.id = i.check_id
                WHERE i.opened_at >= now() - ({days} * INTERVAL '1 day')
+                 -- ★ Archived-EXCLUDE (#259 parity, at the source): an archived monitor's incidents never enter MTTR.
+                 AND c.archived_at IS NULL
                  -- ★ Pre-prod default-EXCLUDE (arc S1c): a non-prod check's incidents never enter the prod MTTR.
                  AND coalesce(c.environment_override, c.environment, 'prod') = 'prod'
                  AND (cardinality({tags}) = 0 OR i.check_id IN (
@@ -326,6 +331,10 @@ public class ReportsFunctions
             $@"SELECT coalesce(rca->>'classification', {Unclassified}) AS classification, count(*)::bigint AS count
                FROM incidents
                WHERE opened_at >= now() - ({days} * INTERVAL '1 day')
+                 -- ★ Archived-EXCLUDE (#259 parity, at the source): an archived monitor's incidents never enter the
+                 -- alert-precision breakdown (a dead demo check was the sole classified red → a fake 25%). NOT IN
+                 -- keeps ORPHAN incidents (check_id absent from checks) — only archived checks are removed.
+                 AND check_id NOT IN (SELECT id FROM checks WHERE archived_at IS NOT NULL)
                  AND (cardinality({tags}) = 0 OR check_id IN (
                        SELECT ft.check_id FROM check_tags ft
                        WHERE ft.key || ':' || ft.value = ANY({tags})
@@ -509,6 +518,10 @@ public class ReportsFunctions
            -- flake_target × scheduled_runs, fleet default 2%. Same window as rc. READ-ONLY — no alert path.
            CROSS JOIN LATERAL flake_status(c.id, now() - ({days} * INTERVAL '1 day'), now()) fb
            WHERE c.enabled = true
+             -- ★ Archived-EXCLUDE (#259 parity, at the source): an archived-but-enabled check must not enter the
+             -- trust scorecard (enabled=true alone let a dead demo check through). The single-check detail below
+             -- stays unfiltered by design.
+             AND c.archived_at IS NULL
              -- ★ Pre-prod default-EXCLUDE (arc S1c): the trust scorecard is the PROD fleet only. The
              -- single-check detail (TrustDetailSql) is deliberately NOT excluded — a caller asking for one
              -- monitor by id has already scoped it.
