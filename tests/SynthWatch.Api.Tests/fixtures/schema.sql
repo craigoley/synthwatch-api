@@ -199,6 +199,11 @@ CREATE TABLE public.incidents (
     consecutive_failures integer DEFAULT 0 NOT NULL,
     summary text,
     rca jsonb,
+    notify_attempted_at timestamp with time zone,
+    notify_status text,
+    notify_error text,
+    notify_attempts integer DEFAULT 0 NOT NULL,
+    CONSTRAINT incidents_notify_status_chk CHECK (((notify_status IS NULL) OR (notify_status = ANY (ARRAY['sent'::text, 'failed'::text, 'skipped'::text])))),
     CONSTRAINT incidents_severity_check CHECK ((severity = ANY (ARRAY['critical'::text, 'warning'::text]))),
     CONSTRAINT incidents_status_check CHECK ((status = ANY (ARRAY['open'::text, 'resolved'::text])))
 );
