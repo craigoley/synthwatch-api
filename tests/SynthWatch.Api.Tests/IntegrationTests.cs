@@ -808,6 +808,52 @@ public class IntegrationTests
         Assert.Contains("MONITOR problem, not a service outage", task);   // the never-a-service-outage framing
     }
 
+    // ★ APPLICABILITY: http/dns/ssl/tcp/ping capture NO trace_signals, so spurious-red + the flake budget can
+    // only ever be a vacuous 0% — the API must say "not-applicable" (a refusal to guess), NOT "ok" (a lie). And
+    // it must be SCOPED: a browser/multistep check still grades for real. DeriveChip is untouched (a clean http
+    // check stays proven-live).
+    [Fact]
+    public void Trust_spurious_red_and_flake_budget_are_not_applicable_for_non_trace_signal_kinds()
+    {
+        foreach (var kind in new[] { "http", "dns", "ssl", "tcp", "ping" })
+        {
+            var r = new TrustMonitorRow { Kind = kind, MonitorSideTransients = 0, ScheduledCount = 100, FlakeConsumed = 0, FlakeBudget = 1m };
+            Assert.Equal("not-applicable", TrustReportProjection.Dimensions(r).SpuriousRed.State); // ★ not "ok"
+            Assert.Equal("not-applicable", TrustReportProjection.FlakeBudget(r).State);            // ★ not a vacuous-perfect budget
+        }
+
+        // ★ SCOPED, not a blanket mute: a BROWSER / MULTISTEP check still grades spurious-red for real.
+        Assert.Equal("ok", TrustReportProjection.Dimensions(
+            new TrustMonitorRow { Kind = "browser", MonitorSideTransients = 0, ScheduledCount = 100 }).SpuriousRed.State);
+        Assert.Equal("flaky", TrustReportProjection.Dimensions(
+            new TrustMonitorRow { Kind = "browser", MonitorSideTransients = 5, ScheduledCount = 100 }).SpuriousRed.State); // 5% ≥ 5%
+        Assert.Equal("elevated", TrustReportProjection.Dimensions(
+            new TrustMonitorRow { Kind = "multistep", MonitorSideTransients = 2, ScheduledCount = 200 }).SpuriousRed.State); // 1%
+
+        // ★ DeriveChip UNCHANGED: a clean http check is STILL proven-live — the marker must not block the chip.
+        var httpClean = new TrustMonitorRow
+        {
+            Kind = "http", RunCount = 100, RetryCount = 0, ScheduledCount = 100,
+            LastGreenAt = new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero), IntervalSeconds = 900,
+        };
+        Assert.Equal("proven-live", TrustReportProjection.DeriveChip(httpClean, new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero)));
+    }
+
+    // ★ THE CONTRACT the dashboard reads: the SERIALIZED wire shape must carry "not-applicable" for an http
+    // check, so the dashboard can render it distinctly and can't assume "ok".
+    [Fact]
+    public void Trust_dto_serializes_spurious_red_as_not_applicable_for_an_http_check()
+    {
+        var http = new TrustMonitorRow
+        {
+            CheckId = 4, CheckName = "SynthWatch API health", Kind = "http", RunCount = 100, ScheduledCount = 100,
+            LastGreenAt = new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero), IntervalSeconds = 900,
+        };
+        var json = JsonSerializer.Serialize(TrustReportProjection.ToDto(http, new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero)));
+        Assert.Contains("\"spuriousRed\":{\"state\":\"not-applicable\"}", json); // ★ a refusal to guess, on the wire
+        Assert.DoesNotContain("\"spuriousRed\":{\"state\":\"ok\"}", json);       // ★ never the lie
+    }
+
     // ★★ B3-3 THE SAFETY PROPERTY, extended to the BUDGET: the MONITOR trust budget consumes MONITOR-SIDE
     // transients ONLY. 355 (service-flaky) must NOT go "degraded-as-a-monitor" for Wegmans being flaky; 222
     // (monitor-flaky) MUST, and must surface a directed FIX task; indeterminate burns nothing. The revert proof

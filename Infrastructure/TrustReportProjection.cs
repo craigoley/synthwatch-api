@@ -85,6 +85,23 @@ public static class TrustReportProjection
     public const string StateFlaky = "flaky";
     public const string StateElevated = "elevated";
     public const string StateOk = "ok";
+    // ★ APPLICABILITY MARKER (not a health verdict): a dimension that CANNOT fire for this monitor's kind. A
+    // spurious-red / flake-budget "ok" for an http/dns/ssl check is a LIE — those kinds capture NO trace_signals,
+    // so their transients can only ever classify `indeterminate`, monitor_side is unreachable, and the dimension
+    // is structurally dead. "not-applicable" is the API refusing to guess, not a green light. The API owns this
+    // rule (it knows the kind); the dashboard must render it distinctly, never as a calm "ok".
+    public const string StateNotApplicable = "not-applicable";
+
+    // Kinds that DON'T capture trace_signals → spurious-red / flake-budget cannot classify a monitor-side
+    // transient. Verified in prod: 0 of dns/http/ssl runs carry trace_signals. tcp/ping are network probes,
+    // same story. Only browser/multistep (the trace-capturing kinds) can produce a monitor-side red — an
+    // UNKNOWN/new kind defaults to APPLICABLE (show the real state) so we never silently mute a live signal.
+    private static readonly HashSet<string> NonTraceSignalKinds =
+        new(StringComparer.OrdinalIgnoreCase) { "http", "dns", "ssl", "tcp", "ping" };
+
+    /// <summary>Whether a trace-signal-derived dimension (spurious-red, the flake budget) CAN fire for this
+    /// kind. False for http/dns/ssl/tcp/ping (no trace_signals ⇒ monitor_side unreachable ⇒ structurally dead).</summary>
+    public static bool TraceSignalDimensionsApply(string? kind) => !NonTraceSignalKinds.Contains(kind ?? "");
 
     // ★ B3-3 flake-budget states — DELIBERATELY DISTINCT idiom from a service outage: "degraded as a MONITOR"
     // (my monitor is unreliable) vs "the SERVICE is down". Different problems, different owners.
@@ -155,7 +172,12 @@ public static class TrustReportProjection
         Flap: new TrustDimensionDto(FlapState(r)),
         Retry: new TrustDimensionDto(RetryState(r)),
         MonitorNoise: new TrustDimensionDto(MonitorNoiseState(r)),
-        SpuriousRed: new TrustDimensionDto(SpuriousRedState(r)));
+        // ★ spurious-red is trace_signals-derived → NOT-APPLICABLE for kinds that carry none (http/dns/ssl/tcp/
+        // ping): reporting "ok" there is a lie (the dimension is structurally dead, not clean). DeriveChip is
+        // UNCHANGED — it consumes the raw SpuriousRedState (which is "ok" for those kinds since monitor_side is
+        // 0), so a clean http check is still proven-live; only the SURFACED dimension marker changes.
+        SpuriousRed: new TrustDimensionDto(
+            TraceSignalDimensionsApply(r.Kind) ? SpuriousRedState(r) : StateNotApplicable));
 
     /// <summary>★★ THE MONITOR TRUST BUDGET STATE. "degraded-as-a-monitor" when the monitor has spent MORE than
     /// its budget on MONITOR-SIDE transients — i.e. <c>FlakeConsumed</c> (monitor-side ONLY, from flake_status'
@@ -199,7 +221,10 @@ public static class TrustReportProjection
         Remaining: r.FlakeRemaining,
         RemainingPct: r.FlakeRemainingPct,
         BurnRate: r.FlakeBurnRate,
-        State: FlakeBudgetState(r),
+        // ★ A budget that CANNOT be consumed is not a healthy budget. For kinds with no trace_signals the
+        // consumed can only ever be 0 (monitor_side unreachable), so a "0% consumed → ok" reads as a perfect
+        // score for a meter that will never move. Mark it not-applicable instead of vacuously-green.
+        State: TraceSignalDimensionsApply(r.Kind) ? FlakeBudgetState(r) : StateNotApplicable,
         DirectedTask: FlakeDirectedTask(r));
 
     /// <summary>
