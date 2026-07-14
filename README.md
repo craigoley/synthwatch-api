@@ -211,5 +211,3 @@ GRANT INSERT, UPDATE, DELETE ON checks TO "synthwatch-api";
 After these steps the Function App can read all monitoring data (now and for future runner
 tables), execute the SLA function, and manage `checks` — with no secret of any kind and no write
 access beyond `checks`.
-
-<!-- claude-review end-to-end validation: trivial docs touch, safe to merge. -->
