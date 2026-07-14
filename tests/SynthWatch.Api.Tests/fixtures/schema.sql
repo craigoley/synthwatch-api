@@ -18,9 +18,11 @@
 -- Name: sla_availability(timestamp with time zone, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sla_availability(p_from timestamp with time zone, p_to timestamp with time zone) RETURNS TABLE(check_id bigint, check_name text, kind text, window_from timestamp with time zone, window_to timestamp with time zone, completed_runs bigint, up_runs bigint, down_runs bigint, availability_pct numeric)
-    LANGUAGE sql STABLE
-    AS $$
+CREATE OR REPLACE FUNCTION public.sla_availability(p_from timestamp with time zone, p_to timestamp with time zone)
+ RETURNS TABLE(check_id bigint, check_name text, kind text, window_from timestamp with time zone, window_to timestamp with time zone, completed_runs bigint, up_runs bigint, down_runs bigint, availability_pct numeric)
+ LANGUAGE sql
+ STABLE
+AS $function$
     SELECT
         c.id   AS check_id,
         c.name AS check_name,
@@ -36,16 +38,13 @@ CREATE FUNCTION public.sla_availability(p_from timestamp with time zone, p_to ti
             4
         ) AS availability_pct
     FROM checks c
-    LEFT JOIN runs r
+    -- ★ countable_run (0081): status / superseded / confirmation / sandbox are now filtered by the view
+    -- (was an inline `LEFT JOIN runs r … AND NOT r.sandbox AND r.superseded_by_run_id IS NULL`, which
+    -- missed confirmation runs → a confirmed outage double-counted). One canonical predicate now.
+    LEFT JOIN countable_run r
            ON r.check_id   = c.id
           AND r.started_at >= p_from
           AND r.started_at <  p_to
-          -- SANDBOX EXCLUSION (0070): a paused monitor's on-demand validation persists a runs row but
-          -- skipped evaluate() — not a scheduled health signal, so it must never move availability. In the
-          -- JOIN (not a WHERE) so a check whose only window runs are sandbox keeps its LEFT-JOIN null-run row.
-          AND NOT r.sandbox
-          -- SUPERSEDED-TRANSIENT EXCLUSION (0077): a failed run whose confirmation PASSED was transient.
-          AND r.superseded_by_run_id IS NULL
     -- MAINTENANCE-WINDOW EXCLUSION (additive anti-join, mirrors 0004): drop runs
     -- that fall inside an active window for this check (check_id = c.id) OR a
     -- fleet-wide window (check_id IS NULL). Uncovered runs keep mw.id NULL and
@@ -56,7 +55,7 @@ CREATE FUNCTION public.sla_availability(p_from timestamp with time zone, p_to ti
           AND r.started_at <  mw.ends_at
     WHERE mw.id IS NULL
     GROUP BY c.id, c.name, c.kind
-$$;
+$function$;
 
 
 
@@ -353,6 +352,16 @@ CREATE TABLE public.runs (
     CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text, 'error'::text, 'infra_error'::text, 'running'::text]))),
     CONSTRAINT runs_transient_class_check CHECK (((transient_class IS NULL) OR (transient_class = ANY (ARRAY['monitor-side'::text, 'service-side'::text, 'indeterminate'::text]))))
 );
+
+
+--
+-- Name: countable_run; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.countable_run AS
+ SELECT *
+   FROM runs
+  WHERE ((status <> ALL (ARRAY['running'::text, 'infra_error'::text])) AND (superseded_by_run_id IS NULL) AND (NOT ((confirmation_of_run_id IS NOT NULL) AND (status = ANY (ARRAY['fail'::text, 'error'::text])))) AND (NOT sandbox));
 
 
 --
@@ -656,20 +665,19 @@ AS $function$
             count(*) FILTER (WHERE r.status IN ('pass', 'warn', 'fail', 'error')) AS total_runs,
             count(*) FILTER (WHERE r.status IN ('fail', 'error'))                 AS down_runs
         FROM checks c
-        LEFT JOIN runs r
+        -- ★ countable_run (0081): also excludes confirmation runs AND sandbox runs — BOTH were missing
+        -- here (only superseded was excluded), so a confirmed outage double-counted its burn and a paused
+        -- monitor's sandbox run consumed the error budget. slo_status drives paging, so this was the worst.
+        LEFT JOIN countable_run r
                ON r.check_id   = c.id
               AND r.started_at >= p_from
               AND r.started_at <  p_to
-              -- SUPERSEDED-TRANSIENT EXCLUSION (0077): a confirmed-transient failure must not burn the budget.
-              AND r.superseded_by_run_id IS NULL
-        -- Maintenance-window anti-join (mirrors sla_availability): drop runs inside
-        -- an active window for this check OR a fleet-wide window.
         LEFT JOIN maintenance_windows mw
                ON (mw.check_id = c.id OR mw.check_id IS NULL)
               AND r.started_at >= mw.starts_at
               AND r.started_at <  mw.ends_at
         WHERE c.id = p_check_id
-          AND c.slo_target IS NOT NULL   -- opt-in: no target => no rows
+          AND c.slo_target IS NOT NULL
           AND mw.id IS NULL
         GROUP BY c.id, c.slo_target
     )
@@ -690,8 +698,7 @@ AS $function$
              THEN round((down_runs::numeric / total_runs) / (1::numeric - slo_target::numeric), 4)
              ELSE 0 END                                                AS burn_rate
     FROM agg
-$function$
-;
+$function$;
 
 -- flake_status(check_id, from, to) (0080) — the MONITOR trust budget (mirrors the runner migration). consumed =
 -- MONITOR-SIDE transients ONLY (service_side + indeterminate surfaced, never consumed); N = scheduled runs
@@ -718,7 +725,7 @@ AS $function$
                 WHERE r.superseded_by_run_id IS NOT NULL AND r.transient_class = 'indeterminate'
                   AND r.confirmation_of_run_id IS NULL AND NOT r.sandbox) AS indeterminate
         FROM checks c
-        LEFT JOIN runs r
+        LEFT JOIN countable_run r
                ON r.check_id   = c.id
               AND r.started_at >= p_from
               AND r.started_at <  p_to
