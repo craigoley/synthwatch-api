@@ -810,7 +810,8 @@ AS $function$
                coalesce(rs.run_count_prior, 0)       AS run_count_prior
           FROM checks c
           LEFT JOIN run_stats rs ON rs.check_id = c.id
-         WHERE c.enabled
+         -- ★ 0086: exclude archived checks from the fleet cost projection (matches #254 at the source).
+         WHERE c.enabled AND c.archived_at IS NULL
     ),
     scored AS (
         SELECT b.*,
