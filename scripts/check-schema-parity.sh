@@ -161,10 +161,11 @@ check_runner_column_parity() { # <migDb> <fixDb>
   # fixture is a curated subset of what the API reads). Without this, every runner-internal column on a shared
   # table false-fails a column-scoped gate. A NEW shared-table object stays strict (red) until it is either
   # patched into the fixture or explicitly added here — so the exemption list is auditable, never silent.
-  #   checks.retries (+ its CHECK)  — fast-retry config the runner owns; API never reads it.
   #   checks.baseline_screenshot_url, checks.last_burn_notified_at, incidents.rca_notified_at — runner-internal
   #   visual-baseline / notification bookkeeping columns the API never maps.
-  local allow="checks/retries checks/checks_retries_check checks/baseline_screenshot_url checks/last_burn_notified_at incidents/rca_notified_at"
+  #   (checks.retries + its CHECK were removed here when the runner dropped the dead fast-retry column in 0084 —
+  #    the runner no longer defines them, so the allow entries filtered nothing and would rot silently.)
+  local allow="checks/baseline_screenshot_url checks/last_burn_notified_at incidents/rca_notified_at"
   missing="$(diff_missing_in_fixture "$WORK/mig.txt" "$WORK/fix.txt" | while IFS='|' read -r kind obj rest; do
     grep -qx "$obj" <<< "$fixobjs" || continue           # object (table/fn) the API doesn't read at all → skip
     # ↑ here-string, not `echo "$fixobjs" | grep -qx`: grep -q closes the pipe on match; under pipefail a large
