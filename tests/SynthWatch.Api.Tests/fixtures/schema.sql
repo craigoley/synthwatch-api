@@ -778,10 +778,11 @@ AS $function$
 $function$
 ;
 
--- cost_projection(rate) (0069, +run-count columns 0078) — the shared cost model /reports/cost calls (mirrors
--- the runner migration). The rate is now a DERIVED $/active-second (two ACA meters × the live allocation).
+-- cost_projection(rate) (0069, +run-count columns 0078, +compute-share 0089) — the shared cost model
+-- /reports/cost calls (mirrors the runner migration). active_seconds_7d + compute_share_pct are the honest
+-- per-monitor metric (share of fleet measured active-seconds); projected/measured are DEMOTED from-zero $.
 CREATE OR REPLACE FUNCTION public.cost_projection(p_rate numeric)
- RETURNS TABLE(check_id bigint, source_key text, check_name text, kind text, interval_seconds integer, region_count integer, avg_duration_s double precision, projected numeric, measured numeric, divergence numeric, divergence_flag boolean, projected_raw numeric, measured_raw numeric, run_count_7d integer, confirmation_count_7d integer, sandbox_count_7d integer, run_count_recent integer, run_count_prior integer)
+ RETURNS TABLE(check_id bigint, source_key text, check_name text, kind text, interval_seconds integer, region_count integer, avg_duration_s double precision, active_seconds_7d numeric, compute_share_pct numeric, projected numeric, measured numeric, divergence numeric, divergence_flag boolean, projected_raw numeric, measured_raw numeric, run_count_7d integer, confirmation_count_7d integer, sandbox_count_7d integer, run_count_recent integer, run_count_prior integer)
  LANGUAGE sql
  STABLE
 AS $function$
@@ -815,6 +816,8 @@ AS $function$
     ),
     scored AS (
         SELECT b.*,
+               coalesce(b.sum_duration_s_7d, 0)::numeric                          AS active_seconds_7d,
+               sum(coalesce(b.sum_duration_s_7d, 0)::numeric) OVER ()             AS fleet_active_seconds_7d,
                CASE WHEN b.avg_duration_s IS NOT NULL AND b.interval_seconds > 0
                     THEN b.avg_duration_s::numeric * (2592000::numeric / b.interval_seconds) * b.region_count * p_rate
                     ELSE 0 END AS p_raw,
@@ -824,6 +827,10 @@ AS $function$
           FROM base b
     )
     SELECT s.check_id, s.source_key, s.check_name, s.kind, s.interval_seconds, s.region_count, s.avg_duration_s,
+           round(s.active_seconds_7d, 3) AS active_seconds_7d,
+           CASE WHEN s.fleet_active_seconds_7d > 0
+                THEN round(100 * s.active_seconds_7d / s.fleet_active_seconds_7d, 2)
+                ELSE NULL END AS compute_share_pct,
            round(s.p_raw, 2) AS projected,
            round(s.m_raw, 2) AS measured,
            CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) ELSE NULL END AS divergence,
@@ -1165,6 +1172,23 @@ CREATE TABLE public.report_narratives (
     fact_pack    jsonb NOT NULL,                          -- the cited-numbers fact pack
     CONSTRAINT report_narratives_scope_type_check CHECK (scope_type = ANY (ARRAY['fleet'::text, 'monitor'::text])),
     CONSTRAINT report_narratives_pkey PRIMARY KEY (scope_type, scope_key, "window")
+);
+
+
+-- azure_cost (runner migration 0090): single-row cache of the Azure Cost Management figures the runner PULLS
+-- (MTD actual + forecast + portal deep link). GET /reports/cost serves it VERBATIM as the dollar headline;
+-- read-only for the API (SELECT via ops default privilege). Singleton — id pinned to 1.
+CREATE TABLE public.azure_cost (
+    id             smallint PRIMARY KEY DEFAULT 1,
+    scope          text NOT NULL,
+    currency       text NOT NULL,
+    billing_month  date NOT NULL,
+    mtd_actual     numeric NOT NULL,
+    mtd_days       integer NOT NULL,
+    forecast_month numeric,
+    portal_url     text NOT NULL,
+    fetched_at     timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT azure_cost_singleton CHECK (id = 1)
 );
 
 
