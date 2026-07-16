@@ -304,19 +304,77 @@ public class IntegrationTests
             Assert.False(string.IsNullOrEmpty(dto.RateSource));
             Assert.True(dto.TotalProjectedMonthly >= c.ProjectedMonthly);
 
+            // ★ 0089 — the honest metric: activeSeconds = Σ 3×10s = 30s; activeSecondsPct present (a share of
+            // the fleet, so > 0). The shares over every monitor that ran sum to ~100 (matching PR1's Σ=100).
+            Assert.Equal(30m, c.ActiveSeconds);
+            Assert.NotNull(c.ActiveSecondsPct);
+            Assert.True(c.ActiveSecondsPct > 0);
+            var shareSum = dto.Checks.Where(x => x.ActiveSecondsPct != null).Sum(x => x.ActiveSecondsPct!.Value);
+            Assert.InRange(shareSum, 99.9m, 100.1m); // rounding band on 2dp per-check shares
+            // ★ No azure_cost row seeded here → the Azure headline is ABSENT (null), NOT a fabricated 0.
+            Assert.Null(dto.Azure);
+
             // ── ★ wire-shape pin (contract-first — the dashboard builds against this) ──
             var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
             var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(dto, web)).RootElement;
             Assert.Equal(
-                new[] { "checks", "generatedAt", "rateSetDate", "rateSource", "rateUsed", "topCostDrivers", "totalMeasuredMonthly", "totalProjectedMonthly" },
+                new[] { "azure", "checks", "generatedAt", "rateSetDate", "rateSource", "rateUsed", "topCostDrivers", "totalMeasuredMonthly", "totalProjectedMonthly" },
                 root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("azure").ValueKind); // absent → null, never 0
             Assert.Equal(
-                new[] { "avgDurationS", "checkId", "confirmationCount7d", "divergenceFlag", "divergenceRatio", "intervalSeconds", "kind", "measuredMonthly7d", "name", "projectedMonthly", "regionCount", "runCount7d", "runCountPrior", "runCountRecent", "sandboxCount7d", "sourceKey" },
+                new[] { "activeSeconds", "activeSecondsPct", "avgDurationS", "checkId", "confirmationCount7d", "divergenceFlag", "divergenceRatio", "intervalSeconds", "kind", "measuredMonthly7d", "name", "projectedMonthly", "regionCount", "runCount7d", "runCountPrior", "runCountRecent", "sandboxCount7d", "sourceKey" },
                 root.GetProperty("checks")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
         }
         finally
         {
             await db.Database.ExecuteSqlRawAsync("DELETE FROM checks WHERE name = 'cost-rep-http';"); // CASCADE clears runs/locations
+        }
+    }
+
+    // ★ The Azure headline must tell the TRUTH about absence: a real pull ⇒ served verbatim; no pull / a stale
+    // (past-month) row ⇒ NULL, never a fabricated 0 or a last-month figure presented as current. The dashboard's
+    // "see Azure Cost Management" fallback depends on this. Proven it can FAIL both ways: seed → appears; make it
+    // stale → absent; clear → absent.
+    [SkippableFact]
+    public async Task Azure_cost_headline_is_served_when_current_and_absent_when_missing_or_stale()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        try
+        {
+            // (a) a CURRENT-month pull → served verbatim (Azure's numbers, not modeled).
+            await db.Database.ExecuteSqlRawAsync("""
+                INSERT INTO azure_cost (id, scope, currency, billing_month, mtd_actual, mtd_days, forecast_month, portal_url, fetched_at)
+                VALUES (1, 'resourceGroups/synthwatch-rg', 'USD', date_trunc('month', now())::date, 47.17, 16, 76.30,
+                        'https://portal.azure.com/x', now())
+                ON CONFLICT (id) DO UPDATE SET billing_month = EXCLUDED.billing_month, mtd_actual = EXCLUDED.mtd_actual,
+                    mtd_days = EXCLUDED.mtd_days, forecast_month = EXCLUDED.forecast_month, fetched_at = EXCLUDED.fetched_at;
+                """);
+            var present = Assert.IsType<CostReportResponseDto>(
+                Assert.IsType<OkObjectResult>(await new ReportsFunctions(db).GetCostReport(Request(), default)).Value!);
+            Assert.NotNull(present.Azure);
+            Assert.Equal(47.17m, present.Azure!.MtdActual);
+            Assert.Equal(16, present.Azure.MtdDays);
+            Assert.Equal(76.30m, present.Azure.ForecastMonth);
+            Assert.Equal("USD", present.Azure.Currency);
+            Assert.False(string.IsNullOrEmpty(present.Azure.PortalUrl));
+
+            // (b) STALE — a PAST-month row must read as absent (never last month's MTD as "this month").
+            await db.Database.ExecuteSqlRawAsync(
+                "UPDATE azure_cost SET billing_month = (date_trunc('month', now()) - interval '1 month')::date WHERE id = 1;");
+            var stale = Assert.IsType<CostReportResponseDto>(
+                Assert.IsType<OkObjectResult>(await new ReportsFunctions(db).GetCostReport(Request(), default)).Value!);
+            Assert.Null(stale.Azure); // ★ absent, NOT the stale $47
+
+            // (c) ABSENT — no row at all → null (the deep-link fallback path).
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM azure_cost;");
+            var absent = Assert.IsType<CostReportResponseDto>(
+                Assert.IsType<OkObjectResult>(await new ReportsFunctions(db).GetCostReport(Request(), default)).Value!);
+            Assert.Null(absent.Azure); // ★ absent, NOT 0
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM azure_cost;");
         }
     }
 

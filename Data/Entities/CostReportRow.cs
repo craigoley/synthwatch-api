@@ -15,6 +15,14 @@ public class CostReportRow
     public int IntervalSeconds { get; set; }
     public int RegionCount { get; set; }           // count of assigned check_locations
     public double? AvgDurationS { get; set; }       // avg(duration_ms)/1000 over last 7d; null = no runs in window
+    // ★ 0089 — the HONEST per-monitor metric. ActiveSeconds = Σ measured active-seconds over 7d (the
+    // attributable compute); ActiveSecondsPct = this check's share of FLEET active-seconds (null when no
+    // monitor ran → never a fake 0%). A share cancels the systematic error the from-zero $ carried (the
+    // per-subscription free grant + non-ACA line items), so it is the ranking signal Projected/Measured were
+    // pretending to be. ★ SOURCE CAVEAT: active-seconds is the check's own duration_ms (runFinalize.ts), NOT
+    // the job-execution billed wall-clock — so the share slightly under-weights heavy-cold-start monitors.
+    public decimal ActiveSeconds { get; set; }      // 0089: active_seconds_7d — Σ duration_ms/1000 over 7d
+    public decimal? ActiveSecondsPct { get; set; }  // 0089: compute_share_pct — % of fleet; null when fleet total is 0
     public decimal Projected { get; set; }          // rounded 2dp (display)
     public decimal Measured { get; set; }           // rounded 2dp (display)
     public decimal? Divergence { get; set; }        // rounded 3dp; null when projected = 0

@@ -14,12 +14,16 @@ public static class CostReportProjection
 
     public static CostReportResponseDto Build(
         IReadOnlyList<CostReportRow> rows, decimal rate, string rateSource, string rateSetDate,
-        DateTimeOffset now, int topN = 10)
+        DateTimeOffset now, int topN = 10, AzureCostDto? azure = null)
     {
+        // ★ Rank by ProjectedRaw for continuity of the existing "top drivers" ordering (the dashboard PR moves
+        // the RANK to ActiveSecondsPct — a proportional metric — but that's a display change; the row set here
+        // is order-stable regardless, and ActiveSecondsPct is carried on every row for the new ranking).
         var checks = rows
             .OrderByDescending(r => r.ProjectedRaw).ThenBy(r => r.CheckId)
             .Select(r => new CostCheckDto(
                 r.CheckId, r.SourceKey, r.CheckName, r.Kind, r.IntervalSeconds, r.RegionCount, r.AvgDurationS,
+                r.ActiveSeconds, r.ActiveSecondsPct,
                 r.Projected, r.Measured, r.Divergence, r.DivergenceFlag,
                 r.RunCount7d, r.ConfirmationCount7d, r.SandboxCount7d, r.RunCountRecent, r.RunCountPrior))
             .ToList();
@@ -29,7 +33,7 @@ public static class CostReportProjection
         return new CostReportResponseDto(
             now, rate, rateSource, rateSetDate,
             totalProjected, totalMeasured,
-            checks.Take(topN).ToList(), checks);
+            checks.Take(topN).ToList(), checks, azure);
     }
 
     private static decimal Round(decimal v, int dp = 2) => Math.Round(v, dp, MidpointRounding.AwayFromZero);

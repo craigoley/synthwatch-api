@@ -12,7 +12,29 @@ public record CostReportResponseDto(
     decimal TotalProjectedMonthly,
     decimal TotalMeasuredMonthly,
     IReadOnlyList<CostCheckDto> TopCostDrivers,
-    IReadOnlyList<CostCheckDto> Checks);
+    IReadOnlyList<CostCheckDto> Checks,
+    // ★ The HONEST dollar headline: Azure's OWN number, PULLED (runner azureCost.ts → azure_cost, 0090), not
+    // modeled. NULL when we couldn't reach Cost Management (no pull yet / role not propagated / API error) OR
+    // the cached figure is for a past billing month (stale-as-current guard). ★ null ≠ 0: the dashboard reads
+    // absence as "see Azure Cost Management" (deep link), NEVER as "$0 spent". A modeled fleet $ is NOT served
+    // here — the tool DISPLAYS Azure's total, it does not COMPETE with it. See the demoted per-check $ columns.
+    AzureCostDto? Azure);
+
+/// <summary>Azure Cost Management figures for the RG scope, cached by the runner (azure_cost, 0090) and served
+/// VERBATIM — Azure's numbers, not modeled. MtdActual = month-to-date actual (all meters in scope); MtdDays =
+/// days elapsed (the ramp denominator, so the dashboard can show "$47 over 16d"); ForecastMonth = Azure's OWN
+/// end-of-month forecast (null when the forecast API returned none); PortalUrl = deep link to Cost Management;
+/// FetchedAt = when the runner pulled it, so the dashboard shows "as of &lt;time&gt;" and judges staleness
+/// itself. The whole object is null when absent/stale — the truth-about-absence the fallback depends on.</summary>
+public record AzureCostDto(
+    string Scope,
+    string Currency,
+    DateOnly BillingMonth,
+    decimal MtdActual,
+    int MtdDays,
+    decimal? ForecastMonth,
+    string PortalUrl,
+    DateTimeOffset FetchedAt);
 
 /// <summary>One monitor's estimated monthly cost. projectedMonthly = avgDurationS × (2,592,000/interval) ×
 /// regionCount × rate. measuredMonthly7d = (7d Σduration) × rate × 30/7 (the runs sum already spans all
@@ -28,8 +50,12 @@ public record CostCheckDto(
     int IntervalSeconds,
     int RegionCount,
     double? AvgDurationS,
-    decimal ProjectedMonthly,
-    decimal MeasuredMonthly7d,
+    // ★ 0089 — the attributable per-monitor metric: activeSeconds (Σ measured active-seconds over 7d) +
+    // activeSecondsPct (share of FLEET compute; null when no monitor ran). Rank by this, not by the demoted $.
+    decimal ActiveSeconds,
+    decimal? ActiveSecondsPct,
+    decimal ProjectedMonthly,   // DEMOTED from-zero $ (kept for the staged runner→api→dashboard migration)
+    decimal MeasuredMonthly7d,  // DEMOTED ×30/7 annualizer
     decimal? DivergenceRatio,
     bool DivergenceFlag,
     int RunCount7d,

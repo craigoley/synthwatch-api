@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using SynthWatch.Api.Data.Entities;
+using SynthWatch.Api.Dtos;
 using SynthWatch.Api.Infrastructure;
 using Xunit;
 
@@ -80,6 +81,34 @@ public class CostReportTests
         Assert.Equal(5, c.SandboxCount7d);
         Assert.Equal(100, c.RunCountRecent);
         Assert.Equal(100, c.RunCountPrior);
+    }
+
+    [Fact]
+    public void Azure_headline_passes_through_null_when_absent_and_verbatim_when_present()
+    {
+        var rows = new List<CostReportRow> { Scored(1, "a", 1m) };
+        // Absent (the deploy-safe / no-pull default) → Azure is NULL, never a fabricated 0.
+        Assert.Null(CostReportProjection.Build(rows, Rate, "s", "d", DateTimeOffset.UnixEpoch).Azure);
+        // Present → served verbatim (Azure's numbers, not modeled).
+        var az = new AzureCostDto("resourceGroups/synthwatch-rg", "USD", new DateOnly(2026, 7, 1), 47.17m, 16, 76.30m, "https://portal/x", DateTimeOffset.UnixEpoch);
+        var r = CostReportProjection.Build(rows, Rate, "s", "d", DateTimeOffset.UnixEpoch, azure: az);
+        Assert.Same(az, r.Azure);
+        Assert.Equal(47.17m, r.Azure!.MtdActual);
+        Assert.Equal(76.30m, r.Azure.ForecastMonth);
+    }
+
+    [Fact]
+    public void ActiveSeconds_and_share_round_trip_from_the_function_row()
+    {
+        var row = new CostReportRow
+        {
+            CheckId = 1, CheckName = "shop", Kind = "browser", IntervalSeconds = 300, RegionCount = 1, AvgDurationS = 20.0,
+            ActiveSeconds = 60.000m, ActiveSecondsPct = 85.11m,  // 0089 — the attributable metric
+            Projected = 5m, Measured = 9m, ProjectedRaw = 5m, MeasuredRaw = 9m,
+        };
+        var c = Assert.Single(CostReportProjection.Build(new List<CostReportRow> { row }, Rate, "s", "d", DateTimeOffset.UnixEpoch).Checks);
+        Assert.Equal(60.000m, c.ActiveSeconds);
+        Assert.Equal(85.11m, c.ActiveSecondsPct);
     }
 
     [Fact]

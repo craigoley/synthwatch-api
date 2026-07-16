@@ -254,17 +254,55 @@ public class ReportsFunctions
         // then rounds to 2dp, so this is drift-free for every displayed figure while giving ~$8e22 of headroom.
         var rows = await _db.CostReport
             .FromSql($@"SELECT check_id, source_key, check_name, kind, interval_seconds, region_count,
-                               avg_duration_s, projected, measured, divergence, divergence_flag,
+                               avg_duration_s, active_seconds_7d, compute_share_pct,
+                               projected, measured, divergence, divergence_flag,
                                round(projected_raw, 6) AS projected_raw, round(measured_raw, 6) AS measured_raw,
                                run_count_7d, confirmation_count_7d, sandbox_count_7d, run_count_recent, run_count_prior
                         FROM cost_projection({CostRate.PerActiveSecond})")
             .AsNoTracking().ToListAsync(ct);
 
+        // ★ The HONEST dollar headline: Azure's OWN number, pulled by the runner into azure_cost (0090). Served
+        // VERBATIM when present + current-month; NULL when absent/unpulled or stale (past billing month) so the
+        // dashboard shows a deep-link fallback instead of a fabricated 0. Never fails the report.
+        var azure = await TryGetAzureCostAsync(DateTimeOffset.UtcNow, ct);
+
         var dto = CostReportProjection.Build(
-            rows, CostRate.PerActiveSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50);
+            rows, CostRate.PerActiveSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50, azure);
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=60";
         req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(dto);
+    }
+
+    /// <summary>Read the runner-owned azure_cost singleton (0090) and map it to the DTO — or NULL when it must
+    /// read as ABSENT, never a fabricated figure: (a) the table/row doesn't exist yet (migration not applied /
+    /// no pull) — caught, not thrown, so this stays deploy-safe under "merged ≠ migrated"; (b) the cached row
+    /// is for a PAST billing month — serving last month's MTD as "this month" is the stale-as-current bug the
+    /// headline must not commit. Within the current month the row is served with FetchedAt so the dashboard
+    /// judges freshness itself ("as of &lt;time&gt;").</summary>
+    private async Task<AzureCostDto?> TryGetAzureCostAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        AzureCostRow? row;
+        try
+        {
+            row = await _db.AzureCost
+                .FromSql($@"SELECT scope, currency, billing_month, mtd_actual, mtd_days, forecast_month, portal_url, fetched_at
+                            FROM azure_cost WHERE id = 1")
+                .AsNoTracking().FirstOrDefaultAsync(ct);
+        }
+        catch (Npgsql.PostgresException ex) when (ex.SqlState == "42P01") // undefined_table — 0090 not applied yet
+        {
+            return null; // deploy-safe under "merged ≠ migrated": absent, never a thrown 500
+        }
+        if (row is null) return null; // no pull cached yet → absent (dashboard deep-links to the portal)
+
+        // Stale-as-current guard: a cached figure from a PAST billing month is NOT this month's spend — serving
+        // it as current would be the fake-quiet class (absence reading as a real number). Treat as absent.
+        var currentMonth = new DateOnly(now.UtcDateTime.Year, now.UtcDateTime.Month, 1);
+        if (row.BillingMonth != currentMonth) return null;
+
+        return new AzureCostDto(
+            row.Scope, row.Currency, row.BillingMonth, row.MtdActual, row.MtdDays,
+            row.ForecastMonth, row.PortalUrl, row.FetchedAt);
     }
 
     /// <summary>

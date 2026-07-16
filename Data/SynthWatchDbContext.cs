@@ -27,6 +27,9 @@ public class SynthWatchDbContext : DbContext
     public DbSet<SloStatusRow> SloStatus => Set<SloStatusRow>();
     public DbSet<SloReportRow> SloReport => Set<SloReportRow>();
     public DbSet<CostReportRow> CostReport => Set<CostReportRow>();
+    // READ-ONLY: the runner-owned azure_cost singleton (0090) — the pulled Azure Cost Management figures the
+    // cost headline DISPLAYS. SELECT only (ops-level default privilege; no `writes` grant).
+    public DbSet<AzureCostRow> AzureCost => Set<AzureCostRow>();
     public DbSet<MttrIncidentRow> MttrIncidents => Set<MttrIncidentRow>();
     public DbSet<AvailabilitySeriesPointRow> AvailabilitySeries => Set<AvailabilitySeriesPointRow>();
     public DbSet<CheckMetricsRow> CheckMetrics => Set<CheckMetricsRow>();
@@ -473,6 +476,8 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.IntervalSeconds).HasColumnName("interval_seconds");
             e.Property(x => x.RegionCount).HasColumnName("region_count");
             e.Property(x => x.AvgDurationS).HasColumnName("avg_duration_s");
+            e.Property(x => x.ActiveSeconds).HasColumnName("active_seconds_7d");       // 0089 — attributable compute
+            e.Property(x => x.ActiveSecondsPct).HasColumnName("compute_share_pct");     // 0089 — % of fleet (null if fleet 0)
             e.Property(x => x.Projected).HasColumnName("projected");
             e.Property(x => x.Measured).HasColumnName("measured");
             e.Property(x => x.Divergence).HasColumnName("divergence");
@@ -484,6 +489,22 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.SandboxCount7d).HasColumnName("sandbox_count_7d");
             e.Property(x => x.RunCountRecent).HasColumnName("run_count_recent");
             e.Property(x => x.RunCountPrior).HasColumnName("run_count_prior");
+        });
+
+        // Keyless: GET /reports/cost augmentation — the runner-owned azure_cost singleton (0090), queried as a
+        // single row (WHERE id = 1) via raw SQL. Read-only; a missing table/row is handled in the handler.
+        modelBuilder.Entity<AzureCostRow>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            e.Property(x => x.Scope).HasColumnName("scope");
+            e.Property(x => x.Currency).HasColumnName("currency");
+            e.Property(x => x.BillingMonth).HasColumnName("billing_month");
+            e.Property(x => x.MtdActual).HasColumnName("mtd_actual");
+            e.Property(x => x.MtdDays).HasColumnName("mtd_days");
+            e.Property(x => x.ForecastMonth).HasColumnName("forecast_month");
+            e.Property(x => x.PortalUrl).HasColumnName("portal_url");
+            e.Property(x => x.FetchedAt).HasColumnName("fetched_at");
         });
 
         modelBuilder.Entity<SloReportRow>(e =>
