@@ -272,7 +272,8 @@ public class ReportsFunctions
         var azure = await TryGetAzureCostAsync(DateTimeOffset.UtcNow, ct);
 
         var dto = CostReportProjection.Build(
-            rows, CostRate.PerActiveSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50, azure);
+            rows, CostRate.PerActiveSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50, azure,
+            CostRate.ReconcileTargetMonthly);
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=60";
         req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(dto);

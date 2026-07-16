@@ -14,7 +14,7 @@ public static class CostReportProjection
 
     public static CostReportResponseDto Build(
         IReadOnlyList<CostReportRow> rows, decimal rate, string rateSource, string rateSetDate,
-        DateTimeOffset now, int topN = 10, AzureCostDto? azure = null)
+        DateTimeOffset now, int topN = 10, AzureCostDto? azure = null, decimal? reconcileTarget = null)
     {
         // ★ Rank by ProjectedRaw for continuity of the existing "top drivers" ordering (the dashboard PR moves
         // the RANK to ActiveSecondsPct — a proportional metric — but that's a display change; the row set here
@@ -30,10 +30,10 @@ public static class CostReportProjection
 
         var totalProjected = Round(rows.Sum(r => r.ProjectedRaw)); // sum RAW, then round (no per-check drift)
         var totalMeasured = Round(rows.Sum(r => r.MeasuredRaw));
-        // ★ 0091: the fleet ESTIMATE = the reconcile anchor. fleet_billable_monthly is CONSTANT per row (the
-        // grant-corrected fleet), so read it off any row; equals Σ estimated_monthly by construction. 0 for an
-        // empty fleet. When a reconcile target is pinned, Σ estimated pins to it — sum the per-check values.
-        var estimatedTotal = Round(rows.Sum(r => r.EstimatedMonthly ?? 0m));
+        // ★ 0091: the fleet ESTIMATE = the reconcile anchor, taken EXACTLY (not Σ of the rounded per-check
+        // estimates — that drifts a cent). anchor = coalesce(reconcileTarget, grant-corrected fleet =
+        // fleet_billable_monthly, CONSTANT per row). 0 for an empty fleet.
+        var estimatedTotal = Round(reconcileTarget ?? (rows.Count > 0 ? rows[0].FleetBillableMonthly : 0m));
         return new CostReportResponseDto(
             now, rate, rateSource, rateSetDate,
             totalProjected, totalMeasured,

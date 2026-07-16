@@ -311,13 +311,14 @@ public class IntegrationTests
             Assert.True(c.ActiveSecondsPct > 0);
             var shareSum = dto.Checks.Where(x => x.ActiveSecondsPct != null).Sum(x => x.ActiveSecondsPct!.Value);
             Assert.InRange(shareSum, 99.9m, 100.1m); // rounding band on 2dp per-check shares
-            // ★ 0091 — the PRIMARY per-monitor $ is present and > 0 (this check ran). The FLEET estimate =
-            // Σ estimated = the grant-corrected total (default target NULL): totalProjected − free grant $.
+            // ★ 0091 — the PRIMARY per-monitor $ is present and > 0 (this check ran). The FLEET estimate is the
+            // grant-corrected anchor (default target NULL): ≈ totalProjected − free grant $ (rounding aside).
             Assert.NotNull(c.EstimatedMonthly);
             Assert.True(c.EstimatedMonthly > 0);
-            Assert.Equal(dto.TotalProjectedMonthly - CostRate.FreeGrantDollars, dto.EstimatedMonthlyTotal, 2);
+            Assert.InRange(dto.EstimatedMonthlyTotal, dto.TotalProjectedMonthly - CostRate.FreeGrantDollars - 0.02m,
+                dto.TotalProjectedMonthly - CostRate.FreeGrantDollars + 0.02m);
             var estSum = dto.Checks.Where(x => x.EstimatedMonthly != null).Sum(x => x.EstimatedMonthly!.Value);
-            Assert.InRange(estSum, dto.EstimatedMonthlyTotal - 0.05m, dto.EstimatedMonthlyTotal + 0.05m); // Σ per-monitor = the anchor
+            Assert.InRange(estSum, dto.EstimatedMonthlyTotal - 0.05m, dto.EstimatedMonthlyTotal + 0.05m); // Σ per-monitor ≈ the anchor
             // ★ No azure_cost row seeded here → the Azure headline is ABSENT (null), NOT a fabricated 0.
             Assert.Null(dto.Azure);
 
