@@ -20,20 +20,24 @@ public static class CostReportProjection
         // the RANK to ActiveSecondsPct — a proportional metric — but that's a display change; the row set here
         // is order-stable regardless, and ActiveSecondsPct is carried on every row for the new ranking).
         var checks = rows
-            .OrderByDescending(r => r.ProjectedRaw).ThenBy(r => r.CheckId)
+            .OrderByDescending(r => r.EstimatedMonthly ?? -1m).ThenByDescending(r => r.ProjectedRaw).ThenBy(r => r.CheckId)
             .Select(r => new CostCheckDto(
                 r.CheckId, r.SourceKey, r.CheckName, r.Kind, r.IntervalSeconds, r.RegionCount, r.AvgDurationS,
-                r.ActiveSeconds, r.ActiveSecondsPct,
+                r.EstimatedMonthly, r.ActiveSeconds, r.ActiveSecondsPct,
                 r.Projected, r.Measured, r.Divergence, r.DivergenceFlag,
                 r.RunCount7d, r.ConfirmationCount7d, r.SandboxCount7d, r.RunCountRecent, r.RunCountPrior))
             .ToList();
 
         var totalProjected = Round(rows.Sum(r => r.ProjectedRaw)); // sum RAW, then round (no per-check drift)
         var totalMeasured = Round(rows.Sum(r => r.MeasuredRaw));
+        // ★ 0091: the fleet ESTIMATE = the reconcile anchor. fleet_billable_monthly is CONSTANT per row (the
+        // grant-corrected fleet), so read it off any row; equals Σ estimated_monthly by construction. 0 for an
+        // empty fleet. When a reconcile target is pinned, Σ estimated pins to it — sum the per-check values.
+        var estimatedTotal = Round(rows.Sum(r => r.EstimatedMonthly ?? 0m));
         return new CostReportResponseDto(
             now, rate, rateSource, rateSetDate,
             totalProjected, totalMeasured,
-            checks.Take(topN).ToList(), checks, azure);
+            checks.Take(topN).ToList(), checks, estimatedTotal, azure);
     }
 
     private static decimal Round(decimal v, int dp = 2) => Math.Round(v, dp, MidpointRounding.AwayFromZero);

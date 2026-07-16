@@ -50,4 +50,24 @@ public static class CostRate
         ?? $"ACA Consumption active meters: {RunnerCpu} vCPU × {VcpuSecondRate} + {RunnerMemoryGib} GiB × {GibSecondRate} " +
            $"= {PerActiveSecond} $/active-second (derived from the live allocation)";
     public static string SetDate => Environment.GetEnvironmentVariable("COST_RATE_SET_DATE") ?? DefaultSetDate;
+
+    // ★ 0091 — the per-SUBSCRIPTION monthly free grant (mirrors runner costModel.ts). 180,000 vCPU-s +
+    // 360,000 GiB-s, consumed by the WHOLE FLEET before billing — a FLEET discount, so its $ value subtracts
+    // from the from-zero fleet total, and that grant-corrected total is allocated across monitors by share.
+    public const decimal FreeGrantVcpuSeconds = 180_000m;
+    public const decimal FreeGrantGibSeconds = 360_000m;
+
+    /// <summary>The $ value of the per-subscription free grant at the two meters (~$5.40) — a flat monthly
+    /// discount to the FLEET total (valid because the fleet's monthly vCPU-s AND GiB-s both far exceed the
+    /// grant). Independent of the container shape. Passed to cost_projection's p_free_grant_dollars.</summary>
+    public static decimal FreeGrantDollars => FreeGrantVcpuSeconds * VcpuSecondRate + FreeGrantGibSeconds * GibSecondRate;
+
+    /// <summary>The fleet $ the per-monitor estimates reconcile to (Σ estimated ≈ this). null ⇒ the DERIVED
+    /// grant-corrected fleet total (from-zero Σ − free grant $), tracking the fleet with no magic number. Set
+    /// COST_RECONCILE_TARGET_MONTHLY to PIN Σ to Azure's forecast (~76) or MTD (~47) — one line, deploy-free.
+    /// Passed to cost_projection's p_reconcile_target (a null C# decimal? becomes SQL NULL).</summary>
+    public static decimal? ReconcileTargetMonthly =>
+        decimal.TryParse(Environment.GetEnvironmentVariable("COST_RECONCILE_TARGET_MONTHLY"),
+            NumberStyles.Any, CultureInfo.InvariantCulture, out var t) && t > 0m
+            ? t : (decimal?)null;
 }

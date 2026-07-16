@@ -489,6 +489,8 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.SandboxCount7d).HasColumnName("sandbox_count_7d");
             e.Property(x => x.RunCountRecent).HasColumnName("run_count_recent");
             e.Property(x => x.RunCountPrior).HasColumnName("run_count_prior");
+            e.Property(x => x.EstimatedMonthly).HasColumnName("estimated_monthly");         // 0091 — primary $
+            e.Property(x => x.FleetBillableMonthly).HasColumnName("fleet_billable_monthly"); // 0091 — anchor / drift
         });
 
         // Keyless: GET /reports/cost augmentation — the runner-owned azure_cost singleton (0090), queried as a
