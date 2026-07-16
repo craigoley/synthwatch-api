@@ -37,4 +37,10 @@ public class CostReportRow
     public int SandboxCount7d { get; set; }         // of those, sandbox / on-demand fires (0065)
     public int RunCountRecent { get; set; }         // runs in the recent half (last 3.5d)
     public int RunCountPrior { get; set; }          // runs in the prior half (3.5–7d ago)
+    // ★ 0091 — the PRIMARY per-monitor $, restored: free-grant-aware, Σ = the reconcile anchor. Allocates the
+    // grant-corrected fleet total by compute share (grant spread proportionally — a cheap check is non-zero,
+    // never $0). NULL when the monitor had no runs (never a fake $0). FleetBillableMonthly is the anchor when
+    // the reconcile target is unset (grant-corrected fleet), CONSTANT per row — for the drift check vs Azure.
+    public decimal? EstimatedMonthly { get; set; }       // 0091: estimated_monthly
+    public decimal FleetBillableMonthly { get; set; }    // 0091: fleet_billable_monthly (grant-corrected fleet total)
 }

@@ -14,26 +14,30 @@ public static class CostReportProjection
 
     public static CostReportResponseDto Build(
         IReadOnlyList<CostReportRow> rows, decimal rate, string rateSource, string rateSetDate,
-        DateTimeOffset now, int topN = 10, AzureCostDto? azure = null)
+        DateTimeOffset now, int topN = 10, AzureCostDto? azure = null, decimal? reconcileTarget = null)
     {
         // ★ Rank by ProjectedRaw for continuity of the existing "top drivers" ordering (the dashboard PR moves
         // the RANK to ActiveSecondsPct — a proportional metric — but that's a display change; the row set here
         // is order-stable regardless, and ActiveSecondsPct is carried on every row for the new ranking).
         var checks = rows
-            .OrderByDescending(r => r.ProjectedRaw).ThenBy(r => r.CheckId)
+            .OrderByDescending(r => r.EstimatedMonthly ?? -1m).ThenByDescending(r => r.ProjectedRaw).ThenBy(r => r.CheckId)
             .Select(r => new CostCheckDto(
                 r.CheckId, r.SourceKey, r.CheckName, r.Kind, r.IntervalSeconds, r.RegionCount, r.AvgDurationS,
-                r.ActiveSeconds, r.ActiveSecondsPct,
+                r.EstimatedMonthly, r.ActiveSeconds, r.ActiveSecondsPct,
                 r.Projected, r.Measured, r.Divergence, r.DivergenceFlag,
                 r.RunCount7d, r.ConfirmationCount7d, r.SandboxCount7d, r.RunCountRecent, r.RunCountPrior))
             .ToList();
 
         var totalProjected = Round(rows.Sum(r => r.ProjectedRaw)); // sum RAW, then round (no per-check drift)
         var totalMeasured = Round(rows.Sum(r => r.MeasuredRaw));
+        // ★ 0091: the fleet ESTIMATE = the reconcile anchor, taken EXACTLY (not Σ of the rounded per-check
+        // estimates — that drifts a cent). anchor = coalesce(reconcileTarget, grant-corrected fleet =
+        // fleet_billable_monthly, CONSTANT per row). 0 for an empty fleet.
+        var estimatedTotal = Round(reconcileTarget ?? (rows.Count > 0 ? rows[0].FleetBillableMonthly : 0m));
         return new CostReportResponseDto(
             now, rate, rateSource, rateSetDate,
             totalProjected, totalMeasured,
-            checks.Take(topN).ToList(), checks, azure);
+            checks.Take(topN).ToList(), checks, estimatedTotal, azure);
     }
 
     private static decimal Round(decimal v, int dp = 2) => Math.Round(v, dp, MidpointRounding.AwayFromZero);

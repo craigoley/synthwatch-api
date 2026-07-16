@@ -84,6 +84,31 @@ public class CostReportTests
     }
 
     [Fact]
+    public void Estimated_dollar_is_primary_null_safe_and_the_fleet_total_sums_the_per_monitor_estimates()
+    {
+        // Consistent synthetic anchor: fleet_billable = 7.51 = Σ estimated (7.33 + 0.18).
+        var rows = new List<CostReportRow>
+        {
+            new() { CheckId = 1, CheckName = "shop", Kind = "browser", IntervalSeconds = 300, RegionCount = 1, AvgDurationS = 20.0,
+                    EstimatedMonthly = 7.33m, FleetBillableMonthly = 7.51m, ActiveSecondsPct = 56m, ProjectedRaw = 10.37m },
+            new() { CheckId = 2, CheckName = "cheap", Kind = "dns", IntervalSeconds = 60, RegionCount = 1, AvgDurationS = 0.1,
+                    EstimatedMonthly = 0.18m, FleetBillableMonthly = 7.51m, ActiveSecondsPct = 0.3m, ProjectedRaw = 0.26m },
+            new() { CheckId = 3, CheckName = "norun", Kind = "http", IntervalSeconds = 300, RegionCount = 1, AvgDurationS = null,
+                    EstimatedMonthly = null, FleetBillableMonthly = 7.51m, ActiveSecondsPct = null, ProjectedRaw = 0m },
+        };
+        var r = CostReportProjection.Build(rows, Rate, "s", "d", DateTimeOffset.UnixEpoch);
+        // ranked by the DOLLAR (primary), null last
+        Assert.Equal(new[] { "shop", "cheap", "norun" }, r.Checks.Select(c => c.Name).ToArray());
+        Assert.Equal(7.33m, r.Checks[0].EstimatedMonthly);
+        Assert.Equal(0.18m, r.Checks[1].EstimatedMonthly);      // cheap monitor: NON-ZERO $ (grant spread, not zeroed)
+        Assert.Null(r.Checks[2].EstimatedMonthly);              // no-runs → null, never a fake $0
+        // ★ fleet estimate = the EXACT anchor (fleet_billable_monthly), not Σ of the rounded per-check values
+        Assert.Equal(7.51m, r.EstimatedMonthlyTotal);
+        // when a reconcile target is pinned, the fleet total is that target exactly
+        Assert.Equal(76.00m, CostReportProjection.Build(rows, Rate, "s", "d", DateTimeOffset.UnixEpoch, reconcileTarget: 76.00m).EstimatedMonthlyTotal);
+    }
+
+    [Fact]
     public void Azure_headline_passes_through_null_when_absent_and_verbatim_when_present()
     {
         var rows = new List<CostReportRow> { Scored(1, "a", 1m) };

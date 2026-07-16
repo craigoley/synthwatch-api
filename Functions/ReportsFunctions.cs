@@ -252,13 +252,18 @@ public class ReportsFunctions
         // (96-bit mantissa, max ~7.9e28) → Npgsql "does not fit in a System.Decimal". The runner reads these
         // as strings (JS), so it never hit this. 6dp is micro-dollar precision — the fleet total sums the raws
         // then rounds to 2dp, so this is drift-free for every displayed figure while giving ~$8e22 of headroom.
+        // ★ 0091: the free-grant-aware 3-param model. estimated_monthly (PRIMARY per-monitor $) = the
+        // grant-corrected fleet allocated by compute share, Σ = the reconcile anchor (coalesce(target,
+        // grant-corrected fleet)). ReconcileTargetMonthly is null by default (derived) — a null C# decimal?
+        // binds as SQL NULL. estimated_monthly / fleet_billable_monthly are round(…,2) so no decimal overflow.
         var rows = await _db.CostReport
             .FromSql($@"SELECT check_id, source_key, check_name, kind, interval_seconds, region_count,
                                avg_duration_s, active_seconds_7d, compute_share_pct,
                                projected, measured, divergence, divergence_flag,
                                round(projected_raw, 6) AS projected_raw, round(measured_raw, 6) AS measured_raw,
-                               run_count_7d, confirmation_count_7d, sandbox_count_7d, run_count_recent, run_count_prior
-                        FROM cost_projection({CostRate.PerActiveSecond})")
+                               run_count_7d, confirmation_count_7d, sandbox_count_7d, run_count_recent, run_count_prior,
+                               estimated_monthly, fleet_billable_monthly
+                        FROM cost_projection({CostRate.PerActiveSecond}, {CostRate.FreeGrantDollars}, {CostRate.ReconcileTargetMonthly})")
             .AsNoTracking().ToListAsync(ct);
 
         // ★ The HONEST dollar headline: Azure's OWN number, pulled by the runner into azure_cost (0090). Served
@@ -267,7 +272,8 @@ public class ReportsFunctions
         var azure = await TryGetAzureCostAsync(DateTimeOffset.UtcNow, ct);
 
         var dto = CostReportProjection.Build(
-            rows, CostRate.PerActiveSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50, azure);
+            rows, CostRate.PerActiveSecond, CostRate.Source, CostRate.SetDate, DateTimeOffset.UtcNow, topN: 50, azure,
+            CostRate.ReconcileTargetMonthly);
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=60";
         req.HttpContext.Response.Headers["Vary"] = "Origin";
         return ApiResults.Ok(dto);

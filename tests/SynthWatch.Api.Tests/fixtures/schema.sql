@@ -778,11 +778,12 @@ AS $function$
 $function$
 ;
 
--- cost_projection(rate) (0069, +run-count columns 0078, +compute-share 0089) — the shared cost model
--- /reports/cost calls (mirrors the runner migration). active_seconds_7d + compute_share_pct are the honest
--- per-monitor metric (share of fleet measured active-seconds); projected/measured are DEMOTED from-zero $.
-CREATE OR REPLACE FUNCTION public.cost_projection(p_rate numeric)
- RETURNS TABLE(check_id bigint, source_key text, check_name text, kind text, interval_seconds integer, region_count integer, avg_duration_s double precision, active_seconds_7d numeric, compute_share_pct numeric, projected numeric, measured numeric, divergence numeric, divergence_flag boolean, projected_raw numeric, measured_raw numeric, run_count_7d integer, confirmation_count_7d integer, sandbox_count_7d integer, run_count_recent integer, run_count_prior integer)
+-- cost_projection (0069, +0078, +compute-share 0089, +per-monitor DOLLAR 0091) — the shared cost model
+-- /reports/cost calls. The 3-param cost_projection(rate, free_grant_$, reconcile_target) is the real model:
+-- estimated_monthly is the PRIMARY per-monitor $ (free-grant-aware, Σ = the reconcile anchor); the 1-param is
+-- a deploy-safe WRAPPER (legacy 20-col shape). Mirrors the runner migration.
+CREATE OR REPLACE FUNCTION public.cost_projection(p_rate numeric, p_free_grant_dollars numeric, p_reconcile_target numeric)
+ RETURNS TABLE(check_id bigint, source_key text, check_name text, kind text, interval_seconds integer, region_count integer, avg_duration_s double precision, active_seconds_7d numeric, compute_share_pct numeric, projected numeric, measured numeric, divergence numeric, divergence_flag boolean, projected_raw numeric, measured_raw numeric, run_count_7d integer, confirmation_count_7d integer, sandbox_count_7d integer, run_count_recent integer, run_count_prior integer, estimated_monthly numeric, fleet_billable_monthly numeric)
  LANGUAGE sql
  STABLE
 AS $function$
@@ -811,7 +812,7 @@ AS $function$
                coalesce(rs.run_count_prior, 0)       AS run_count_prior
           FROM checks c
           LEFT JOIN run_stats rs ON rs.check_id = c.id
-         -- ★ 0086: exclude archived checks from the fleet cost projection (matches #254 at the source).
+         -- ★ 0086/#313: exclude ARCHIVED checks — every ACTIVE monitor appears (the truncation fix is client-side).
          WHERE c.enabled AND c.archived_at IS NULL
     ),
     scored AS (
@@ -825,20 +826,46 @@ AS $function$
                     THEN b.sum_duration_s_7d::numeric * p_rate * (30::numeric / 7::numeric)
                     ELSE 0 END AS m_raw
           FROM base b
+    ),
+    fleeted AS (
+        -- ★ 0091: fleet from-zero total FZ (window sum of p_raw), and the grant-corrected + reconcile anchor.
+        SELECT s.*,
+               sum(s.p_raw) OVER ()                                              AS fleet_p_raw,
+               greatest(0::numeric, sum(s.p_raw) OVER () - coalesce(p_free_grant_dollars, 0)) AS fleet_billable
+          FROM scored s
     )
-    SELECT s.check_id, s.source_key, s.check_name, s.kind, s.interval_seconds, s.region_count, s.avg_duration_s,
-           round(s.active_seconds_7d, 3) AS active_seconds_7d,
-           CASE WHEN s.fleet_active_seconds_7d > 0
-                THEN round(100 * s.active_seconds_7d / s.fleet_active_seconds_7d, 2)
+    SELECT f.check_id, f.source_key, f.check_name, f.kind, f.interval_seconds, f.region_count, f.avg_duration_s,
+           round(f.active_seconds_7d, 3) AS active_seconds_7d,
+           CASE WHEN f.fleet_active_seconds_7d > 0
+                THEN round(100 * f.active_seconds_7d / f.fleet_active_seconds_7d, 2)
                 ELSE NULL END AS compute_share_pct,
-           round(s.p_raw, 2) AS projected,
-           round(s.m_raw, 2) AS measured,
-           CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) ELSE NULL END AS divergence,
-           CASE WHEN s.p_raw > 0 THEN round(s.m_raw / s.p_raw, 3) > 1.5 ELSE false END AS divergence_flag,
-           s.p_raw AS projected_raw,
-           s.m_raw AS measured_raw,
-           s.run_count_7d, s.confirmation_count_7d, s.sandbox_count_7d, s.run_count_recent, s.run_count_prior
-      FROM scored s
+           round(f.p_raw, 2) AS projected,
+           round(f.m_raw, 2) AS measured,
+           CASE WHEN f.p_raw > 0 THEN round(f.m_raw / f.p_raw, 3) ELSE NULL END AS divergence,
+           CASE WHEN f.p_raw > 0 THEN round(f.m_raw / f.p_raw, 3) > 1.5 ELSE false END AS divergence_flag,
+           f.p_raw AS projected_raw,
+           f.m_raw AS measured_raw,
+           f.run_count_7d, f.confirmation_count_7d, f.sandbox_count_7d, f.run_count_recent, f.run_count_prior,
+           -- ★ 0091: allocate the reconcile anchor (target, or grant-corrected fleet) BY compute share. NULL
+           -- when this monitor has no from-zero compute (no runs) — never a fake $0. Σ = the anchor.
+           CASE WHEN f.fleet_p_raw > 0 AND f.p_raw > 0
+                THEN round(f.p_raw / f.fleet_p_raw * coalesce(p_reconcile_target, f.fleet_billable), 2)
+                ELSE NULL END AS estimated_monthly,
+           round(f.fleet_billable, 2) AS fleet_billable_monthly
+      FROM fleeted f
+$function$
+;
+
+CREATE OR REPLACE FUNCTION public.cost_projection(p_rate numeric)
+ RETURNS TABLE(check_id bigint, source_key text, check_name text, kind text, interval_seconds integer, region_count integer, avg_duration_s double precision, active_seconds_7d numeric, compute_share_pct numeric, projected numeric, measured numeric, divergence numeric, divergence_flag boolean, projected_raw numeric, measured_raw numeric, run_count_7d integer, confirmation_count_7d integer, sandbox_count_7d integer, run_count_recent integer, run_count_prior integer)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    SELECT check_id, source_key, check_name, kind, interval_seconds, region_count, avg_duration_s,
+           active_seconds_7d, compute_share_pct, projected, measured, divergence, divergence_flag,
+           projected_raw, measured_raw, run_count_7d, confirmation_count_7d, sandbox_count_7d,
+           run_count_recent, run_count_prior
+      FROM cost_projection(p_rate, 0::numeric, NULL::numeric)
 $function$
 ;
 

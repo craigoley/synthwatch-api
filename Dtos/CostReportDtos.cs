@@ -13,7 +13,11 @@ public record CostReportResponseDto(
     decimal TotalMeasuredMonthly,
     IReadOnlyList<CostCheckDto> TopCostDrivers,
     IReadOnlyList<CostCheckDto> Checks,
-    // ★ The HONEST dollar headline: Azure's OWN number, PULLED (runner azureCost.ts → azure_cost, 0090), not
+    // ★ 0091 — the fleet ESTIMATE the per-monitor dollars sum to: the reconcile anchor (grant-corrected fleet
+    // total = TotalProjectedMonthly − free grant $, or the pinned COST_RECONCILE_TARGET_MONTHLY). This is the
+    // "steady-state estimate (modeled)" the dashboard shows BESIDE Azure's actual; its ratio to Azure's
+    // forecast is the drift check. Stands alone (independent of the Azure block being live).
+    decimal EstimatedMonthlyTotal,
     // modeled. NULL when we couldn't reach Cost Management (no pull yet / role not propagated / API error) OR
     // the cached figure is for a past billing month (stale-as-current guard). ★ null ≠ 0: the dashboard reads
     // absence as "see Azure Cost Management" (deep link), NEVER as "$0 spent". A modeled fleet $ is NOT served
@@ -52,10 +56,14 @@ public record CostCheckDto(
     double? AvgDurationS,
     // ★ 0089 — the attributable per-monitor metric: activeSeconds (Σ measured active-seconds over 7d) +
     // activeSecondsPct (share of FLEET compute; null when no monitor ran). Rank by this, not by the demoted $.
+    // ★ 0091 — the PRIMARY per-monitor $, restored: free-grant-aware, null when no runs (never a fake $0).
+    decimal? EstimatedMonthly,
+    // ★ 0089 — the SECONDARY attributable metric: activeSeconds (Σ measured active-seconds) + activeSecondsPct
+    // (share of FLEET compute; null when no monitor ran). Shown beside the dollar, not instead of it.
     decimal ActiveSeconds,
     decimal? ActiveSecondsPct,
-    decimal ProjectedMonthly,   // DEMOTED from-zero $ (kept for the staged runner→api→dashboard migration)
-    decimal MeasuredMonthly7d,  // DEMOTED ×30/7 annualizer
+    decimal ProjectedMonthly,   // from-zero $ (the compute WEIGHT / drift reference) — no longer the display $
+    decimal MeasuredMonthly7d,  // ×30/7 annualizer (drift reference)
     decimal? DivergenceRatio,
     bool DivergenceFlag,
     int RunCount7d,

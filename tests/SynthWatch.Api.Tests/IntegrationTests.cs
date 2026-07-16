@@ -304,13 +304,21 @@ public class IntegrationTests
             Assert.False(string.IsNullOrEmpty(dto.RateSource));
             Assert.True(dto.TotalProjectedMonthly >= c.ProjectedMonthly);
 
-            // ★ 0089 — the honest metric: activeSeconds = Σ 3×10s = 30s; activeSecondsPct present (a share of
-            // the fleet, so > 0). The shares over every monitor that ran sum to ~100 (matching PR1's Σ=100).
+            // ★ 0089 — the SECONDARY metric: activeSeconds = Σ 3×10s = 30s; activeSecondsPct present (> 0),
+            // shares sum to ~100.
             Assert.Equal(30m, c.ActiveSeconds);
             Assert.NotNull(c.ActiveSecondsPct);
             Assert.True(c.ActiveSecondsPct > 0);
             var shareSum = dto.Checks.Where(x => x.ActiveSecondsPct != null).Sum(x => x.ActiveSecondsPct!.Value);
             Assert.InRange(shareSum, 99.9m, 100.1m); // rounding band on 2dp per-check shares
+            // ★ 0091 — the PRIMARY per-monitor $ is present and > 0 (this check ran). The FLEET estimate is the
+            // grant-corrected anchor (default target NULL): ≈ totalProjected − free grant $ (rounding aside).
+            Assert.NotNull(c.EstimatedMonthly);
+            Assert.True(c.EstimatedMonthly > 0);
+            Assert.InRange(dto.EstimatedMonthlyTotal, dto.TotalProjectedMonthly - CostRate.FreeGrantDollars - 0.02m,
+                dto.TotalProjectedMonthly - CostRate.FreeGrantDollars + 0.02m);
+            var estSum = dto.Checks.Where(x => x.EstimatedMonthly != null).Sum(x => x.EstimatedMonthly!.Value);
+            Assert.InRange(estSum, dto.EstimatedMonthlyTotal - 0.05m, dto.EstimatedMonthlyTotal + 0.05m); // Σ per-monitor ≈ the anchor
             // ★ No azure_cost row seeded here → the Azure headline is ABSENT (null), NOT a fabricated 0.
             Assert.Null(dto.Azure);
 
@@ -318,11 +326,11 @@ public class IntegrationTests
             var web = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
             var root = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(dto, web)).RootElement;
             Assert.Equal(
-                new[] { "azure", "checks", "generatedAt", "rateSetDate", "rateSource", "rateUsed", "topCostDrivers", "totalMeasuredMonthly", "totalProjectedMonthly" },
+                new[] { "azure", "checks", "estimatedMonthlyTotal", "generatedAt", "rateSetDate", "rateSource", "rateUsed", "topCostDrivers", "totalMeasuredMonthly", "totalProjectedMonthly" },
                 root.EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
             Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("azure").ValueKind); // absent → null, never 0
             Assert.Equal(
-                new[] { "activeSeconds", "activeSecondsPct", "avgDurationS", "checkId", "confirmationCount7d", "divergenceFlag", "divergenceRatio", "intervalSeconds", "kind", "measuredMonthly7d", "name", "projectedMonthly", "regionCount", "runCount7d", "runCountPrior", "runCountRecent", "sandboxCount7d", "sourceKey" },
+                new[] { "activeSeconds", "activeSecondsPct", "avgDurationS", "checkId", "confirmationCount7d", "divergenceFlag", "divergenceRatio", "estimatedMonthly", "intervalSeconds", "kind", "measuredMonthly7d", "name", "projectedMonthly", "regionCount", "runCount7d", "runCountPrior", "runCountRecent", "sandboxCount7d", "sourceKey" },
                 root.GetProperty("checks")[0].EnumerateObject().Select(p => p.Name).OrderBy(k => k).ToArray());
         }
         finally
