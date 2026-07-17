@@ -69,6 +69,12 @@ public class PreviewFunctions
     private const int MaxConcurrentRunning = 3; // global concurrency cap (in-flight sandbox jobs)
     private const int MaxSpecBytes = 256 * 1024; // a spec is small; reject a body used to bloat the env override
 
+    // ★ A 'running' row is only presumed IN-FLIGHT within this window. The sandbox job's hard replicaTimeout is
+    //   180s, so a row still 'running' after this is abandoned (closed tab, job died without writing the blob) —
+    //   it MUST NOT count toward the concurrency cap, or 3 stuck rows permanently 429 the feature for everyone
+    //   with no recovery path. The concurrency query bounds by this window; GET lazily sweeps stale rows.
+    private static readonly TimeSpan RunningStaleAfter = TimeSpan.FromMinutes(5);
+
     /// <summary>POST /api/preview { spec, targetUrl? } — enqueue + start a sandbox preview. 202 { token }.</summary>
     [Function("CreatePreview")]
     public async Task<IActionResult> CreatePreview(
@@ -91,6 +97,12 @@ public class PreviewFunctions
         // Target: a caller-supplied non-prod / public URL, or the safe default. (Tier-3 authed-against-staging
         // is a SEPARATE gated capability — pass 1 is unauthenticated against a public/non-prod target.)
         var targetUrl = string.IsNullOrWhiteSpace(body.TargetUrl) ? "https://example.com" : body.TargetUrl!.Trim();
+        // ★ SSRF-adjacent: the target drives the sandbox's outbound fetch. Require an ABSOLUTE http(s) URI — no
+        //   file:/gopher:/relative that could steer the fetch somewhere unintended. (The sandbox's own isolation
+        //   + non-prod default bound the blast radius; this is defense-in-depth at the boundary.)
+        if (!Uri.TryCreate(targetUrl, UriKind.Absolute, out var parsed) ||
+            (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
+            return ApiResults.BadRequest("targetUrl must be an absolute http(s) URL.");
 
         var now = DateTimeOffset.UtcNow;
         // ★ Rate limit (per-user) + concurrency cap (global) — read from sandbox_preview, the audit source itself.
@@ -98,7 +110,10 @@ public class PreviewFunctions
         var recent = await _db.SandboxPreviews.CountAsync(p => p.ActorEmail == principal.Email && p.RequestedAt >= sinceHour, ct);
         if (recent >= MaxPerUserPerHour)
             return ApiResults.TooManyRequests($"Preview rate limit reached ({MaxPerUserPerHour}/hour). Try again later.");
-        var running = await _db.SandboxPreviews.CountAsync(p => p.Status == "running", ct);
+        // ★ Count only RECENTLY-'running' rows (within RunningStaleAfter) — an abandoned/crashed preview that
+        //   never left 'running' must not permanently hold a concurrency slot and 429 everyone (self-DoS).
+        var staleBefore = now - RunningStaleAfter;
+        var running = await _db.SandboxPreviews.CountAsync(p => p.Status == "running" && p.RequestedAt >= staleBefore, ct);
         if (running >= MaxConcurrentRunning)
             return ApiResults.TooManyRequests($"Too many previews running ({MaxConcurrentRunning}). Try again shortly.");
 
@@ -154,8 +169,14 @@ public class PreviewFunctions
         string token,
         CancellationToken ct)
     {
+        // ★ Editor/admin only — a preview trace is an editor capability (the uploaded spec's output). A viewer
+        //   has no business polling it, even with the token. Same hard gate as the POST.
         var principal = await _auth.FromBearerAsync(req.Headers.Authorization, ct);
         if (principal is null) return ApiResults.Unauthorized("Authentication required.");
+        if (!principal.CanWrite) return ApiResults.Forbidden("You do not have permission to view a preview.");
+
+        // ★ The trace can carry uploaded-spec output — never cache it (mirrors the #218 forensic-read no-store).
+        req.HttpContext.Response.Headers.CacheControl = "no-store";
 
         var row = await _db.SandboxPreviews.FirstOrDefaultAsync(p => p.Token == token, ct);
         if (row is null) return ApiResults.NotFound($"Preview {token} not found.");
@@ -167,7 +188,19 @@ public class PreviewFunctions
         // ★ Poll ONLY the sandbox container (the one the sandbox MI can write) — NEVER a prod-traces container.
         var trace = await TryReadSandboxTraceAsync(token, ct);
         if (trace is null)
+        {
+            // ★ Lazy sweep — a row still 'running' past the sandbox's hard timeout (with no blob) is abandoned
+            //   (closed tab / job died). Flip it to 'timeout' so it stops holding a concurrency slot forever.
+            if (DateTimeOffset.UtcNow - row.RequestedAt > RunningStaleAfter)
+            {
+                row.Status = "timeout";
+                row.CompletedAt = DateTimeOffset.UtcNow;
+                row.Error = "no result within the sandbox timeout window";
+                await _db.SaveChangesAsync(ct);
+                return ApiResults.Ok(new PreviewStatusDto(token, "timeout", null));
+            }
             return ApiResults.Ok(new PreviewStatusDto(token, "running", null)); // still in flight
+        }
 
         row.Status = "done";
         row.CompletedAt = DateTimeOffset.UtcNow;
@@ -189,9 +222,22 @@ public class PreviewFunctions
             var resp = await blob.DownloadContentAsync(ct);
             return resp.Value.Content.ToString();
         }
-        catch (RequestFailedException ex) when (ex.Status == 404)
+        catch (RequestFailedException ex)
         {
-            return null; // not written yet → still running
+            // 404 = not written yet (still running). ★ ANY other blob failure — a 403 (the API-MI Blob-Reader
+            //   grant on #332 not yet live) or a transient throttle — must DEGRADE to "still polling", never a
+            //   shielded 500 on every GET. Log it so a persistent 403 is visible, then treat as not-ready.
+            if (ex.Status != 404)
+                PreviewLog.BlobReadFailed(_logger, ex.Status, token, ex);
+            return null;
         }
     }
+}
+
+/// <summary>High-performance (CA1848) log delegate for the preview blob-read path.</summary>
+internal static partial class PreviewLog
+{
+    [LoggerMessage(EventId = 5101, Level = LogLevel.Warning,
+        Message = "preview blob read failed (status {Status}) for token {Token} — degrading to still-polling")]
+    public static partial void BlobReadFailed(ILogger logger, int status, string token, Exception ex);
 }
