@@ -5,6 +5,16 @@ name: Mutation gate (Stryker)
 # rests on). Fails below `thresholds.break` in stryker-config.json (a floor DERIVED from a measured run, not
 # invented — see the PR that introduced this). ci-gate aggregates this, so a regression in test strength on
 # these files holds the merge. Scoped to two files so a per-PR run stays bounded.
+#
+# ★ COST SPLIT (mirrors the runner's PR-scoped mutation gate, adapted to Stryker.NET's native --since):
+#   • PULL_REQUEST → `--since:origin/main`: mutate ONLY the gated files changed vs main. A PR touching
+#     neither TrustReportProjection.cs nor ErrorDiff.cs runs 0 mutants (instant); one that touches a gated
+#     file runs only its changed portion. No weekly-full cron — at 7 min core-only it wouldn't earn the
+#     cadence machinery; add it later only if drift appears.
+#   • PUSH to main → FULL run (no --since): the post-merge full sweep IS the drift catch, already paid after
+#     merge with no PR waiting on it. This is what lets us skip the weekly split.
+#   ★ Fail-safe: an unresolvable --since ref makes Stryker.NET ERROR (fail-closed → job fails → merge held),
+#     never a silent 0-mutant pass. fetch-depth:0 + an explicit origin/main fetch keep the merge-base present.
 on:
   push:
     branches: [main]
@@ -20,12 +30,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0   # --since needs full history + the main ref to compute the diff base
       - name: Setup .NET
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: '10.0.x'
       - name: Install Stryker.NET
         run: dotnet tool install -g dotnet-stryker
-      - name: Run mutation gate (scoped; break threshold in stryker-config.json)
+      - name: Run mutation gate (PR → --since origin/main; push → full)
         working-directory: tests/SynthWatch.Api.Tests
-        run: dotnet-stryker
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Ensure the diff base is present as a remote-tracking ref (checkout fetches the PR ref, not main).
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            echo "PR: mutating only gated files changed vs origin/main (0 mutants if neither changed)"
+            dotnet-stryker --since:origin/main
+          else
+            echo "push to main: full run over the 2 gated files (post-merge drift catch)"
+            dotnet-stryker
+          fi
