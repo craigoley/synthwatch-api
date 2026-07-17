@@ -2027,6 +2027,11 @@ public class IntegrationTests
                 INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms)
                   VALUES (api_id,'pass',(CURRENT_DATE-1)::timestamptz + interval '6 hours',(CURRENT_DATE-1)::timestamptz + interval '6 hours',1000);
               END LOOP;
+              -- ★ latency_sample (0092) prove-can-fail: a SANDBOX test-send at an absurd latency. The report
+              -- reads latency_sample (NOT sandbox), so this is excluded and p95 stays ~100; if it leaked in
+              -- (the pre-fix raw-runs read), p95 would be ~999999 and the `<= 200` assertion below would red.
+              INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms,sandbox)
+                VALUES (api_id,'pass',(CURRENT_DATE-1)::timestamptz + interval '6 hours',(CURRENT_DATE-1)::timestamptz + interval '6 hours',999999,true);
               INSERT INTO daily_check_rollup (check_id,day,up_count,down_count,total_count,availability_pct,latency_count,duration_avg_ms,duration_p95_ms,vitals_count,lcp_p75_ms)
                 VALUES (web_id, CURRENT_DATE-1, 10,0,10, 100.0, 10, 200, 250, 10, 1200);
               FOR i IN 1..10 LOOP
@@ -2059,16 +2064,19 @@ public class IntegrationTests
             var pPlatform = perf.Groups.Single(g => g.Group == "platform");
             Assert.NotNull(pPlatform.Latency.P95Ms);
             Assert.True(pPlatform.Latency.P95Ms < 550, $"p95 {pPlatform.Latency.P95Ms} must be raw-recomputed, not the 550 avg of daily p95s");
-            Assert.True(pPlatform.Latency.P95Ms <= 200);
+            // ★ latency_sample prove-can-fail: the seeded sandbox @999999ms is EXCLUDED, so p95 stays ≤200.
+            //   Reading raw runs (the pre-fix source) would drag it to ~999999 and red this.
+            Assert.True(pPlatform.Latency.P95Ms <= 200, $"p95 {pPlatform.Latency.P95Ms} — a sandbox test-send must NOT move the reported percentile");
 
-            // The report's p95 MATCHES a direct raw percentile query (proves recompute-from-raw).
+            // The report's p95 MATCHES a direct latency_sample percentile query (proves recompute-from the same
+            // sandbox-excluded source the report now uses — NOT raw runs, which the sandbox outlier would inflate).
             var apiId = await db.Checks.Where(c => c.Name == "rep-api").Select(c => c.Id).FirstAsync();
             var conn = (NpgsqlConnection)db.Database.GetDbConnection();
             await conn.OpenAsync();
             try
             {
                 var directP95 = Convert.ToInt32(await Scalar(conn,
-                    $"SELECT round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms))::int FROM runs WHERE check_id={apiId} AND status IN ('pass','warn')"));
+                    $"SELECT round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms))::int FROM latency_sample WHERE check_id={apiId}"));
                 Assert.Equal(directP95, pPlatform.Latency.P95Ms);
             }
             finally { await conn.CloseAsync(); }

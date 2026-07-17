@@ -404,6 +404,25 @@ CREATE OR REPLACE VIEW public.countable_run AS
 
 
 --
+-- Name: latency_sample; Type: VIEW; Schema: public; Owner: -
+--
+-- ★ latency_sample (runner migration 0092): the canonical "real measured latency sample" — a pass/warn,
+-- NON-sandbox run. Consumed by /reports/performance (GetPerformanceReport's mwx CTE reads FROM it). A sibling
+-- of countable_run but a DELIBERATELY DIFFERENT predicate: it KEEPS confirmations (a confirmation's duration
+-- is a real measurement — the re-roll bias countable_run corrects is an AVAILABILITY problem, not a latency
+-- one) and excludes sandbox test-sends. Do NOT unify with countable_run. Mirrors runner db/schema.sql.
+CREATE OR REPLACE VIEW public.latency_sample AS
+    SELECT id,
+           check_id,
+           status,
+           started_at,
+           duration_ms
+      FROM runs
+     WHERE status IN ('pass', 'warn')
+       AND NOT sandbox;
+
+
+--
 -- Name: sla_availability_24h; Type: VIEW; Schema: public; Owner: -
 --
 
