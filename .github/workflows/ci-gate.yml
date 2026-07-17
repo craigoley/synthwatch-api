@@ -24,6 +24,21 @@ name: CI gate
 # siblings never block. ★ Note: this makes ALL of the repo's checks effectively gating (a
 # semgrep/codeql/etc. failure fails ci-gate) — stricter than the prior 2-context requirement,
 # which is intended (more enforcement via one stable gate).
+# ★ THE RULE (what gates) — branch protection requires ONLY `ci-gate`, so ci-gate IS the merge gate:
+#   • EVERY check present on the PR head GATES: it must reach a TERMINAL state and not have failed.
+#     That includes the SLOW ones (CodeQL / code-scanning / Stryker mutation / dependency scan) — the
+#     gate now WAITS for them. Previously it judged the snapshot taken the moment REQUIRED went terminal,
+#     so a slower check still in_progress had conclusion=null, was never counted, and could fail AFTER
+#     ci-gate had already passed. Branch protection required only ci-gate, so that merged.
+#   • EXTERNAL checks representing a real BUILD/DEPLOY outcome GATE; notification/comment bots do NOT.
+#   • ADVISORY (declared below) never waits, never blocks — only for checks that are advisory BY THEIR
+#     OWN WORKFLOW'S DESIGN, and notification bots.
+#   • ORCHESTRATION (ci-gate/auto-merge/heal) NEVER waits — waiting is a DEADLOCK: self-heal's `heal`
+#     polls "waiting for ci-gate to conclude", so a mutual wait spins both to timeout and blocks EVERY PR.
+#   • An UNCLASSIFIED check GATES by default (fail-safe): a new check must be explicitly declared
+#     advisory to stop blocking.
+#   The logic lives in scripts/ci-gate-eval.sh and is SELF-TESTED by this job on every PR.
+#
 # ──────────────────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -46,19 +61,42 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       SHA: ${{ github.event.pull_request.head.sha }}
-      # Check-run names that ALWAYS appear on a PR — the gate waits for these to be terminal
-      # before deciding (so a slow-to-register check can't let it pass prematurely). "Claude
-      # review" reports a SKIPPED run on Dependabot PRs (still present); "Test …" always runs.
+      # REQUIRED — must additionally REGISTER (fail-closed: a required check that never registers ->
+      # timeout -> ci-gate FAILS; never a silent pass). Everything else present gates too (the rule above)
+      # — including "Analyze (csharp)"/CodeQL, `stryker` (the mutation gate) and the dependency scan,
+      # which the old snapshot logic silently skipped.
       REQUIRED: >-
         ["Test (xUnit + Testcontainers Postgres)","Claude review","Trace-signals golden parity","Schema parity (fixture vs runner migrations)","Runner column parity (fixture vs runner schema)","Build (warnings as errors)","Grant coverage (MI roles vs Bicep)","Grant coverage (Postgres table grants)"]
-      # Not quality gates — never wait on or fail for these (ci-gate is self; the auto-merge job
-      # FAILS on a draft PR, which is benign).
-      IGNORE: >-
-        ["ci-gate","Auto-merge (trusted authors)"]
+      # ADVISORY — never waited for, never blocks. Advisory BY ITS OWN WORKFLOW'S DESIGN:
+      #   "Scan" — semgrep.yml: `continue-on-error: true` — the job can never go red. (It is NOT in
+      #            REQUIRED here, so unlike the runner this repo never claimed it gated; it is declared
+      #            advisory so the "everything else gates" rule above is exactly true.) Semgrep findings
+      #            surface as code-scanning alerts.
+      ADVISORY: >-
+        ["Scan"]
+      # ORCHESTRATION — never waited for, never blocks: ci-gate's own plumbing.
+      # ★ DEADLOCK GUARD: self-heal's `heal` job polls "waiting for ci-gate to conclude" — if ci-gate
+      #   waited for heal, both spin to their timeouts and EVERY PR blocks.
+      # ★ Deliberate that a FAILED heal/auto-merge cannot block a good PR: self-heal is a remediation
+      #   bot (it reported FAILURE on every run while the #313 OIDC bug was live), and the auto-merge
+      #   job fails benignly on a draft PR.
+      ORCHESTRATION: >-
+        ["ci-gate","Auto-merge (trusted authors)","heal"]
     steps:
-      - name: Aggregate sibling check results (fail only on a REAL failure; skipped/absent are OK)
+      - name: Checkout (for scripts/ci-gate-eval.sh — the gate's decision logic)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # ★ The gate SELF-TESTS its own logic before using it: a regression that would silently WIDEN the
+      #   merge gate (or re-introduce the heal deadlock) fails ci-gate loudly on every PR — no new check
+      #   name, no new workflow, and the guard can never rot unnoticed.
+      - name: Self-test the gate logic (must-go-red anchor + deadlock guard)
+        run: bash scripts/ci-gate-eval.sh --self-test
+
+      - name: Aggregate sibling check results (wait for ALL gating checks; fail only on a REAL failure)
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/ci-gate-eval.sh
+          source scripts/ci-gate-eval.sh
 
           runs_json() {
             # All check runs on the PR head SHA, across every workflow + app, merged across pages.
@@ -67,37 +105,44 @@ jobs:
               | jq -c '[ .[].check_runs[] | {name, status, conclusion} ]'
           }
 
-          # 1) WAIT until every REQUIRED check is present + completed (terminal). Fail-closed on timeout.
+          # 1) WAIT until every REQUIRED check is present+completed AND every PRESENT gating check is
+          #    terminal. One deadline bounds both, so a hung check is a VISIBLE timeout — never an
+          #    invisible pass.
+          settled=0
           deadline=$(( $(date +%s) + 900 ))   # 15-minute hard cap
           while :; do
             runs="$(runs_json)"
-            not_ready="$(jq -r --argjson req "${REQUIRED}" '
-              ([ .[] | select(.status=="completed") | .name ]) as $done
-              | ($req - $done) | .[]' <<< "${runs}")"
-            [ -z "${not_ready}" ] && break
+            not_ready="$(ci_gate_not_ready "${runs}" "${REQUIRED}" "${ADVISORY}" "${ORCHESTRATION}")"
+            if [ -z "${not_ready}" ]; then
+              # SETTLE PASS: the code-scanning checks (CodeQL / "Semgrep OSS") are minted by the SARIF
+              # upload a few SECONDS AFTER their Analyze job goes terminal. Re-poll once so a late
+              # registrant cannot slip in behind the gate — the same race, one level down.
+              [ "${settled}" = "1" ] && break
+              settled=1
+              echo "all gating checks terminal — settling (re-poll in 20s to catch late registrants)"
+              sleep 20
+              continue
+            fi
+            settled=0
             if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::ci-gate: timed out waiting for required check(s) to complete:"
+              echo "::error::ci-gate: timed out waiting for check(s) to reach a terminal state:"
               printf '%s\n' "${not_ready}" | sed 's/^/  - /'
               exit 1
             fi
-            echo "waiting for required check(s) to complete:"
+            echo "waiting for check(s) to complete:"
             printf '%s\n' "${not_ready}" | sed 's/^/  - /'
             sleep 15
           done
 
-          # 2) FAIL if ANY check (excluding IGNORE) concluded as a real failure.
+          # 2) FAIL if ANY gating check concluded in a real failure. Skipped / neutral / success all
+          #    pass — so a skipped sibling never deadlocks the merge.
           echo "--- gated check runs ---"
           printf '%s' "${runs}" | jq -r '.[] | "  \(.conclusion // .status)\t\(.name)"' | sort
 
-          fails="$(jq -r --argjson ig "${IGNORE}" '
-            .[] | .name as $n | .conclusion as $c
-                | select(($ig | index($n)) == null)
-                | select(["failure","timed_out","cancelled","action_required","startup_failure"] | index($c))
-                | $n' <<< "${runs}")"
-
+          fails="$(ci_gate_failures "${runs}" "${ADVISORY}" "${ORCHESTRATION}")"
           if [ -n "${fails}" ]; then
-            echo "::error::ci-gate: required check(s) FAILED — holding merge:"
+            echo "::error::ci-gate: check(s) FAILED — holding merge:"
             printf '%s\n' "${fails}" | sed 's/^/  - /'
             exit 1
           fi
-          echo "ci-gate: all required checks terminal, no failures — merge may proceed."
+          echo "ci-gate: every gating check terminal, no failures — merge may proceed."
