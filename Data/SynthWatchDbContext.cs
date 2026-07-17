@@ -46,6 +46,7 @@ public class SynthWatchDbContext : DbContext
     public DbSet<EnvDomainMapRow> EnvDomainMap => Set<EnvDomainMapRow>();
     public DbSet<ErrorMuteRow> ErrorMutes => Set<ErrorMuteRow>();
     public DbSet<RunRequest> RunRequests => Set<RunRequest>();
+    public DbSet<SandboxPreview> SandboxPreviews => Set<SandboxPreview>();
     public DbSet<AvailabilityReportRow> AvailabilityReport => Set<AvailabilityReportRow>();
     public DbSet<AvailabilitySeriesRow> AvailabilityReportSeries => Set<AvailabilitySeriesRow>();
     public DbSet<LatencyReportRow> LatencyReport => Set<LatencyReportRow>();
@@ -190,6 +191,25 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.CompletedAt).HasColumnName("completed_at");
             e.Property(x => x.Sandbox).HasColumnName("sandbox"); // runner migration 0064 (DEFAULT false)
             e.Property(x => x.Confirmation).HasColumnName("confirmation"); // runner migration 0077 (DEFAULT false)
+        });
+
+        modelBuilder.Entity<SandboxPreview>(e =>
+        {
+            // Runner-owned (migration 0093); the API OWNS the lifecycle (INSERT running → UPDATE on poll). The
+            // sandbox job never touches this table (it has no DB role). id/requested_at are DB-generated.
+            e.ToTable("sandbox_preview");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            e.Property(x => x.Token).HasColumnName("token");
+            e.Property(x => x.ActorEmail).HasColumnName("actor_email");
+            e.Property(x => x.ActorIp).HasColumnName("actor_ip");
+            e.Property(x => x.SpecSha256).HasColumnName("spec_sha256");
+            e.Property(x => x.TargetUrl).HasColumnName("target_url");
+            e.Property(x => x.Status).HasColumnName("status");
+            e.Property(x => x.RequestedAt).HasColumnName("requested_at").ValueGeneratedOnAdd();
+            e.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            e.Property(x => x.ExitCode).HasColumnName("exit_code");
+            e.Property(x => x.Error).HasColumnName("error");
         });
 
         modelBuilder.Entity<AlertRoute>(e =>

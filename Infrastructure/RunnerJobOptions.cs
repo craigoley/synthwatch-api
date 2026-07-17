@@ -16,6 +16,15 @@ public class RunnerJobOptions
     /// Config-sourced (RunnerJob__ReconcileJobName) like <see cref="JobName"/>, not a literal in the handler.</summary>
     public string ReconcileJobName { get; set; } = "synthwatch-reconcile-job";
 
+    /// <summary>The low-privilege sandbox preview job (infra/main.bicep) — a SEPARATE identity + secret-free env.
+    /// Config-sourced (RunnerJob__SandboxJobName). The API starts it with a per-run env override carrying the
+    /// spec as data.</summary>
+    public string SandboxJobName { get; set; } = "synthwatch-sandbox";
+
+    /// <summary>The sandbox job's container name — the target of the per-run env override (must match the bicep
+    /// container name). Config-sourced (RunnerJob__SandboxContainerName).</summary>
+    public string SandboxContainerName { get; set; } = "sandbox";
+
     /// <summary>ARM api-version for the Microsoft.App/jobs start action.</summary>
     public string ApiVersion { get; set; } = "2024-03-01";
 

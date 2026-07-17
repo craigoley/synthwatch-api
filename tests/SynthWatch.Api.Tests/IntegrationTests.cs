@@ -3725,6 +3725,17 @@ public class IntegrationTests
             LastJobName = jobName;
             return Task.FromResult(Result);
         }
+
+        public IReadOnlyDictionary<string, string>? LastEnvOverride;
+        public string? LastContainerName;
+        public Task<bool> StartWithEnvOverrideAsync(string jobName, string containerName, IReadOnlyDictionary<string, string> env, CancellationToken ct)
+        {
+            StartCount++;
+            LastJobName = jobName;
+            LastContainerName = containerName;
+            LastEnvOverride = env;
+            return Task.FromResult(Result);
+        }
     }
 
     // ── POST /reconcile/trigger — starts the RECONCILE job (no DB touched on this path) ──
