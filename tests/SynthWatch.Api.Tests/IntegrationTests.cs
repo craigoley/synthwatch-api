@@ -5195,6 +5195,75 @@ public class IntegrationTests
             await fn.GetIncidentBreakdown(Request("?window=bogus"), default)).StatusCode);
     }
 
+    /// <summary>
+    /// ★ /reports/incident-breakdown must apply the SAME pre-prod default-EXCLUDE (arc S1c) its siblings do:
+    /// a staging/dev incident must NOT enter the ALERT-PRECISION headline — the number a new owner uses to
+    /// decide whether to trust the pager. It renders BESIDE MTTR on the same page over the same window, so
+    /// when it omitted the filter the two tallies visibly DISAGREED whenever a non-prod monitor incidented.
+    ///
+    /// ★ WHY THIS TEST CAN FAIL (it must prove the EXCLUSION, not just "returns a number"): three checks each
+    /// get exactly ONE identical in-window real-outage incident — prod, staging, and prod-overridden-to-dev.
+    /// Only the prod one may be counted, so the assertion is Total == 1, not >= 1. Without the filter the
+    /// count is 3 and MTTR still reports 1 — the exact visible disagreement. The unique tag scopes both
+    /// endpoints to only these rows, so the counts are EXACT and deterministic in the shared test DB.
+    /// (The third check also pins the OVERRIDE arm of coalesce(environment_override, environment, 'prod'):
+    /// its base environment is 'prod' and only the dashboard-owned override makes it non-prod.)
+    /// Must-go-red verified: reverting the env clause fails both the exclusion and the agreement assertions.
+    /// </summary>
+    [SkippableFact]
+    public async Task Incident_breakdown_excludes_non_prod_incidents_and_agrees_with_mttr()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // Three checks, ONE identical resolved real-outage incident each, all tagged team:envfilter.
+        // Only 'brk-env-prod' is in the prod fleet; the other two must never reach the headline.
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$ DECLARE cid bigint; BEGIN
+              INSERT INTO checks (name,kind,target_url,environment) VALUES ('brk-env-prod','http','https://p.example','prod') RETURNING id INTO cid;
+              INSERT INTO check_tags (check_id,key,value) VALUES (cid,'team','envfilter');
+              INSERT INTO incidents (check_id,status,severity,opened_at,resolved_at,rca)
+                VALUES (cid,'resolved','critical',now() - interval '2 hours', now() - interval '1 hour',
+                        jsonb_build_object('classification','real-outage'));
+
+              INSERT INTO checks (name,kind,target_url,environment) VALUES ('brk-env-staging','http','https://s.example','staging') RETURNING id INTO cid;
+              INSERT INTO check_tags (check_id,key,value) VALUES (cid,'team','envfilter');
+              INSERT INTO incidents (check_id,status,severity,opened_at,resolved_at,rca)
+                VALUES (cid,'resolved','critical',now() - interval '2 hours', now() - interval '1 hour',
+                        jsonb_build_object('classification','real-outage'));
+
+              -- base environment='prod'; ONLY the dashboard-owned override takes it out of the prod fleet.
+              INSERT INTO checks (name,kind,target_url,environment,environment_override) VALUES ('brk-env-override','http','https://o.example','prod','dev') RETURNING id INTO cid;
+              INSERT INTO check_tags (check_id,key,value) VALUES (cid,'team','envfilter');
+              INSERT INTO incidents (check_id,status,severity,opened_at,resolved_at,rca)
+                VALUES (cid,'resolved','critical',now() - interval '2 hours', now() - interval '1 hour',
+                        jsonb_build_object('classification','real-outage'));
+            END $$;
+            """);
+        try
+        {
+            var fn = new ReportsFunctions(db);
+            var brk = Assert.IsType<IncidentBreakdownDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetIncidentBreakdown(Request("?window=7d&tag=team:envfilter"), default)).Value!);
+
+            // ★ THE BUG: only the PROD incident counts. 3 without the env filter (staging + the dev-override leak in).
+            Assert.Equal(1, brk.Total);
+            Assert.Equal(1, brk.RealOutages);
+            Assert.Equal(1, brk.Classified);
+            Assert.Equal(1m, brk.Precision);   // 1 real-outage / 1 classified — staging noise can't dilute it
+
+            // ★ THE VISIBLE DISAGREEMENT: MTTR renders beside this, same window, and already filtered env.
+            var mttr = Assert.IsType<MttrReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await fn.GetMttrReport(Request("?window=7d&tag=team:envfilter"), default)).Value!);
+            Assert.Equal(1, mttr.Fleet.TotalIncidents);
+            Assert.Equal(mttr.Fleet.TotalIncidents, brk.Total);  // the two tallies now AGREE
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM checks WHERE name IN ('brk-env-prod','brk-env-staging','brk-env-override');"); // cascades incidents + tags
+        }
+    }
+
     // ★ GET /status — the internal/stakeholder status page. Proves: property rollup (down/degraded/up from the
     // area tag); current-state DISTINCT from uptime% (a building-baseline property is "up" NOW yet has a null
     // uptime); a critical fail rolls its property to DOWN; untagged/internal checks are EXCLUDED (no leak);
