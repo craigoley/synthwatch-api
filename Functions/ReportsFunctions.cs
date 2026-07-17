@@ -376,14 +376,28 @@ public class ReportsFunctions
         // "unclassified" bucket so incidents with no RCA classification are counted, never silently dropped.
         // Tag filter: restrict to incidents whose CHECK carries all selected tags (no-op when none selected).
         var rows = await _db.IncidentBreakdown.FromSql(
-            $@"SELECT coalesce(rca->>'classification', {Unclassified}) AS classification, count(*)::bigint AS count
-               FROM incidents
-               WHERE opened_at >= now() - ({days} * INTERVAL '1 day')
+            $@"SELECT coalesce(i.rca->>'classification', {Unclassified}) AS classification, count(*)::bigint AS count
+               FROM incidents i
+               JOIN checks c ON c.id = i.check_id
+               WHERE i.opened_at >= now() - ({days} * INTERVAL '1 day')
                  -- ★ Archived-EXCLUDE (#259 parity, at the source): an archived monitor's incidents never enter the
-                 -- alert-precision breakdown (a dead demo check was the sole classified red → a fake 25%). NOT IN
-                 -- keeps ORPHAN incidents (check_id absent from checks) — only archived checks are removed.
-                 AND check_id NOT IN (SELECT id FROM checks WHERE archived_at IS NOT NULL)
-                 AND (cardinality({tags}) = 0 OR check_id IN (
+                 -- alert-precision breakdown (a dead demo check was the sole classified red → a fake 25%).
+                 -- ★ This was check_id NOT IN (SELECT id FROM checks WHERE archived_at IS NOT NULL), justified as
+                 -- keeping ORPHAN incidents (check_id absent from checks). That defends a state the schema FORBIDS:
+                 -- incidents.check_id is NOT NULL REFERENCES checks(id) ON DELETE CASCADE (db/schema.sql; no
+                 -- migration weakens it), so every incident has exactly one check and an orphan cannot exist. Given
+                 -- that FK the JOIN form is EQUIVALENT, not a semantics change — and it lets this endpoint carry the
+                 -- same env clause its siblings do (the JOIN is what the filter below needs).
+                 AND c.archived_at IS NULL
+                 -- ★ Pre-prod default-EXCLUDE (arc S1c): a non-prod check's incidents never enter the prod
+                 -- alert-precision headline. EFFECTIVE env = coalesce(environment_override, environment, 'prod'): a
+                 -- dashboard override (env PR-3) WINS over the git-derived env; the trailing 'prod' covers a row
+                 -- written before checks.environment existed. Mirrors MTTR/SLO/trust — MTTR renders BESIDE this on
+                 -- the same page over the same window, so without this the two tallies visibly DISAGREED whenever a
+                 -- non-prod monitor incidented, and staging noise inflated the number a new owner uses to decide
+                 -- whether to trust the pager.
+                 AND coalesce(c.environment_override, c.environment, 'prod') = 'prod'
+                 AND (cardinality({tags}) = 0 OR i.check_id IN (
                        SELECT ft.check_id FROM check_tags ft
                        WHERE ft.key || ':' || ft.value = ANY({tags})
                        GROUP BY ft.check_id HAVING count(DISTINCT ft.key || ':' || ft.value) = cardinality({tags})))
