@@ -1418,6 +1418,26 @@ CREATE TABLE public.run_requests (
 -- At most one PENDING request per check (the coalesce the API relies on).
 CREATE UNIQUE INDEX run_requests_one_pending_per_check ON public.run_requests (check_id) WHERE (status = 'pending');
 
+-- sandbox_preview (runner migration 0093) — the lifecycle + audit record for a spec preview-run
+-- (POST /api/preview). ★ Written by the API, NOT the sandbox job (the sandbox ACA job is DB-less). Stores the
+-- spec SHA-256, never the body. Mirrors runner db/schema.sql.
+CREATE TABLE public.sandbox_preview (
+    id            bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    token         text        NOT NULL UNIQUE,
+    actor_email   text        NOT NULL,
+    actor_ip      text,
+    spec_sha256   text        NOT NULL,
+    target_url    text        NOT NULL,
+    status        text        NOT NULL DEFAULT 'running',
+    requested_at  timestamp with time zone NOT NULL DEFAULT now(),
+    completed_at  timestamp with time zone,
+    exit_code     integer,
+    error         text,
+    CONSTRAINT sandbox_preview_status_check CHECK (status IN ('running', 'done', 'failed', 'timeout'))
+);
+CREATE INDEX sandbox_preview_actor_idx ON public.sandbox_preview (actor_email, requested_at DESC);
+CREATE INDEX sandbox_preview_running_idx ON public.sandbox_preview (requested_at) WHERE (status = 'running');
+
 -- spec_cache (runner migration 0034) — durable runtime-spec cache. The runner (owner synthadmin) is the ONLY
 -- writer; the synthwatch-api role has SELECT only (migration 0041 revokes write — compiled_js is executed at
 -- runner privilege). The API READS it (SpecCacheRow / GET /checks/{id}/spec-cache) to surface the cached

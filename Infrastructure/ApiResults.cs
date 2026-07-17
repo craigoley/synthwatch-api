@@ -52,6 +52,11 @@ public static class ApiResults
 
     public static IActionResult NoContent() => new NoContentResult();
 
+    /// <summary>429 — the caller exceeded a rate/concurrency bound (e.g. the sandbox preview limits).</summary>
+    public static IActionResult TooManyRequests(string message) =>
+        new ObjectResult(ProblemResults.Body(StatusCodes.Status429TooManyRequests, "Too Many Requests", message, RequestCorrelation.Current, "rate-limited"))
+            { StatusCode = StatusCodes.Status429TooManyRequests, ContentTypes = { ProblemResults.ContentType } };
+
     /// <summary>503 — a transient upstream (e.g. a throttled/blob error) couldn't be served; retrying may help.</summary>
     public static IActionResult ServiceUnavailable(string message) =>
         new ObjectResult(ProblemResults.Body(StatusCodes.Status503ServiceUnavailable, "Service Unavailable", message, RequestCorrelation.Current, "unavailable"))

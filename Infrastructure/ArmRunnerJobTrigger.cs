@@ -34,7 +34,36 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
     /// <summary>Start the default runner job (the "Run now" / test-send path) — unchanged behaviour.</summary>
     public Task<bool> StartAsync(CancellationToken ct) => StartAsync(_options.JobName, ct);
 
-    public async Task<bool> StartAsync(string jobName, CancellationToken ct)
+    // ★ {} = no template/env override, so the job keeps its configured secretRefs (the "Run now"/test-send path).
+    public Task<bool> StartAsync(string jobName, CancellationToken ct) => PostStartAsync(jobName, "{}", ct);
+
+    public Task<bool> StartWithEnvOverrideAsync(
+        string jobName,
+        string containerName,
+        IReadOnlyDictionary<string, string> env,
+        CancellationToken ct)
+    {
+        // ★ A template override for THIS execution only — override ONE container's env with the caller's
+        //   NON-SECRET data (the sandbox job carries no secrets, so nothing sensitive is merged/replaced). The
+        //   uploaded spec is a STRING in one value; it cannot add keys or smuggle a secret the API doesn't hold.
+        var body = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            template = new
+            {
+                containers = new[]
+                {
+                    new
+                    {
+                        name = containerName,
+                        env = env.Select(kv => new { name = kv.Key, value = kv.Value }).ToArray(),
+                    },
+                },
+            },
+        });
+        return PostStartAsync(jobName, body, ct);
+    }
+
+    private async Task<bool> PostStartAsync(string jobName, string jsonBody, CancellationToken ct)
     {
         try
         {
@@ -46,18 +75,13 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
 
             using var request = new HttpRequestMessage(HttpMethod.Post, _options.StartUrlFor(jobName));
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
-            // ★ JSON content type + an empty-object body. ARM's Microsoft.App/jobs/start REQUIRES
-            // application/json — an empty text/plain body returns 415 Unsupported Media Type, so the trigger
-            // never fired and the run silently fell back to the next */5 cron tick (DIAGNOSED in prod: the
-            // empty-body call → 415; the {} application/json call → an immediate off-schedule execution).
-            // {} = no template/env override, so the job keeps its configured secretRefs.
-            request.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            // ★ ARM's Microsoft.App/jobs/start REQUIRES application/json — an empty text/plain body returns 415
+            // (DIAGNOSED in prod: the {} application/json call fires an immediate off-schedule execution).
+            request.Content = new StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
 
             using var response = await http.SendAsync(request, ct);
             if (response.IsSuccessStatusCode)
             {
-                // Log the immediate fire (Information) so an off-schedule start is OBSERVABLE in App Insights —
-                // the success path was previously silent, which is why a broken trigger looked like a working one.
                 RunnerJobLog.Started(_logger, jobName, (int)response.StatusCode);
                 return true;
             }
@@ -68,7 +92,7 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
         }
         catch (Exception ex)
         {
-            // Never throw ARM failures into the request — the pending row is a cron-tick fallback.
+            // Never throw ARM failures into the request — the caller reports a clear non-2xx.
             RunnerJobLog.StartFailed(_logger, jobName, ex);
             return false;
         }
