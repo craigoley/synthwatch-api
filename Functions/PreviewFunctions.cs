@@ -208,6 +208,27 @@ public class PreviewFunctions
         return ApiResults.Ok(new PreviewStatusDto(token, "done", trace));
     }
 
+    /// <summary>GET /api/preview/quota — the caller's live bounds (running/hourly + the caps) so the UI can show
+    /// "N of M" and explain a 429 instead of it being a mystery. Editor/admin only (same gate as run/poll); the
+    /// counts are the caller's own. These are the EXACT queries the POST enforces — one source of truth.</summary>
+    [Function("GetPreviewQuota")]
+    public async Task<IActionResult> GetPreviewQuota(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "preview/quota")] HttpRequest req,
+        CancellationToken ct)
+    {
+        var principal = await _auth.FromBearerAsync(req.Headers.Authorization, ct);
+        if (principal is null) return ApiResults.Unauthorized("Authentication required.");
+        if (!principal.CanWrite) return ApiResults.Forbidden("You do not have permission to view preview quota.");
+
+        req.HttpContext.Response.Headers.CacheControl = "no-store";
+        var now = DateTimeOffset.UtcNow;
+        var sinceHour = now.AddHours(-1);
+        var staleBefore = now - RunningStaleAfter;
+        var hourly = await _db.SandboxPreviews.CountAsync(p => p.ActorEmail == principal.Email && p.RequestedAt >= sinceHour, ct);
+        var running = await _db.SandboxPreviews.CountAsync(p => p.Status == "running" && p.RequestedAt >= staleBefore, ct);
+        return ApiResults.Ok(new PreviewQuotaDto(running, MaxConcurrentRunning, hourly, MaxPerUserPerHour));
+    }
+
     /// <summary>Read the sandbox job's trace result from the DEDICATED sandbox container only. null = not yet
     /// written (still running). Uses the API MI (needs Blob Data Reader on the sandbox container — infra).</summary>
     private async Task<string?> TryReadSandboxTraceAsync(string token, CancellationToken ct)

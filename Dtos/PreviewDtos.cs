@@ -16,3 +16,12 @@ public sealed record PreviewStatusDto(
     [property: JsonPropertyName("token")] string Token,
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("trace")] string? Trace);
+
+/// <summary>GET /api/preview/quota — the caller's live bounds so the UI can show "N of M" instead of a mystery
+/// 429. running/hourly are the SAME counts the POST enforces (recent 'running' rows; the caller's rows this
+/// hour); the maxima are the server's caps.</summary>
+public sealed record PreviewQuotaDto(
+    [property: JsonPropertyName("running")] int Running,
+    [property: JsonPropertyName("maxConcurrent")] int MaxConcurrent,
+    [property: JsonPropertyName("hourly")] int Hourly,
+    [property: JsonPropertyName("maxPerHour")] int MaxPerHour);
