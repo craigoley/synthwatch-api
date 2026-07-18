@@ -1,3 +1,5 @@
+using System.Net.Http.Headers;
+using System.Text.Json.Nodes;
 using Azure.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -37,30 +39,91 @@ public sealed class ArmRunnerJobTrigger : IRunnerJobTrigger
     // ★ {} = no template/env override, so the job keeps its configured secretRefs (the "Run now"/test-send path).
     public Task<bool> StartAsync(string jobName, CancellationToken ct) => PostStartAsync(jobName, "{}", ct);
 
-    public Task<bool> StartWithEnvOverrideAsync(
+    public async Task<bool> StartWithEnvOverrideAsync(
         string jobName,
         string containerName,
         IReadOnlyDictionary<string, string> env,
         CancellationToken ct)
     {
-        // ★ A template override for THIS execution only — override ONE container's env with the caller's
-        //   NON-SECRET data (the sandbox job carries no secrets, so nothing sensitive is merged/replaced). The
-        //   uploaded spec is a STRING in one value; it cannot add keys or smuggle a secret the API doesn't hold.
-        var body = System.Text.Json.JsonSerializer.Serialize(new
+        // ★ jobs/start takes a JobExecutionTemplate at the TOP LEVEL (no `template` wrapper — that 400s with
+        //   "Unknown properties template in StartJobExecutionTemplate"), and an overridden container REPLACES the
+        //   job's container WHOLESALE. So a bare {name,env} 400s ("Container ... must have an 'Image' property")
+        //   and, even with the image, silently runs the image's default entrypoint (the MAIN runner) when it
+        //   drops command/args. We therefore GET the job's configured container and MERGE our NON-SECRET env over
+        //   its env, keeping image/command/args/resources. The sandbox job carries no secrets, so nothing
+        //   sensitive is merged/replaced; the uploaded spec is one string value and cannot add env keys.
+        try
         {
-            template = new
+            var token = await _credential.GetTokenAsync(
+                new TokenRequestContext(new[] { _options.TokenScope }), ct);
+            var http = _httpFactory.CreateClient();
+            http.Timeout = TimeSpan.FromSeconds(15);
+
+            using var getReq = new HttpRequestMessage(HttpMethod.Get, _options.JobUrlFor(jobName));
+            getReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+            using var getResp = await http.SendAsync(getReq, ct);
+            if (!getResp.IsSuccessStatusCode)
             {
-                containers = new[]
-                {
-                    new
-                    {
-                        name = containerName,
-                        env = env.Select(kv => new { name = kv.Key, value = kv.Value }).ToArray(),
-                    },
-                },
-            },
-        });
-        return PostStartAsync(jobName, body, ct);
+                RunnerJobLog.StartNonSuccess(_logger, (int)getResp.StatusCode, jobName, await getResp.Content.ReadAsStringAsync(ct));
+                return false;
+            }
+
+            var jobJson = await getResp.Content.ReadAsStringAsync(ct);
+            var body = BuildStartBody(jobJson, containerName, env);
+            if (body is null)
+            {
+                RunnerJobLog.StartFailed(_logger, jobName,
+                    new InvalidOperationException($"container '{containerName}' not found in job '{jobName}' template"));
+                return false;
+            }
+            return await PostStartAsync(jobName, body, ct);
+        }
+        catch (Exception ex)
+        {
+            RunnerJobLog.StartFailed(_logger, jobName, ex);
+            return false;
+        }
+    }
+
+    /// <summary>Build the jobs/start body from the GET'd job JSON: the named container's image/command/args/
+    /// resources preserved, its env merged with <paramref name="overrideEnv"/> (override/add by name, existing
+    /// entries — including any secretRef — otherwise preserved). Returns null if the container isn't found.
+    /// Static + pure so the merge is unit-testable without ARM.</summary>
+    public static string? BuildStartBody(string jobJson, string containerName, IReadOnlyDictionary<string, string> overrideEnv)
+    {
+        var containers = JsonNode.Parse(jobJson)?["properties"]?["template"]?["containers"]?.AsArray();
+        if (containers is null) return null;
+
+        JsonNode? source = null;
+        foreach (var c in containers)
+        {
+            if (c is not null && (string?)c["name"] == containerName) { source = c; break; }
+        }
+        if (source is null) return null;
+
+        // Preserve existing env nodes (incl. secretRef), then override/add our keys by name.
+        var envArr = source["env"]?.DeepClone().AsArray() ?? new JsonArray();
+        foreach (var kv in overrideEnv)
+        {
+            for (var i = envArr.Count - 1; i >= 0; i--)
+            {
+                if (envArr[i] is not null && (string?)envArr[i]!["name"] == kv.Key) envArr.RemoveAt(i);
+            }
+            envArr.Add(new JsonObject { ["name"] = kv.Key, ["value"] = kv.Value });
+        }
+
+        // Minimal container ARM's start template accepts (matches the validated shape) — omit null fields.
+        var container = new JsonObject
+        {
+            ["name"] = containerName,
+            ["image"] = (string?)source["image"],
+            ["env"] = envArr,
+        };
+        if (source["command"] is JsonNode cmd) container["command"] = cmd.DeepClone();
+        if (source["args"] is JsonNode args) container["args"] = args.DeepClone();
+        if (source["resources"] is JsonNode res) container["resources"] = res.DeepClone();
+
+        return new JsonObject { ["containers"] = new JsonArray(container) }.ToJsonString();
     }
 
     private async Task<bool> PostStartAsync(string jobName, string jsonBody, CancellationToken ct)

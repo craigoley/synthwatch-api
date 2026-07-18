@@ -297,6 +297,19 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'CRED_ENC_KEY'
           value: credEncKey
         }
+        // Sandbox preview blob-read (PreviewFunctions.TryReadSandboxTraceAsync). The api reads the sandbox
+        // job's result from `{account}/{container}/{token}.json` via its MI (container-scoped Blob Data Reader,
+        // this repo's infra). Account = the artifacts account; container = the DEDICATED sandbox container
+        // (NOT the pod container name 'sandbox' the code default would pick). Non-secret — an account + a
+        // container name. ★ deploy.yml is code-only, so ALSO set live: `az functionapp config appsettings set`.
+        {
+          name: 'SandboxBlob__AccountName'
+          value: artifactsStorageAccountName
+        }
+        {
+          name: 'SandboxBlob__Container'
+          value: 'synthwatch-sandbox'
+        }
       ]
       // PLATFORM CORS. The Functions host answers the OPTIONS preflight itself (before the worker
       // runs), so this — not app code — is what makes preflight work for PATCH/POST/DELETE.
