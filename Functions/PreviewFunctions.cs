@@ -165,7 +165,10 @@ public class PreviewFunctions
     /// <summary>GET /api/preview/{token} — poll for the trace. 'running' until the sandbox writes its result.</summary>
     [Function("GetPreview")]
     public async Task<IActionResult> GetPreview(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "preview/{token}")] HttpRequest req,
+        // ★ Constrain {token} to its real 32-hex shape — else the literal `preview/quota` route is SHADOWED by
+        //   this parameter route (Functions does not give the literal precedence), and GET /preview/quota 404s
+        //   as "Preview quota not found". length(32) also rejects junk tokens before a DB lookup.
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "preview/{token:length(32)}")] HttpRequest req,
         string token,
         CancellationToken ct)
     {
