@@ -36,6 +36,12 @@ public class RunnerJobOptions
         $"{ManagementEndpoint.TrimEnd('/')}/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroup}" +
         $"/providers/Microsoft.App/jobs/{jobName}/start?api-version={ApiVersion}";
 
+    /// <summary>GET URL for a named job's resource — read the configured template so an env override can carry
+    /// the container's image/command/args/resources (a jobs/start override REPLACES the container wholesale).</summary>
+    public string JobUrlFor(string jobName) =>
+        $"{ManagementEndpoint.TrimEnd('/')}/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroup}" +
+        $"/providers/Microsoft.App/jobs/{jobName}?api-version={ApiVersion}";
+
     /// <summary>POST URL for the default runner job's start action (the "Run now" / test-send path).</summary>
     public string StartUrl => StartUrlFor(JobName);
 
