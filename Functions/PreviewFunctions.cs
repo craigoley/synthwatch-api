@@ -232,6 +232,59 @@ public class PreviewFunctions
         return ApiResults.Ok(new PreviewQuotaDto(running, MaxConcurrentRunning, hourly, MaxPerUserPerHour));
     }
 
+    /// <summary>GET /api/preview/{token}/screenshot — STREAM the failure screenshot through the API (the sandbox
+    /// container is private; the API MI reads it and proxies the bytes — no SAS, no widening, no raw URL). Editor
+    /// only; no-store (uploaded-spec output).</summary>
+    [Function("GetPreviewScreenshot")]
+    public async Task<IActionResult> GetPreviewScreenshot(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "preview/{token:length(32)}/screenshot")] HttpRequest req,
+        string token,
+        CancellationToken ct)
+        => await StreamSandboxArtifactAsync(req, token, "screenshot.png", "image/png", attachment: false, ct);
+
+    /// <summary>GET /api/preview/{token}/trace — STREAM the Playwright trace.zip through the API (same private-
+    /// container, MI-read, no-SAS/no-widening proxy as the screenshot). Editor only; no-store.</summary>
+    [Function("GetPreviewTrace")]
+    public async Task<IActionResult> GetPreviewTrace(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "preview/{token:length(32)}/trace")] HttpRequest req,
+        string token,
+        CancellationToken ct)
+        => await StreamSandboxArtifactAsync(req, token, "trace.zip", "application/zip", attachment: true, ct);
+
+    /// <summary>Editor-gated stream-through of a sandbox artifact blob (`{token}/{name}`) via the API MI. Keeps the
+    /// container private (no SAS ⇒ no Storage Blob Delegator ⇒ no widening; the MI stays Reader-on-the-sandbox-
+    /// container only). 404 → not written (still running / no such artifact); other blob errors → 503.</summary>
+    private async Task<IActionResult> StreamSandboxArtifactAsync(
+        HttpRequest req, string token, string name, string contentType, bool attachment, CancellationToken ct)
+    {
+        var principal = await _auth.FromBearerAsync(req.Headers.Authorization, ct);
+        if (principal is null) return ApiResults.Unauthorized("Authentication required.");
+        if (!principal.CanWrite) return ApiResults.Forbidden("You do not have permission to view a preview.");
+        req.HttpContext.Response.Headers.CacheControl = "no-store";
+
+        var account = _config["SandboxBlob:AccountName"] ?? _config["StorageAccountName"];
+        var container = _config["SandboxBlob:Container"] ?? _jobOptions.SandboxContainerName;
+        if (string.IsNullOrWhiteSpace(account)) return ApiResults.NotFound($"Preview {name} not found.");
+        try
+        {
+            var uri = new Uri($"https://{account}.blob.core.windows.net/{container}/{token}/{name}");
+            var blob = new BlobClient(uri, _credential);
+            var resp = await blob.DownloadStreamingAsync(cancellationToken: ct);
+            if (attachment)
+                req.HttpContext.Response.Headers.ContentDisposition = $"attachment; filename=\"preview-{token}-{name}\"";
+            return new FileStreamResult(resp.Value.Content, contentType); // FileStreamResult disposes the stream
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return ApiResults.NotFound($"Preview {name} not found (the run is still in flight, or produced no {name}).");
+        }
+        catch (RequestFailedException ex)
+        {
+            PreviewLog.BlobReadFailed(_logger, ex.Status, token, ex);
+            return ApiResults.ServiceUnavailable($"Preview {name} is temporarily unavailable.");
+        }
+    }
+
     /// <summary>Read the sandbox job's trace result from the DEDICATED sandbox container only. null = not yet
     /// written (still running). Uses the API MI (needs Blob Data Reader on the sandbox container — infra).</summary>
     private async Task<string?> TryReadSandboxTraceAsync(string token, CancellationToken ct)
