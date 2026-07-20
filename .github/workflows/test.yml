@@ -12,8 +12,29 @@ permissions:
 
 jobs:
   test:
-    name: Test (xUnit + Testcontainers Postgres)
-    runs-on: ubuntu-latest # GitHub-hosted runners include Docker, so Testcontainers works
+    # ★ RENAMED (was "Test (xUnit + Testcontainers Postgres)"). This name is a REQUIRED check in
+    #   ci-gate.yml — renaming it there and here must happen in the SAME commit, or ci-gate waits for a
+    #   check that can never register and fails at its deadline (fail-closed by design).
+    name: Test (xUnit + Postgres service)
+    runs-on: ubuntu-latest
+    # ★ A postgres:16 SERVICE, not Testcontainers. The fixture prefers DATABASE_URL and only falls back to
+    #   Testcontainers when it is unset — so CI must SET it. Otherwise CI would keep exercising the fallback
+    #   while local dev used the service path, and the path everyone actually runs would be the untested one.
+    #   Mirrors schema-parity.yml, which already uses this pattern in this repo.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pg
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      # ★ The fixture DROPs and recreates schema `public` on this path, so it must point at a THROWAWAY
+      #   database. A CI service container is per-job and dies with it — nothing else ever shares it.
+      DATABASE_URL: postgres://postgres:pg@127.0.0.1:5433/postgres
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -23,8 +44,36 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # Runs the full suite: pure validation/mapping/SLA tests + the Testcontainers-backed
-      # integration tests (real postgres:16 seeded with the runner schema). A failing test fails
-      # the job, which (as a required PR check) blocks merge — the regression gate the API lacked.
+      # Runs the full suite: pure validation/mapping/SLA tests + the DB-backed integration tests
+      # (real postgres:16 seeded with the runner schema). A failing test fails the job, which (as a
+      # required PR check) blocks merge — the regression gate the API lacked.
       - name: Test
-        run: dotnet test tests/SynthWatch.Api.Tests/ -c Release
+        run: dotnet test tests/SynthWatch.Api.Tests/ -c Release --logger "trx;LogFileName=all.trx" --results-directory ./trx
+
+      # ★ FAIL-CLOSED ON SILENT SKIPPING — the whole point of this change.
+      #   The DB-backed tests skip (they do not fail) when the fixture cannot reach a Postgres, and the suite
+      #   still reports GREEN. That is not hypothetical: four DB-backed tests once shipped having NEVER
+      #   executed, reported as "3 passed, 4 skipped" as though it were a clean run, and CI was their first
+      #   real run — where all four failed. So a green "Test" job is NOT sufficient evidence the DB tests ran;
+      #   assert it separately. If DATABASE_URL ever stops reaching the fixture, THIS is what goes red.
+      # ★ The predicate is scoped to DB-BACKED tests, not the whole suite: TraceSignalsGoldenParityTests
+      #   skips 2 tests BY DESIGN here (no runner checkout — the dedicated trace-parity job runs them), so
+      #   a whole-suite "zero skips" rule is permanently red. See scripts/assert-tests-ran.py for the full
+      #   post-mortem of the three separate bugs in the grep-based guard this replaces (chief among them:
+      #   a TRX <Counters> element has no `skipped` attribute at all — skips land in `notExecuted`).
+      # defusedxml for the guard's trx parse. Pinned, and `if: always()` so a failing suite still gets
+      # its silent-skip verdict rather than being masked by a missing dependency.
+      - name: Install guard deps
+        if: always()
+        run: pip install --quiet --disable-pip-version-check defusedxml==0.7.1
+
+      - name: Assert the DB-backed tests actually RAN (no silent skip)
+        run: python3 scripts/assert-tests-ran.py ./trx/all.trx
+
+      # ★ GUARD THE GUARD. The step above previously exited 1 on its own broken parse for its entire life —
+      #   which looks EXACTLY like it catching a real skip. This proves it still goes GREEN on a real suite
+      #   shape AND still goes RED on each failure mode (DB skips, total=0, unparseable/missing trx), so
+      #   "the guard is green" keeps meaning something. Runs regardless of the suite's outcome.
+      - name: Self-test the silent-skip guard (must-go-red)
+        if: always()
+        run: bash scripts/assert-tests-ran.selftest.sh

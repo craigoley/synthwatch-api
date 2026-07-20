@@ -105,6 +105,47 @@ func start
 
 `local.settings.json` ships with placeholder values and is git-ignored.
 
+### Running the tests locally
+
+The suite needs two things. **Neither is optional — if either is missing you get a GREEN run that quietly
+skipped every DB-backed test**, which is exactly how four tests once shipped having never executed.
+
+**1. `dotnet` on PATH.** The SDK may already be installed but not linked:
+
+```bash
+~/.dotnet/dotnet --version        # if this prints a version, it IS installed — you only need PATH
+export PATH="$HOME/.dotnet:$PATH" # add to ~/.zshrc to make it stick
+# If it is genuinely absent: brew install --cask dotnet-sdk (or use the repo devcontainer).
+```
+
+**2. A real Postgres 16, via `DATABASE_URL`.** The fixture prefers an already-running Postgres and only
+falls back to Testcontainers (which needs a Docker *daemon*, not just a Postgres) when `DATABASE_URL` and
+`TEST_DATABASE_URL` are both unset.
+
+```bash
+# Option A — Homebrew (no Docker needed)
+brew install postgresql@16 && brew services start postgresql@16
+createdb swtest
+export DATABASE_URL="postgres://postgres@127.0.0.1:5432/swtest"
+
+# Option B — a container, if you prefer
+docker run -d --name swpg -e POSTGRES_PASSWORD=pg -p 5433:5432 postgres:16
+export DATABASE_URL="postgres://postgres:pg@127.0.0.1:5433/postgres"
+
+dotnet test tests/SynthWatch.Api.Tests
+```
+
+> ⚠️ **`DATABASE_URL` must point at a THROWAWAY database.** On this path the fixture runs
+> `DROP SCHEMA public CASCADE` once per run before loading `fixtures/schema.sql` + the seed. That is what
+> reproduces the fresh-container guarantee — without it a second run would insert a second `seed-http` and
+> `Assert.Single(...)` would start failing. It also assumes **one test run at a time** against a given URL;
+> two concurrent runs would drop the schema out from under each other. CI gives each job its own service
+> container, so nothing is ever shared.
+
+**How to tell it worked:** `Skipped: 0`. If you see `Skipped: 113`, the fixture found no Postgres and the
+DB-backed tests did not run — the suite is green but is asserting far less than it appears to. CI fails
+explicitly in that case rather than reporting green.
+
 ## Deploy
 
 **This service auto-deploys on merge to `main`.** The CD workflow

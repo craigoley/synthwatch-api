@@ -66,7 +66,7 @@ jobs:
       # — including "Analyze (csharp)"/CodeQL, `stryker` (the mutation gate) and the dependency scan,
       # which the old snapshot logic silently skipped.
       REQUIRED: >-
-        ["Test (xUnit + Testcontainers Postgres)","Claude review","Trace-signals golden parity","Schema parity (fixture vs runner migrations)","Runner column parity (fixture vs runner schema)","Build (warnings as errors)","Grant coverage (MI roles vs Bicep)","Grant coverage (Postgres table grants)"]
+        ["Test (xUnit + Postgres service)","Claude review","Trace-signals golden parity","Schema parity (fixture vs runner migrations)","Runner column parity (fixture vs runner schema)","Build (warnings as errors)","Grant coverage (MI roles vs Bicep)","Grant coverage (Postgres table grants)"]
       # ADVISORY — never waited for, never blocks. Advisory BY ITS OWN WORKFLOW'S DESIGN:
       #   "Scan" — semgrep.yml: `continue-on-error: true` — the job can never go red. (It is NOT in
       #            REQUIRED here, so unlike the runner this repo never claimed it gated; it is declared
