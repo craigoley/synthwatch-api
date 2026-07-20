@@ -13,6 +13,8 @@ tables. Its place in the 4-repo system + the handover plan:
 
 ## 2. First hour (from a clean clone)
 
+### Route A — the devcontainer (needs Docker)
+
 The **#318 devcontainer lives in the runner repo and builds + tests this repo too.** Clone both as siblings:
 
 ```bash
@@ -24,6 +26,55 @@ docker compose -f .devcontainer/docker-compose.yml exec app bash .devcontainer/p
 docker compose -f .devcontainer/docker-compose.yml exec app bash .devcontainer/verify.sh b   # step (b) = this repo's dotnet test (Testcontainers)
 # or directly, from synthwatch-api/:  dotnet test tests/SynthWatch.Api.Tests/
 ```
+
+### Route B — local, no Docker at all
+
+Two pieces, and **you need both**. Skip either one and the suite still exits 0, which is the trap this
+section exists to prevent — see "reading the result" below.
+
+**1. The .NET SDK.** Without it there is no `dotnet`, so the suite cannot run at all — `dotnet test` is
+`command not found`. The repo targets **net10.0**; install the 10.0 channel and put it on `PATH`:
+
+```bash
+curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+export PATH="$HOME/.dotnet:$PATH"     # add to ~/.zshrc to persist
+dotnet --version                       # expect 10.0.x
+```
+
+**2. A Postgres for `DATABASE_URL`.** The DB-backed tests need a real postgres:16. Testcontainers is only a
+fallback and needs a Docker daemon, so on this route you supply the DB yourself:
+
+```bash
+brew install postgresql@16
+brew services start postgresql@16                       # starts a background service on :5432
+createdb synthwatch_test                                # ★ a DEDICATED, THROWAWAY database
+export DATABASE_URL="postgres://$(whoami)@127.0.0.1:5432/synthwatch_test"
+dotnet test tests/SynthWatch.Api.Tests/
+```
+
+> ⚠️ **`DATABASE_URL` must point at a THROWAWAY database.** `PostgresFixture` runs
+> `DROP SCHEMA public CASCADE` on this path before seeding — it has to, or a second run stacks seed rows on
+> the first. Point it at a DB you care about and it will be emptied. Never reuse your everyday local DB, and
+> never point it at anything shared.
+
+### ★ Reading the result — `Skipped: 0` is the tell
+
+**A run with skips is not a clean run.** The DB-backed tests `Skip.IfNot(...)` when no Postgres was
+resolved, so the suite reports **green while barely testing anything**. Measured on `main` (1c939f1),
+identical command, only `DATABASE_URL` differing:
+
+| state | result | verdict |
+|---|---|---|
+| no SDK | `dotnet: command not found` | can't run at all |
+| SDK, **no** `DATABASE_URL`, no Docker | exit **0** — `Passed: 405, Skipped: 119, Total: 524` | **green, but 119 never ran** |
+| SDK + `DATABASE_URL` | exit **0** — `Passed: 524, Skipped: 0, Total: 524` | the only clean run |
+
+Narrowed to the DB-backed class it is starker: without `DATABASE_URL`, `IntegrationTests` runs **14 of 127**
+and still exits 0. So check the count, not the colour — **if `Skipped:` is not `0`, you have not run the
+suite**, and CI enforces exactly this (`scripts/assert-tests-ran.py`, from #279).
+
+A `DATABASE_URL` that is set but **unreachable** is a hard failure by design (exit 1, all 127 fail) — it is
+never downgraded to a skip. That contract is pinned by `PostgresFixtureContractTests` (#281).
 
 Then: trivial change → branch → push → **open a PR** → CI green → **auto-merges** (`auto-merge.yml`).
 
@@ -40,7 +91,7 @@ real day-one bites:
 
 ## 4. How a change reaches prod
 
-- **CI gates** (aggregated by the required `ci-gate`): `Test (xUnit + Testcontainers Postgres)`,
+- **CI gates** (aggregated by the required `ci-gate`): `Test (xUnit + Postgres service)`,
   `Build (warnings as errors)`, `Claude review`, `Schema parity`, `Runner column parity`,
   `Trace-signals golden parity`, `Grant coverage` (×2), and the `mutation` gate.
 - **Auto-deploys on merge to `main`** — CI publishes the Function App (OIDC; no stored Azure secret). There is
