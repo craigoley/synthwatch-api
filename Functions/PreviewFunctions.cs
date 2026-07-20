@@ -30,8 +30,13 @@ namespace SynthWatch.Api.Functions;
 ///   • A NON-OPTIONAL audit row (who / what-hash / when) on every trigger.
 ///   • Rate limit + concurrency cap + a per-job hard timeout — an unbounded logged-in job-spawner is a DoS on
 ///     the Azure bill.
-///   • The spec is DATA: it rides an env override into the SANDBOX job (StartWithEnvOverrideAsync) as base64;
-///     the sandbox re-allowlists its child env, so the override can carry no secret.
+///   • The spec is DATA: it travels as CIPHERTEXT in the {token}.payload blob, NOT in the ARM env override.
+///     ACA persists a jobs/start override verbatim in job execution history (readable by any Reader on the
+///     RG, unbounded-by-contract for a Manual-trigger job), so the env now carries only the per-run AES key —
+///     worthless without the blob. See Infrastructure/SandboxPayload.cs for the full rationale.
+///   • OPTIONAL user-typed credentials ride the SAME sealed payload and are NEVER persisted: not in
+///     sandbox_preview (spec_sha256 only), not in audit_log ({specSha256, targetUrl} only), not in the ARM
+///     body, not in any log or exception path.
 /// </summary>
 public class PreviewFunctions
 {
@@ -42,6 +47,7 @@ public class PreviewFunctions
     private readonly RunnerJobOptions _jobOptions;
     private readonly TokenCredential _credential;
     private readonly IConfiguration _config;
+    private readonly ISandboxPayloadStore _payloads;
     private readonly ILogger<PreviewFunctions> _logger;
 
     public PreviewFunctions(
@@ -52,6 +58,7 @@ public class PreviewFunctions
         IOptions<RunnerJobOptions> jobOptions,
         TokenCredential credential,
         IConfiguration config,
+        ISandboxPayloadStore payloads,
         ILogger<PreviewFunctions> logger)
     {
         _db = db;
@@ -61,6 +68,7 @@ public class PreviewFunctions
         _jobOptions = jobOptions.Value;
         _credential = credential;
         _config = config;
+        _payloads = payloads;
         _logger = logger;
     }
 
@@ -68,6 +76,64 @@ public class PreviewFunctions
     private const int MaxPerUserPerHour = 20;   // per-user rate limit
     private const int MaxConcurrentRunning = 3; // global concurrency cap (in-flight sandbox jobs)
     private const int MaxSpecBytes = 256 * 1024; // a spec is small; reject a body used to bloat the env override
+    // A password / username / bypass token is short. Bounding them keeps the sealed payload small and stops a
+    // caller using the credential fields as an unbounded side-channel now that the spec itself is capped.
+    private const int MaxCredentialFieldChars = 1024;
+    // How many abandoned rows one request may sweep — bounds the create path's added work.
+    private const int MaxSweepPerRequest = 10;
+
+    /// <summary>Trim + drop empty credential fields; return null when nothing usable remains, so an
+    /// uncredentialed preview carries NO credentials node at all — not empty strings the runner would then
+    /// have to normalize away. (It is NOT "byte-identical to the pre-feature behaviour": this PR moves the
+    /// spec off SW_SANDBOX_SPEC_B64 for every preview, credentialed or not. What is unchanged is the
+    /// user-visible behaviour and the runner's non-sensitive treatment — raw trace, screenshot kept.)</summary>
+    private static SandboxPayload.Credentials? NormalizeCredentials(CreatePreviewCredentials? c)
+    {
+        if (c is null) return null;
+        var username = string.IsNullOrWhiteSpace(c.Username) ? null : c.Username.Trim();
+        // ★ Password / token are NOT trimmed — leading or trailing whitespace can be significant in a real
+        //   secret, and silently "fixing" it would make a correct credential fail authentication mysteriously.
+        //   But an ENTIRELY-whitespace value is not a credential, and accepting one is actively harmful: it
+        //   makes the run `sensitive` (suppressing the screenshot for a credential that authenticates
+        //   nothing) AND registers e.g. "   " as a redactor knownValue — whose only guard is a <3-char skip,
+        //   which three spaces clears — so every run of three spaces in the trace becomes <redacted> and the
+        //   diagnostic is shredded. Reject whitespace-only; preserve whitespace INSIDE a real value.
+        var password = string.IsNullOrWhiteSpace(c.Password) ? null : c.Password;
+        var bypassToken = string.IsNullOrWhiteSpace(c.VercelBypassToken) ? null : c.VercelBypassToken;
+        if (username is null && password is null && bypassToken is null) return null;
+        return new SandboxPayload.Credentials(username, password, bypassToken);
+    }
+
+    /// <summary>
+    /// Flip abandoned 'running' rows to 'timeout' and delete their payload ciphertext.
+    ///
+    /// ★ Called from the CREATE path, not just the poll, because an abandoned preview by definition has
+    /// nobody polling it. A row only reaches here once (the status flip is what excludes it next time), and
+    /// the delete is idempotent (DeleteIfExists), so a repeated sweep is cheap. Best-effort throughout: a
+    /// failed delete leaves the lifecycle rule as the backstop and must never block a new preview.
+    /// </summary>
+    private async Task SweepOrphanedPayloadsAsync(DateTimeOffset staleBefore, CancellationToken ct)
+    {
+        var abandoned = await _db.SandboxPreviews
+            .Where(p => p.Status == "running" && p.RequestedAt < staleBefore)
+            .OrderBy(p => p.RequestedAt)
+            .Take(MaxSweepPerRequest)
+            .ToListAsync(ct);
+        if (abandoned.Count == 0) return;
+        foreach (var row in abandoned)
+        {
+            await _payloads.DeleteAsync(row.Token, ct);
+            row.Status = "timeout";
+            row.CompletedAt = DateTimeOffset.UtcNow;
+            row.Error = "no result within the sandbox timeout window";
+        }
+        await _db.SaveChangesAsync(ct);
+    }
+
+    private static bool CredentialsWithinBounds(SandboxPayload.Credentials c) =>
+        (c.Username?.Length ?? 0) <= MaxCredentialFieldChars
+        && (c.Password?.Length ?? 0) <= MaxCredentialFieldChars
+        && (c.BypassToken?.Length ?? 0) <= MaxCredentialFieldChars;
 
     // ★ A 'running' row is only presumed IN-FLIGHT within this window. The sandbox job's hard replicaTimeout is
     //   180s, so a row still 'running' after this is abandoned (closed tab, job died without writing the blob) —
@@ -104,6 +170,14 @@ public class PreviewFunctions
             (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
             return ApiResults.BadRequest("targetUrl must be an absolute http(s) URL.");
 
+        // ★ OPTIONAL per-run credentials. Normalized to null when nothing usable was sent, so an uncredentialed
+        //   POST sends NO credentials node — the runner keys its whole `sensitive` treatment off "did any
+        //   credential arrive?", and an empty-string field would read as "yes" and silently make the run
+        //   sensitive (screenshot suppressed) for a credential that does not exist.
+        var credentials = NormalizeCredentials(body.Credentials);
+        if (credentials is not null && !CredentialsWithinBounds(credentials))
+            return ApiResults.BadRequest($"Each credential field must be at most {MaxCredentialFieldChars} characters.");
+
         var now = DateTimeOffset.UtcNow;
         // ★ Rate limit (per-user) + concurrency cap (global) — read from sandbox_preview, the audit source itself.
         var sinceHour = now.AddHours(-1);
@@ -117,11 +191,22 @@ public class PreviewFunctions
         if (running >= MaxConcurrentRunning)
             return ApiResults.TooManyRequests($"Too many previews running ({MaxConcurrentRunning}). Try again shortly.");
 
+        // ★ ORPHAN SWEEP ON THE CREATE PATH — the one that actually covers the abandoned case.
+        //   The sweep in GetPreview only fires IF THE CLIENT POLLS, so it cannot clean up the very scenario
+        //   it names: a closed tab means nobody polls, nothing sweeps, and the ciphertext survives to the
+        //   ~1-day lifecycle floor while its key sits in ACA execution history permanently — both halves of
+        //   the split reachable for ~24h. Sweeping here means the NEXT preview by ANY user cleans up earlier
+        //   orphans, so cleanup no longer depends on the abandoning client coming back.
+        //   Bounded to a handful of rows so a create never turns into a long scan.
+        await SweepOrphanedPayloadsAsync(staleBefore, ct);
+
         var specSha = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body.Spec))).ToLowerInvariant();
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
 
         // ★ INSERT the lifecycle row BEFORE starting the job (so rate/concurrency count it) + the audit trail.
-        //   We store the HASH, never the body (the body rides the ephemeral env override; retention is a hash).
+        //   ★ We store the spec HASH and NOTHING ELSE of the request body. The spec travels as ciphertext in
+        //   the ephemeral payload blob; the credentials travel with it and are NEVER written here, never in the
+        //   audit `after` object below, and never in row.Error (whose messages are all fixed strings).
         var row = new SandboxPreview
         {
             Token = token,
@@ -135,16 +220,34 @@ public class PreviewFunctions
         await _db.SaveChangesAsync(ct);
         _audit.Record("sandbox_preview", token, before: null, after: new { specSha256 = specSha, targetUrl }, note: "preview-run");
 
-        // ★ Start the SANDBOX job with a per-run env override carrying the spec as DATA. The override is built
-        //   server-side from NON-SECRET values only; the sandbox re-allowlists its child env (runner/sandbox), so
-        //   this can smuggle no secret. The uploaded spec is one base64 value — it cannot add env keys.
-        var specB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(body.Spec));
+        // ★ SEAL the spec + any typed credentials under a FRESH per-run AES-256 key, and write the ciphertext
+        //   to the private {token}.payload blob. The key never touches the DB and is not CRED_ENC_KEY.
+        var sealedPayload = SandboxPayload.Seal(body.Spec, credentials);
+        if (!await _payloads.WriteAsync(token, sealedPayload.Ciphertext, ct))
+        {
+            // ★ FAIL BEFORE STARTING. Starting the job now would run it with a key but no ciphertext, and the
+            //   sandbox fails closed on exactly that — so this would burn a job execution to reach the same
+            //   outcome, minus the clear error. The message is generic: it must not hint at credential content.
+            row.Status = "failed";
+            row.CompletedAt = DateTimeOffset.UtcNow;
+            row.Error = "could not stage the preview payload";
+            await _db.SaveChangesAsync(ct);
+            return ApiResults.ServiceUnavailable("Could not stage the preview — try again.");
+        }
+
+        // ★ Start the SANDBOX job. The env override now carries ONLY the per-run key + the token + the target —
+        //   NO SW_SANDBOX_SPEC_B64, and no credential. Everything here is safe to see in ACA execution history:
+        //   the key decrypts nothing without the blob (which the sandbox deletes on read), the token is a random
+        //   handle already in audit_log, and the target is the user's own non-prod URL.
+        //   ★ NON-WIDENING, UNCHANGED: the caller still passes LITERAL keys with values only. The container's
+        //   image / command / args / resources still come from the GET'd job template (ArmRunnerJobTrigger), so
+        //   this cannot alter what runs — only what it reads.
         var started = await _runnerJob.StartWithEnvOverrideAsync(
             _jobOptions.SandboxJobName,
             _jobOptions.SandboxContainerName,
             new Dictionary<string, string>
             {
-                ["SW_SANDBOX_SPEC_B64"] = specB64,
+                ["SW_SANDBOX_CRED_KEY"] = sealedPayload.KeyBase64,
                 ["SW_SANDBOX_TARGET_URL"] = targetUrl,
                 ["SW_SANDBOX_RESULT_TOKEN"] = token,
             },
@@ -152,6 +255,10 @@ public class PreviewFunctions
 
         if (!started)
         {
+            // ★ The job never started, so nothing will ever read (and therefore delete) the payload. Clean it up
+            //   NOW rather than leaving ciphertext to the ~1-day lifecycle floor while its key sits in this
+            //   failed execution's history. Best-effort: a failed delete still leaves the lifecycle backstop.
+            await _payloads.DeleteAsync(token, ct);
             row.Status = "failed";
             row.CompletedAt = DateTimeOffset.UtcNow;
             row.Error = "could not start the sandbox job";
@@ -196,6 +303,18 @@ public class PreviewFunctions
             //   (closed tab / job died). Flip it to 'timeout' so it stops holding a concurrency slot forever.
             if (DateTimeOffset.UtcNow - row.RequestedAt > RunningStaleAfter)
             {
+                // ★ ORPHANED-PAYLOAD SWEEP (the polled case). The sandbox deletes {token}.payload on read, so
+                //   normally there is nothing here. A preview that DIED between our upload and that read
+                //   (replica eviction, image-pull failure, the 180s replicaTimeout) leaves ciphertext behind,
+                //   and the only other cleanup is the lifecycle rule, whose floor is ~1 DAY
+                //   (daysAfterCreationGreaterThan is typed Integer — no fractional days — and a policy edit
+                //   takes up to 24h to take effect) while the run's key sits in execution history permanently.
+                //   ★ THIS BRANCH ONLY FIRES IF THE CLIENT POLLS, so on its own it does NOT cover an abandoned
+                //   tab — which is the likeliest way a preview is orphaned. SweepOrphanedPayloadsAsync on the
+                //   CREATE path is what actually closes that; this is the fast path for a client still
+                //   watching. Best-effort: a failed delete leaves the lifecycle backstop and must not block
+                //   the status transition.
+                await _payloads.DeleteAsync(token, ct);
                 row.Status = "timeout";
                 row.CompletedAt = DateTimeOffset.UtcNow;
                 row.Error = "no result within the sandbox timeout window";
@@ -205,6 +324,10 @@ public class PreviewFunctions
             return ApiResults.Ok(new PreviewStatusDto(token, "running", null)); // still in flight
         }
 
+        // Terminal-success sweep too: the sandbox should already have deleted the payload on read, so this is
+        // a belt-and-braces no-op that costs one idempotent DeleteIfExists and closes the case where the job
+        // wrote its result but died before (or while) deleting.
+        await _payloads.DeleteAsync(token, ct);
         row.Status = "done";
         row.CompletedAt = DateTimeOffset.UtcNow;
         await _db.SaveChangesAsync(ct);

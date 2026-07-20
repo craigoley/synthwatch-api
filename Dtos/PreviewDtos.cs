@@ -5,7 +5,23 @@ namespace SynthWatch.Api.Dtos;
 /// <summary>POST /api/preview body — the uploaded spec + an optional non-prod/public target.</summary>
 public sealed record CreatePreviewRequest(
     [property: JsonPropertyName("spec")] string? Spec,
-    [property: JsonPropertyName("targetUrl")] string? TargetUrl);
+    [property: JsonPropertyName("targetUrl")] string? TargetUrl,
+    [property: JsonPropertyName("credentials")] CreatePreviewCredentials? Credentials = null);
+
+/// <summary>
+/// OPTIONAL per-run credentials the user typed in the Tests UI, so a preview can drive a login-gated flow.
+///
+/// ★ NEVER PERSISTED. These are sealed into the ephemeral {token}.payload blob (deleted on read by the
+/// sandbox) and are absent from sandbox_preview (which stores spec_sha256 only), from audit_log (which
+/// records {specSha256, targetUrl} only), from the ARM start body, and from every log and exception path.
+///
+/// ★ <c>VercelBypassToken</c> is USER-PASTED, never server-injected from the platform's own
+/// VERCEL_BYPASS_TOKEN — see <see cref="SynthWatch.Api.Infrastructure.SandboxPayload.Credentials"/> for why.
+/// </summary>
+public sealed record CreatePreviewCredentials(
+    [property: JsonPropertyName("username")] string? Username,
+    [property: JsonPropertyName("password")] string? Password,
+    [property: JsonPropertyName("vercelBypassToken")] string? VercelBypassToken);
 
 /// <summary>202 — the preview was enqueued + the sandbox job started. Poll GET /api/preview/{token}.</summary>
 public sealed record CreatePreviewAcceptedDto(
