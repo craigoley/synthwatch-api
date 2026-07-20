@@ -812,8 +812,14 @@ public class ReportsFunctions
         var vitals = grouped
             ? await _db.VitalsReport.FromSql(
                 $@"WITH mwx AS (
-                     SELECT r.id, r.check_id, r.status FROM runs r
-                     WHERE r.started_at >= (CURRENT_DATE - {offset})::timestamptz AND r.status <> 'running'
+                     -- ★ latency_sample (runner 0092): pass/warn + NON-sandbox — the SAME real-measured-sample
+                     -- predicate as the latency CTEs above (a web-vital is a real measured value too). Drops
+                     -- sandbox test-sends so a manual test at an outlier LCP can't move the reported p75, and
+                     -- KEEPS confirmations (a confirmation's vitals are a real measurement — the DELIBERATE
+                     -- difference from countable_run; see the runner view comment). The pass/warn filter lives
+                     -- in the view now, so the `status <> 'running'` guard is gone.
+                     SELECT r.id, r.check_id, r.status FROM latency_sample r
+                     WHERE r.started_at >= (CURRENT_DATE - {offset})::timestamptz
                        AND NOT EXISTS (SELECT 1 FROM maintenance_windows mw
                           WHERE (mw.check_id = r.check_id OR mw.check_id IS NULL)
                             AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at)
@@ -834,8 +840,14 @@ public class ReportsFunctions
                    GROUP BY GROUPING SETS ((ct.value, mwx.check_id), (ct.value))").AsNoTracking().ToListAsync(ct)
             : await _db.VitalsReport.FromSql(
                 $@"WITH mwx AS (
-                     SELECT r.id, r.check_id, r.status FROM runs r
-                     WHERE r.started_at >= (CURRENT_DATE - {offset})::timestamptz AND r.status <> 'running'
+                     -- ★ latency_sample (runner 0092): pass/warn + NON-sandbox — the SAME real-measured-sample
+                     -- predicate as the latency CTEs above (a web-vital is a real measured value too). Drops
+                     -- sandbox test-sends so a manual test at an outlier LCP can't move the reported p75, and
+                     -- KEEPS confirmations (a confirmation's vitals are a real measurement — the DELIBERATE
+                     -- difference from countable_run; see the runner view comment). The pass/warn filter lives
+                     -- in the view now, so the `status <> 'running'` guard is gone.
+                     SELECT r.id, r.check_id, r.status FROM latency_sample r
+                     WHERE r.started_at >= (CURRENT_DATE - {offset})::timestamptz
                        AND NOT EXISTS (SELECT 1 FROM maintenance_windows mw
                           WHERE (mw.check_id = r.check_id OR mw.check_id IS NULL)
                             AND r.started_at >= mw.starts_at AND r.started_at < mw.ends_at)

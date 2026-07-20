@@ -2039,6 +2039,15 @@ public class IntegrationTests
                   VALUES (web_id,'pass',(CURRENT_DATE-1)::timestamptz + interval '6 hours',(CURRENT_DATE-1)::timestamptz + interval '6 hours',200) RETURNING id INTO rid;
                 INSERT INTO run_metrics (run_id,lcp_ms,fcp_ms,ttfb_ms,cls) VALUES (rid,1200,800,150,0.05);
               END LOOP;
+              -- ★ WEB-VITALS latency_sample prove-can-fail: 5 SANDBOX test-sends of a slow page (LCP 999999).
+              -- The vitals CTEs now read latency_sample (NOT sandbox), so these are excluded and lcp_p75 stays
+              -- 1200; the pre-fix raw-runs read would let 5 top-quartile outliers drag p75 to ~999999 (a single
+              -- outlier only reaches p90+, so it takes ≥5 of 15 to move p75) and red the assertion below.
+              FOR i IN 1..5 LOOP
+                INSERT INTO runs (check_id,status,started_at,finished_at,duration_ms,sandbox)
+                  VALUES (web_id,'pass',(CURRENT_DATE-1)::timestamptz + interval '6 hours',(CURRENT_DATE-1)::timestamptz + interval '6 hours',200,true) RETURNING id INTO rid;
+                INSERT INTO run_metrics (run_id,lcp_ms,fcp_ms,ttfb_ms,cls) VALUES (rid,999999,800,150,0.05);
+              END LOOP;
             END $$;
             """);
         try
@@ -2085,7 +2094,10 @@ public class IntegrationTests
             Assert.Null(pPlatform.WebVitals);
             var pWeb = perf.Groups.Single(g => g.Group == "web");
             Assert.NotNull(pWeb.WebVitals);
+            // ★ vitals sandbox prove-can-fail: 10 real @1200 + 5 sandbox @999999. The vitals CTEs read
+            //   latency_sample → sandbox excluded → p75 stays 1200; the pre-fix raw-runs read would give ~999999.
             Assert.Equal(1200, pWeb.WebVitals!.LcpP75Ms);
+            Assert.Equal(10, pWeb.WebVitals!.SampleCount); // only the 10 real vitals samples counted, not 15
             Assert.NotEmpty(pPlatform.Series);   // daily latency trend present
 
             // Ungrouped → one fleet group (group=null).
