@@ -31,13 +31,19 @@ Usage: assert-tests-ran.py <path-to.trx>
 """
 import sys
 
-# ★ nosemgrep(use-defused-xml): stdlib ElementTree is used deliberately, NOT defusedxml. The only input
-#   this script ever parses is ./trx/all.trx — an artifact `dotnet test` produced moments earlier in THIS
-#   job, from a checkout, on an ephemeral runner. It is not attacker-supplied and never crosses a trust
-#   boundary. defusedxml is a pip dependency the runner does not preinstall, so pulling it in would add a
-#   network install to a CI guard whose entire job is to be more reliable than the thing it checks.
-#   If this ever parses a trx from an untrusted source, switch to defusedxml.
-import xml.etree.ElementTree as ET  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
+# ★ defusedxml, not stdlib ElementTree — and NOT imported for ParseError either: the rule flags the
+#   `import xml.etree.ElementTree` line itself, so this module must not reference stdlib xml at all.
+#   The input here is a trx `dotnet test` produced seconds
+#   earlier in the SAME job, so it is not attacker-supplied — but Semgrep's use-defused-xml rule is a
+#   required gate in this repo (ci-gate blocks on Semgrep OSS), and inline `# nosemgrep` does NOT clear
+#   it: semgrep marks the finding `suppressions: [{kind: inSource}]` in its SARIF and GitHub code
+#   scanning raises the alert anyway. So satisfy the rule for real rather than suppress it.
+#   Installed by the workflow step (`pip install defusedxml`); locally, `pip install defusedxml`.
+try:
+    from defusedxml.ElementTree import ParseError, parse as xml_parse
+except ImportError:  # pragma: no cover - actionable message beats a bare traceback
+    print("::error::defusedxml is not installed — run: pip install defusedxml==0.7.1")
+    sys.exit(1)
 
 # Test classes whose tests REQUIRE the Postgres fixture ([Collection("postgres")]). Keep in sync with
 # the classes carrying that attribute — a class added there and not here is simply unguarded, not broken.
@@ -62,9 +68,9 @@ def main(argv):
     path = argv[1]
 
     try:
-        # nosemgrep: python.lang.security.use-defused-xml-parse.use-defused-xml-parse — see import note.
-        root = ET.parse(path).getroot()  # nosemgrep
-    except (OSError, ET.ParseError) as exc:
+        root = xml_parse(path).getroot()
+    # ValueError covers defusedxml's DefusedXmlException family (EntitiesForbidden, DTDForbidden, …).
+    except (OSError, ParseError, ValueError) as exc:
         print(f"::error::could not read/parse the trx at {path}: {exc}")
         return 1
 

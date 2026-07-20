@@ -61,6 +61,12 @@ jobs:
       #   a whole-suite "zero skips" rule is permanently red. See scripts/assert-tests-ran.py for the full
       #   post-mortem of the three separate bugs in the grep-based guard this replaces (chief among them:
       #   a TRX <Counters> element has no `skipped` attribute at all — skips land in `notExecuted`).
+      # defusedxml for the guard's trx parse. Pinned, and `if: always()` so a failing suite still gets
+      # its silent-skip verdict rather than being masked by a missing dependency.
+      - name: Install guard deps
+        if: always()
+        run: pip install --quiet --disable-pip-version-check defusedxml==0.7.1
+
       - name: Assert the DB-backed tests actually RAN (no silent skip)
         run: python3 scripts/assert-tests-ran.py ./trx/all.trx
 
