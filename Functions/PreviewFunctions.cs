@@ -83,7 +83,10 @@ public class PreviewFunctions
     private const int MaxSweepPerRequest = 10;
 
     /// <summary>Trim + drop empty credential fields; return null when nothing usable remains, so an
-    /// uncredentialed preview stays byte-identical to the pre-feature behaviour end to end.</summary>
+    /// uncredentialed preview carries NO credentials node at all — not empty strings the runner would then
+    /// have to normalize away. (It is NOT "byte-identical to the pre-feature behaviour": this PR moves the
+    /// spec off SW_SANDBOX_SPEC_B64 for every preview, credentialed or not. What is unchanged is the
+    /// user-visible behaviour and the runner's non-sensitive treatment — raw trace, screenshot kept.)</summary>
     private static SandboxPayload.Credentials? NormalizeCredentials(CreatePreviewCredentials? c)
     {
         if (c is null) return null;
@@ -168,8 +171,9 @@ public class PreviewFunctions
             return ApiResults.BadRequest("targetUrl must be an absolute http(s) URL.");
 
         // ★ OPTIONAL per-run credentials. Normalized to null when nothing usable was sent, so an uncredentialed
-        //   POST produces byte-identical downstream behaviour to before this feature existed (the runner keys
-        //   its whole `sensitive` treatment off "did any credential arrive?").
+        //   POST sends NO credentials node — the runner keys its whole `sensitive` treatment off "did any
+        //   credential arrive?", and an empty-string field would read as "yes" and silently make the run
+        //   sensitive (screenshot suppressed) for a credential that does not exist.
         var credentials = NormalizeCredentials(body.Credentials);
         if (credentials is not null && !CredentialsWithinBounds(credentials))
             return ApiResults.BadRequest($"Each credential field must be at most {MaxCredentialFieldChars} characters.");

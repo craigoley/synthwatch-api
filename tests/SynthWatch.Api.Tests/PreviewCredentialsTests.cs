@@ -408,7 +408,11 @@ public class PreviewCredentialsTests
     }
 
     [SkippableFact]
-    public async Task Uncredentialed_preview_behaves_as_before_the_feature()
+    // ★ Named for what it actually asserts. The previous name ("behaves as before the feature") was
+    //   contradicted by its own first assertion — SW_SANDBOX_SPEC_B64 is gone for EVERY preview now, which is
+    //   precisely not-as-before. What holds is that no credentials node is sent, so the runner keeps its
+    //   non-sensitive treatment.
+    public async Task Uncredentialed_preview_sends_no_credentials_node_and_stays_non_sensitive()
     {
         Skip.IfNot(_pg.Available, _pg.SkipReason);
         await using var db = _pg.NewDbContext();
