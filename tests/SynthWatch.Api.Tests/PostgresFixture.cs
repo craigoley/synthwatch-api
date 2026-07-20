@@ -36,6 +36,14 @@ public sealed class PostgresFixture : IAsyncLifetime
     private string _connectionString = "";
     /// <summary>True when the DB came from DATABASE_URL/TEST_DATABASE_URL rather than a fresh container.</summary>
     private bool _persistent;
+    private readonly string? _urlOverride;
+
+    public PostgresFixture() { }
+
+    /// <summary>Test seam: supply the URL directly instead of reading the environment, so the
+    /// PROVIDED-URL-MUST-BE-REACHABLE contract below can be pinned without mutating process env
+    /// (which races under parallel collections). See PostgresFixtureContractTests.</summary>
+    internal PostgresFixture(string? urlOverride) => _urlOverride = urlOverride;
 
     /// <summary>The live container's connection string — for tests that need an NpgsqlDataSource (e.g. the
     /// isolated-context audit write). Only valid once <see cref="Available"/> is true.</summary>
@@ -88,7 +96,8 @@ public sealed class PostgresFixture : IAsyncLifetime
     {
         // TEST_DATABASE_URL wins so a developer can point the SUITE somewhere without disturbing a
         // DATABASE_URL their app/tooling is already using.
-        var url = Environment.GetEnvironmentVariable("TEST_DATABASE_URL")
+        var url = _urlOverride
+                  ?? Environment.GetEnvironmentVariable("TEST_DATABASE_URL")
                   ?? Environment.GetEnvironmentVariable("DATABASE_URL");
         if (!string.IsNullOrWhiteSpace(url))
         {
@@ -138,12 +147,47 @@ public sealed class PostgresFixture : IAsyncLifetime
         return builder.ConnectionString;
     }
 
+    /// <summary>
+    /// ★ THE CONTRACT — A PROVIDED URL MUST BE REACHABLE. If DATABASE_URL/TEST_DATABASE_URL is set (or a
+    /// url was passed to the test-seam ctor), an unreachable Postgres is a HARD FAILURE, never a skip:
+    /// this method throws and xUnit fails every test in the "postgres" collection. Skipping is legitimate
+    /// for EXACTLY ONE case — no URL AND no Docker — i.e. a local dev who configured neither.
+    ///
+    /// ★ WHY IT MATTERS THAT THIS IS EXPLICIT. The behavior was already correct before this was written
+    /// down, but only INCIDENTALLY: nothing wrapped the OpenAsync call, so the exception escaped by
+    /// default. A single defensive try/catch here — the kind someone adds to "fix flakiness" — would
+    /// silently convert a RED suite into a green-with-skips one, which is precisely the silent-skip class
+    /// that shipped four never-executed tests (see the class summary) and that #279's trx guard exists to
+    /// catch after the fact. A failure that cannot be produced beats a guard that parses output for it, so
+    /// the contract is stated here and pinned by PostgresFixtureContractTests. Do not catch-and-skip.
+    /// </summary>
     public async Task InitializeAsync()
     {
         var resolved = await ResolveConnectionStringAsync();
-        if (resolved is null) return; // SkipReason already set
+        if (resolved is null) return; // the ONE skip case: no URL and no Docker. SkipReason already set.
         _connectionString = resolved;
 
+        try
+        {
+            await BootstrapAsync();
+        }
+        // Rethrow-with-context ONLY, and only on the provided-URL path — never swallow, never set
+        // SkipReason. The wrapper exists to turn a bare Npgsql socket stack into an actionable message;
+        // on the Testcontainers path the raw error is already unambiguous (the container just started).
+        catch (Exception ex) when (_persistent)
+        {
+            throw new InvalidOperationException(
+                $"A Postgres URL was provided but is not usable: {ex.GetType().Name}: {ex.Message}\n" +
+                "DATABASE_URL/TEST_DATABASE_URL being set means 'use THIS Postgres' — so this is a hard " +
+                "failure, NOT a skip. Start the Postgres it points at, correct the URL, or unset it to " +
+                "fall back to Testcontainers. (Skipping is only for no-URL-and-no-Docker.)", ex);
+        }
+        Available = true;
+    }
+
+    /// <summary>Connect, reset (persistent only), apply the schema snapshot, seed. Any failure propagates.</summary>
+    private async Task BootstrapAsync()
+    {
         // Postgres is up: schema/seed errors should SURFACE (not be swallowed as a skip).
         var schema = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "fixtures", "schema.sql"));
         await using (var conn = new NpgsqlConnection(_connectionString))
@@ -173,7 +217,6 @@ public sealed class PostgresFixture : IAsyncLifetime
             await using (var seedCommand = new NpgsqlCommand(SeedSql, conn))
                 await seedCommand.ExecuteNonQueryAsync();
         }
-        Available = true;
     }
 
     public SynthWatchDbContext NewDbContext()
