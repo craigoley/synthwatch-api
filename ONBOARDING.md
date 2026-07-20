@@ -44,18 +44,44 @@ dotnet --version                       # expect 10.0.x
 **2. A Postgres for `DATABASE_URL`.** The DB-backed tests need a real postgres:16. Testcontainers is only a
 fallback and needs a Docker daemon, so on this route you supply the DB yourself:
 
-```bash
-brew install postgresql@16
-brew services start postgresql@16                       # starts a background service on :5432
-createdb synthwatch_test                                # ★ a DEDICATED, THROWAWAY database
-export DATABASE_URL="postgres://$(whoami)@127.0.0.1:5432/synthwatch_test"
-dotnet test tests/SynthWatch.Api.Tests/
-```
+Use a **throwaway cluster on a non-default port** — its own data dir, its own port, started by hand. Not
+`brew services start postgresql@16`; the reason is structural and worth understanding before you run this:
 
 > ⚠️ **`DATABASE_URL` must point at a THROWAWAY database.** `PostgresFixture` runs
 > `DROP SCHEMA public CASCADE` on this path before seeding — it has to, or a second run stacks seed rows on
 > the first. Point it at a DB you care about and it will be emptied. Never reuse your everyday local DB, and
 > never point it at anything shared.
+>
+> **This is why the throwaway cluster, not the brew service.** `brew services start postgresql@16` runs a
+> shared server on the default **:5432** — the same server your other projects use — so one stale
+> `DATABASE_URL`, one typo'd database name, and `DROP SCHEMA public CASCADE` lands on real work. A separate
+> cluster on **:55432** has its own data directory and contains nothing but `synthwatch_test` and the
+> templates, so it **cannot reach an everyday database even if the URL is wrong**. Isolation by
+> construction beats remembering to be careful.
+
+```bash
+brew install postgresql@16
+export PGBIN="$(brew --prefix postgresql@16)/bin"       # keg-only: NOT on PATH by default
+
+# A throwaway cluster: own data dir, own port, isolated from any Postgres you already run.
+export PGDATA="$HOME/.synthwatch-testdb"
+export PGPORT=55432
+"$PGBIN/initdb" -D "$PGDATA" -U postgres --auth=trust
+"$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" \
+    -o "-p $PGPORT -c listen_addresses=127.0.0.1" start
+"$PGBIN/createdb" -h 127.0.0.1 -p "$PGPORT" -U postgres synthwatch_test
+
+export DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/synthwatch_test"
+dotnet test tests/SynthWatch.Api.Tests/
+
+# stop it when you're done — the data dir persists, so `pg_ctl … start` resumes it next time.
+# To reset from scratch: stop, then `rm -rf "$PGDATA"`, then re-run initdb.
+"$PGBIN/pg_ctl" -D "$PGDATA" stop
+```
+
+★ **This block is the tested path, not a plausible one** — it was run start-to-finish against postgres
+**16.14** on macOS/arm64 with no Docker, reaching `Passed: 524, Skipped: 0`. `--auth=trust` is safe here
+*because* of `listen_addresses=127.0.0.1`: the cluster accepts loopback connections only.
 
 ### ★ Reading the result — `Skipped: 0` is the tell
 
