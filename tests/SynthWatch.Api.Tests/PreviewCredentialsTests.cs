@@ -130,6 +130,20 @@ public class PreviewCredentialsTests
         }
     }
 
+    /// <summary>
+    /// Assert a 202 and return the token.
+    /// ★ NOT Assert.IsType&lt;AcceptedResult&gt;: ApiResults.Accepted returns a plain
+    /// <see cref="ObjectResult"/> with StatusCode 202, so the exact-type assertion failed on every one of
+    /// these tests. They never caught it locally because they skip without Docker — "passed locally" meant
+    /// nothing for the DB-backed set, and the first real execution was in CI.
+    /// </summary>
+    private static string AcceptedToken(IActionResult result)
+    {
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status202Accepted, obj.StatusCode);
+        return Assert.IsType<CreatePreviewAcceptedDto>(obj.Value).Token;
+    }
+
     private static HttpRequest AuthJsonReq(string token, object body)
     {
         var ctx = new DefaultHttpContext();
@@ -178,8 +192,7 @@ public class PreviewCredentialsTests
                 credentials = new { username = SentinelUser, password = Sentinel, vercelBypassToken = SentinelBypass },
             }), default);
 
-            var accepted = Assert.IsType<AcceptedResult>(result);
-            var token = Assert.IsType<CreatePreviewAcceptedDto>(accepted.Value).Token;
+            var token = AcceptedToken(result);
 
             // ── 1. THE ARM BODY. This is what ACA copies verbatim into job execution history. ──
             Assert.NotNull(job.LastEnv);
@@ -213,7 +226,11 @@ public class PreviewCredentialsTests
             Assert.Contains(row.SpecSha256, afterJson, StringComparison.Ordinal);
 
             // ── 4. THE PAYLOAD IS THE ONLY CARRIER — and it is CIPHERTEXT, not plaintext. ──
-            Assert.Equal(["write"], store.Events);
+            // ★ Scoped to THIS token, not exact-equality on Events. The create path now runs a GLOBAL orphan
+            //   sweep, so a stray abandoned row from any other test would add a "delete" and break a
+            //   whole-list assertion for reasons unrelated to what this test is about.
+            Assert.Contains("write", store.Events);
+            Assert.True(store.Live.ContainsKey(token), "the ciphertext must be staged for this run");
             var ciphertext = store.Live[token];
             Assert.StartsWith("v1:", ciphertext, StringComparison.Ordinal);
             Assert.DoesNotContain(Sentinel, ciphertext, StringComparison.Ordinal);
@@ -244,9 +261,8 @@ public class PreviewCredentialsTests
             var store = new FakePayloadStore();
             var fn = Fn(db, new AuditScope(), job, store);
 
-            var accepted = Assert.IsType<AcceptedResult>(await fn.CreatePreview(
+            var token = AcceptedToken(await fn.CreatePreview(
                 AuthJsonReq(tok, new { spec = "test('t', async () => {});", credentials = new { password = Sentinel } }), default));
-            var token = Assert.IsType<CreatePreviewAcceptedDto>(accepted.Value).Token;
             Assert.True(store.Live.ContainsKey(token), "the ciphertext must exist while the run is in flight");
 
             // Age the row past RunningStaleAfter so the GET takes the stale-sweep branch (the crash case: the
@@ -261,7 +277,8 @@ public class PreviewCredentialsTests
             // ★ THE SWEEP: the orphaned ciphertext is gone — not left to the ~1-day lifecycle floor while its
             //   key sits in ACA execution history permanently.
             Assert.False(store.Live.ContainsKey(token), "the orphaned payload must be swept on the stale transition");
-            Assert.Equal(["write", "delete"], store.Events);
+            // Scoped rather than exact-equality — see the note in the persistence test (global orphan sweep).
+            Assert.Contains("delete", store.Events);
         }
         finally
         {
@@ -328,7 +345,7 @@ public class PreviewCredentialsTests
             // ★ The job never started, so nothing will ever read (and delete) the payload. It must be cleaned
             //   up NOW rather than left to the ~1-day lifecycle floor while its key sits in the failed
             //   execution's ARM history.
-            Assert.Equal(["write", "delete"], store.Events);
+            Assert.Contains("delete", store.Events);
             Assert.Empty(store.Live);
             var row = await db.SandboxPreviews.AsNoTracking().FirstAsync(p => p.ActorEmail == email);
             Assert.Equal("failed", row.Status);
@@ -356,9 +373,8 @@ public class PreviewCredentialsTests
             var fn = Fn(db, new AuditScope(), job, store);
 
             // Run one preview, then ABANDON it — no polling at all, which is what a closed tab looks like.
-            var first = Assert.IsType<AcceptedResult>(await fn.CreatePreview(
+            var abandoned = AcceptedToken(await fn.CreatePreview(
                 AuthJsonReq(tok, new { spec = "test('a', async () => {});", credentials = new { password = Sentinel } }), default));
-            var abandoned = Assert.IsType<CreatePreviewAcceptedDto>(first.Value).Token;
             Assert.True(store.Live.ContainsKey(abandoned));
 
             await db.Database.ExecuteSqlInterpolatedAsync(
@@ -424,9 +440,8 @@ public class PreviewCredentialsTests
             var store = new FakePayloadStore();
             var fn = Fn(db, new AuditScope(), job, store);
 
-            var accepted = Assert.IsType<AcceptedResult>(await fn.CreatePreview(
+            var token = AcceptedToken(await fn.CreatePreview(
                 AuthJsonReq(tok, new { spec = "test('t', async () => {});" }), default));
-            var token = Assert.IsType<CreatePreviewAcceptedDto>(accepted.Value).Token;
 
             // Same three env keys, same bounds, same 202 — the only difference from a credentialed run is what
             // is inside the ciphertext, and here it carries NO credentials node at all (so the runner keeps
