@@ -84,8 +84,11 @@ public static class SandboxPayload
         }
         finally
         {
-            // Best-effort hygiene: drop the raw key bytes from this frame once encoded. (The base64 copy we
-            // return is what the caller needs; this just avoids leaving a second copy lying around.)
+            // Clears the raw byte array only. ★ It does NOT scrub key material generally, and the comment
+            // should not imply otherwise: Convert.ToBase64String already minted an immutable managed string
+            // holding the key (which we return by design), and the JSON plaintext string containing the
+            // password cannot be zeroed at all. This wipes the one copy that is cheap to wipe; the security
+            // of this design rests on the split channel and delete-on-read, not on memory hygiene.
             CryptographicOperations.ZeroMemory(key);
         }
     }

@@ -79,6 +79,8 @@ public class PreviewFunctions
     // A password / username / bypass token is short. Bounding them keeps the sealed payload small and stops a
     // caller using the credential fields as an unbounded side-channel now that the spec itself is capped.
     private const int MaxCredentialFieldChars = 1024;
+    // How many abandoned rows one request may sweep — bounds the create path's added work.
+    private const int MaxSweepPerRequest = 10;
 
     /// <summary>Trim + drop empty credential fields; return null when nothing usable remains, so an
     /// uncredentialed preview stays byte-identical to the pre-feature behaviour end to end.</summary>
@@ -88,10 +90,41 @@ public class PreviewFunctions
         var username = string.IsNullOrWhiteSpace(c.Username) ? null : c.Username.Trim();
         // ★ Password / token are NOT trimmed — leading or trailing whitespace can be significant in a real
         //   secret, and silently "fixing" it would make a correct credential fail authentication mysteriously.
-        var password = string.IsNullOrEmpty(c.Password) ? null : c.Password;
-        var bypassToken = string.IsNullOrEmpty(c.VercelBypassToken) ? null : c.VercelBypassToken;
+        //   But an ENTIRELY-whitespace value is not a credential, and accepting one is actively harmful: it
+        //   makes the run `sensitive` (suppressing the screenshot for a credential that authenticates
+        //   nothing) AND registers e.g. "   " as a redactor knownValue — whose only guard is a <3-char skip,
+        //   which three spaces clears — so every run of three spaces in the trace becomes <redacted> and the
+        //   diagnostic is shredded. Reject whitespace-only; preserve whitespace INSIDE a real value.
+        var password = string.IsNullOrWhiteSpace(c.Password) ? null : c.Password;
+        var bypassToken = string.IsNullOrWhiteSpace(c.VercelBypassToken) ? null : c.VercelBypassToken;
         if (username is null && password is null && bypassToken is null) return null;
         return new SandboxPayload.Credentials(username, password, bypassToken);
+    }
+
+    /// <summary>
+    /// Flip abandoned 'running' rows to 'timeout' and delete their payload ciphertext.
+    ///
+    /// ★ Called from the CREATE path, not just the poll, because an abandoned preview by definition has
+    /// nobody polling it. A row only reaches here once (the status flip is what excludes it next time), and
+    /// the delete is idempotent (DeleteIfExists), so a repeated sweep is cheap. Best-effort throughout: a
+    /// failed delete leaves the lifecycle rule as the backstop and must never block a new preview.
+    /// </summary>
+    private async Task SweepOrphanedPayloadsAsync(DateTimeOffset staleBefore, CancellationToken ct)
+    {
+        var abandoned = await _db.SandboxPreviews
+            .Where(p => p.Status == "running" && p.RequestedAt < staleBefore)
+            .OrderBy(p => p.RequestedAt)
+            .Take(MaxSweepPerRequest)
+            .ToListAsync(ct);
+        if (abandoned.Count == 0) return;
+        foreach (var row in abandoned)
+        {
+            await _payloads.DeleteAsync(row.Token, ct);
+            row.Status = "timeout";
+            row.CompletedAt = DateTimeOffset.UtcNow;
+            row.Error = "no result within the sandbox timeout window";
+        }
+        await _db.SaveChangesAsync(ct);
     }
 
     private static bool CredentialsWithinBounds(SandboxPayload.Credentials c) =>
@@ -153,6 +186,15 @@ public class PreviewFunctions
         var running = await _db.SandboxPreviews.CountAsync(p => p.Status == "running" && p.RequestedAt >= staleBefore, ct);
         if (running >= MaxConcurrentRunning)
             return ApiResults.TooManyRequests($"Too many previews running ({MaxConcurrentRunning}). Try again shortly.");
+
+        // ★ ORPHAN SWEEP ON THE CREATE PATH — the one that actually covers the abandoned case.
+        //   The sweep in GetPreview only fires IF THE CLIENT POLLS, so it cannot clean up the very scenario
+        //   it names: a closed tab means nobody polls, nothing sweeps, and the ciphertext survives to the
+        //   ~1-day lifecycle floor while its key sits in ACA execution history permanently — both halves of
+        //   the split reachable for ~24h. Sweeping here means the NEXT preview by ANY user cleans up earlier
+        //   orphans, so cleanup no longer depends on the abandoning client coming back.
+        //   Bounded to a handful of rows so a create never turns into a long scan.
+        await SweepOrphanedPayloadsAsync(staleBefore, ct);
 
         var specSha = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body.Spec))).ToLowerInvariant();
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
@@ -257,15 +299,17 @@ public class PreviewFunctions
             //   (closed tab / job died). Flip it to 'timeout' so it stops holding a concurrency slot forever.
             if (DateTimeOffset.UtcNow - row.RequestedAt > RunningStaleAfter)
             {
-                // ★ ORPHANED-PAYLOAD SWEEP. The sandbox deletes {token}.payload on read, so normally there is
-                //   nothing here. But a preview that DIED between our upload and that read (replica eviction,
-                //   image-pull failure, the 180s replicaTimeout) leaves ciphertext behind — and the only other
-                //   cleanup is the blob lifecycle rule, whose floor is ~1 DAY (daysAfterCreationGreaterThan is
-                //   typed Integer — no fractional days — and a policy edit takes up to 24h to take effect).
-                //   Meanwhile that run's key sits in ACA execution history permanently, so leaving the
-                //   ciphertext puts both halves of the split within reach of a two-grant actor for ~24h.
-                //   Sweeping here bounds that to RunningStaleAfter (5 minutes). Best-effort: a failed delete
-                //   still has the lifecycle rule behind it, and must not block the status transition.
+                // ★ ORPHANED-PAYLOAD SWEEP (the polled case). The sandbox deletes {token}.payload on read, so
+                //   normally there is nothing here. A preview that DIED between our upload and that read
+                //   (replica eviction, image-pull failure, the 180s replicaTimeout) leaves ciphertext behind,
+                //   and the only other cleanup is the lifecycle rule, whose floor is ~1 DAY
+                //   (daysAfterCreationGreaterThan is typed Integer — no fractional days — and a policy edit
+                //   takes up to 24h to take effect) while the run's key sits in execution history permanently.
+                //   ★ THIS BRANCH ONLY FIRES IF THE CLIENT POLLS, so on its own it does NOT cover an abandoned
+                //   tab — which is the likeliest way a preview is orphaned. SweepOrphanedPayloadsAsync on the
+                //   CREATE path is what actually closes that; this is the fast path for a client still
+                //   watching. Best-effort: a failed delete leaves the lifecycle backstop and must not block
+                //   the status transition.
                 await _payloads.DeleteAsync(token, ct);
                 row.Status = "timeout";
                 row.CompletedAt = DateTimeOffset.UtcNow;

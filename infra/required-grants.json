@@ -78,7 +78,8 @@
         "role": "Storage Blob Data Contributor",
         "roleId": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
         "scope": "sandboxContainer (synthwatch/infra/main.bicep)",
-        "reason": "Write {token}.payload (the encrypted spec+credentials the sandbox reads) and sweep orphaned payloads. REPLACED the read-only Blob Data Reader assignment: the payload channel exists because ACA persists a jobs/start env override verbatim in job execution history, so the spec and any typed credential cannot ride the env.",
+        "$status": "PENDING — declared in the runner repo's PR (feat/api-sandbox-payload-grant). NOT live until that deploys; until then SandboxPayloadStore.WriteAsync gets 403 and every preview returns 503. This block is documentation only: check-grant-coverage.mjs reads `azureRbac` alone, so nothing here can ever go red — do not read its presence as evidence the grant exists.",
+        "reason": "Write {token}.payload (the encrypted spec+credentials the sandbox reads) and sweep orphaned payloads. Replaces the read-only Blob Data Reader assignment on the same scope: the payload channel exists because ACA persists a jobs/start env override verbatim in job execution history, so the spec and any typed credential cannot ride the env.",
         "neededBy": "SandboxPayloadStore (POST /preview, GET /preview/{token} stale sweep)"
       },
       {

@@ -307,6 +307,107 @@ public class PreviewCredentialsTests
     }
 
     [SkippableFact]
+    public async Task A_failed_job_start_deletes_the_staged_payload()
+    {
+        Skip.IfNot(_pg.Available, _pg.SkipReason);
+        await using var db = _pg.NewDbContext();
+        const string tok = "swt_preview_failstart_editor", email = "failstart@preview.test";
+        await SeedEditorAsync(db, tok, email);
+        try
+        {
+            // ★ This path had NO coverage: FakeRunnerJob.Result was settable and nothing ever set it false,
+            //   so the cleanup line could be deleted and the whole suite stayed green.
+            var job = new FakeRunnerJob { Result = false };
+            var store = new FakePayloadStore();
+            var fn = Fn(db, new AuditScope(), job, store);
+
+            var result = await fn.CreatePreview(
+                AuthJsonReq(tok, new { spec = "test('t', async () => {});", credentials = new { password = Sentinel } }), default);
+
+            Assert.Equal(503, Assert.IsType<ObjectResult>(result).StatusCode);
+            // ★ The job never started, so nothing will ever read (and delete) the payload. It must be cleaned
+            //   up NOW rather than left to the ~1-day lifecycle floor while its key sits in the failed
+            //   execution's ARM history.
+            Assert.Equal(["write", "delete"], store.Events);
+            Assert.Empty(store.Live);
+            var row = await db.SandboxPreviews.AsNoTracking().FirstAsync(p => p.ActorEmail == email);
+            Assert.Equal("failed", row.Status);
+            Assert.DoesNotContain(Sentinel, row.Error ?? "", StringComparison.Ordinal);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sandbox_preview WHERE actor_email LIKE '%@preview.test'; " +
+                "DELETE FROM sessions WHERE email LIKE '%@preview.test'; DELETE FROM editors WHERE email LIKE '%@preview.test';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task An_abandoned_preview_is_swept_by_the_NEXT_preview_not_only_by_a_poll()
+    {
+        Skip.IfNot(_pg.Available, _pg.SkipReason);
+        await using var db = _pg.NewDbContext();
+        const string tok = "swt_preview_sweepcreate_editor", email = "sweepcreate@preview.test";
+        await SeedEditorAsync(db, tok, email);
+        try
+        {
+            var job = new FakeRunnerJob();
+            var store = new FakePayloadStore();
+            var fn = Fn(db, new AuditScope(), job, store);
+
+            // Run one preview, then ABANDON it — no polling at all, which is what a closed tab looks like.
+            var first = Assert.IsType<AcceptedResult>(await fn.CreatePreview(
+                AuthJsonReq(tok, new { spec = "test('a', async () => {});", credentials = new { password = Sentinel } }), default));
+            var abandoned = Assert.IsType<CreatePreviewAcceptedDto>(first.Value).Token;
+            Assert.True(store.Live.ContainsKey(abandoned));
+
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE sandbox_preview SET requested_at = now() - interval '10 minutes' WHERE token = {abandoned}");
+            db.ChangeTracker.Clear();
+
+            // ★ A DIFFERENT preview starts. Nobody ever polled the first one — if cleanup lived only in
+            //   GetPreview, that ciphertext would sit until the ~1-day lifecycle floor.
+            await fn.CreatePreview(AuthJsonReq(tok, new { spec = "test('b', async () => {});" }), default);
+
+            Assert.False(store.Live.ContainsKey(abandoned), "the abandoned payload must be swept by the next create");
+            var swept = await db.SandboxPreviews.AsNoTracking().FirstAsync(p => p.Token == abandoned);
+            Assert.Equal("timeout", swept.Status);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sandbox_preview WHERE actor_email LIKE '%@preview.test'; " +
+                "DELETE FROM sessions WHERE email LIKE '%@preview.test'; DELETE FROM editors WHERE email LIKE '%@preview.test';");
+        }
+    }
+
+    [Fact]
+    public void Whitespace_only_credentials_are_rejected_so_they_cannot_poison_the_redactor()
+    {
+        // ★ "   " used to survive: IsNullOrEmpty accepts it, so the run became `sensitive` (screenshot
+        //   suppressed for a credential that authenticates nothing) AND "   " was registered as a redactor
+        //   knownValue — whose only guard is a <3-char skip, which three spaces clears — shredding every run
+        //   of three spaces in the trace into <redacted>.
+        Assert.Null(NormalizeForTest(new CreatePreviewCredentials("  ", "   ", "\t")));
+
+        // ★ But whitespace INSIDE a real value is preserved — the reason password/token are never Trim()'d.
+        //   A secret whose leading space is silently eaten fails authentication for a mysterious reason.
+        var kept = NormalizeForTest(new CreatePreviewCredentials("user", " p a s s ", null));
+        Assert.NotNull(kept);
+        Assert.Equal(" p a s s ", kept!.Password);
+        Assert.Equal("user", kept.Username); // username IS trimmed — it is an identifier, not a secret
+        Assert.Null(kept.BypassToken);
+    }
+
+    /// <summary>Reaches NormalizeCredentials via the same public shape the endpoint uses.</summary>
+    private static SandboxPayload.Credentials? NormalizeForTest(CreatePreviewCredentials c)
+    {
+        var m = typeof(PreviewFunctions).GetMethod("NormalizeCredentials",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        return (SandboxPayload.Credentials?)m.Invoke(null, [c]);
+    }
+
+    [SkippableFact]
     public async Task Uncredentialed_preview_behaves_as_before_the_feature()
     {
         Skip.IfNot(_pg.Available, _pg.SkipReason);

@@ -84,6 +84,18 @@ public sealed class SandboxPayloadStore : ISandboxPayloadStore
             SandboxPayloadLog.WriteFailed(_logger, ex.Status, token, ex);
             return false;
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // ★ NOT just RequestFailedException. A TokenCredential failure (AuthenticationFailedException,
+            //   CredentialUnavailableException) or a socket/timeout error is not a service error, so it would
+            //   escape this method, propagate past the already-inserted 'running' row, and 500 the caller
+            //   WITHOUT a token — leaving a row nobody can ever poll, holding a concurrency slot for the full
+            //   stale window. Three of those and the global cap 429s everyone. Auth failure is the LIKELIER
+            //   failure mode while the Contributor grant is still landing, so it must return false (→ the row
+            //   is marked failed and the caller gets a clean 503) exactly like a 403 does.
+            SandboxPayloadLog.WriteFailedUnexpected(_logger, token, ex);
+            return false;
+        }
     }
 
     public async Task<bool> DeleteAsync(string token, CancellationToken ct)
@@ -100,6 +112,12 @@ public sealed class SandboxPayloadStore : ISandboxPayloadStore
         catch (RequestFailedException ex)
         {
             SandboxPayloadLog.DeleteFailed(_logger, ex.Status, token, ex);
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Same reasoning as WriteAsync: a credential/transport failure must not escape and 500 a poll.
+            SandboxPayloadLog.DeleteFailedUnexpected(_logger, token, ex);
             return false;
         }
     }
@@ -119,4 +137,12 @@ internal static partial class SandboxPayloadLog
     [LoggerMessage(EventId = 5112, Level = LogLevel.Error,
         Message = "sandbox payload storage is not configured (SandboxBlob:AccountName / StorageAccountName) — cannot start preview {Token}")]
     public static partial void NotConfigured(ILogger logger, string token);
+
+    [LoggerMessage(EventId = 5113, Level = LogLevel.Error,
+        Message = "sandbox payload write failed with a non-service error (credential/transport) for token {Token} — the preview will not start")]
+    public static partial void WriteFailedUnexpected(ILogger logger, string token, Exception ex);
+
+    [LoggerMessage(EventId = 5114, Level = LogLevel.Warning,
+        Message = "sandbox payload delete failed with a non-service error for token {Token} — ciphertext may persist until the lifecycle rule expires it")]
+    public static partial void DeleteFailedUnexpected(ILogger logger, string token, Exception ex);
 }
