@@ -56,19 +56,10 @@ jobs:
       #   executed, reported as "3 passed, 4 skipped" as though it were a clean run, and CI was their first
       #   real run — where all four failed. So a green "Test" job is NOT sufficient evidence the DB tests ran;
       #   assert it separately. If DATABASE_URL ever stops reaching the fixture, THIS is what goes red.
+      # ★ The predicate is scoped to DB-BACKED tests, not the whole suite: TraceSignalsGoldenParityTests
+      #   skips 2 tests BY DESIGN here (no runner checkout — the dedicated trace-parity job runs them), so
+      #   a whole-suite "zero skips" rule is permanently red. See scripts/assert-tests-ran.py for the full
+      #   post-mortem of the three separate bugs in the grep-based guard this replaces (chief among them:
+      #   a TRX <Counters> element has no `skipped` attribute at all — skips land in `notExecuted`).
       - name: Assert the DB-backed tests actually RAN (no silent skip)
-        run: |
-          set -euo pipefail
-          skipped=$(grep -o 'skipped="[0-9]*"' ./trx/all.trx | head -1 | tr -d 'a-z="')
-          total=$(grep -o 'total="[0-9]*"' ./trx/all.trx | head -1 | tr -d 'a-z="')
-          echo "suite: total=${total:-?} skipped=${skipped:-?}"
-          if [ -z "${total:-}" ] || [ "${total}" = "0" ]; then
-            echo "::error::could not read a test total from the trx — the results file or this parse is broken"
-            exit 1
-          fi
-          if [ "${skipped:-0}" != "0" ]; then
-            echo "::error::${skipped} test(s) SKIPPED. The DB-backed tests skip when the fixture cannot reach"
-            echo "::error::a Postgres — check the postgres service and DATABASE_URL. A green suite that skipped"
-            echo "::error::its DB tests is the exact failure this job exists to prevent."
-            exit 1
-          fi
+        run: python3 scripts/assert-tests-ran.py ./trx/all.trx
