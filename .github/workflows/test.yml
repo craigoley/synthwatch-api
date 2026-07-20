@@ -63,3 +63,11 @@ jobs:
       #   a TRX <Counters> element has no `skipped` attribute at all — skips land in `notExecuted`).
       - name: Assert the DB-backed tests actually RAN (no silent skip)
         run: python3 scripts/assert-tests-ran.py ./trx/all.trx
+
+      # ★ GUARD THE GUARD. The step above previously exited 1 on its own broken parse for its entire life —
+      #   which looks EXACTLY like it catching a real skip. This proves it still goes GREEN on a real suite
+      #   shape AND still goes RED on each failure mode (DB skips, total=0, unparseable/missing trx), so
+      #   "the guard is green" keeps meaning something. Runs regardless of the suite's outcome.
+      - name: Self-test the silent-skip guard (must-go-red)
+        if: always()
+        run: bash scripts/assert-tests-ran.selftest.sh

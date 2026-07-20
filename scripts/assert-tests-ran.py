@@ -30,7 +30,14 @@ A green "Test" job is therefore NOT evidence the DB tests ran; assert it separat
 Usage: assert-tests-ran.py <path-to.trx>
 """
 import sys
-import xml.etree.ElementTree as ET
+
+# ★ nosemgrep(use-defused-xml): stdlib ElementTree is used deliberately, NOT defusedxml. The only input
+#   this script ever parses is ./trx/all.trx — an artifact `dotnet test` produced moments earlier in THIS
+#   job, from a checkout, on an ephemeral runner. It is not attacker-supplied and never crosses a trust
+#   boundary. defusedxml is a pip dependency the runner does not preinstall, so pulling it in would add a
+#   network install to a CI guard whose entire job is to be more reliable than the thing it checks.
+#   If this ever parses a trx from an untrusted source, switch to defusedxml.
+import xml.etree.ElementTree as ET  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
 
 # Test classes whose tests REQUIRE the Postgres fixture ([Collection("postgres")]). Keep in sync with
 # the classes carrying that attribute — a class added there and not here is simply unguarded, not broken.
@@ -55,7 +62,8 @@ def main(argv):
     path = argv[1]
 
     try:
-        root = ET.parse(path).getroot()
+        # nosemgrep: python.lang.security.use-defused-xml-parse.use-defused-xml-parse — see import note.
+        root = ET.parse(path).getroot()  # nosemgrep
     except (OSError, ET.ParseError) as exc:
         print(f"::error::could not read/parse the trx at {path}: {exc}")
         return 1

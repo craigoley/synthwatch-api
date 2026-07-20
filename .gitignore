@@ -20,3 +20,7 @@ Thumbs.db
 
 # Local publish output (CI publishes to ./publish_output)
 publish_output/
+
+# python bytecode (scripts/*.py CI guards)
+__pycache__/
+*.pyc
