@@ -63,6 +63,40 @@
       "neededBy": "AcsEmailSender (auth / edit-access request flows)"
     }
   ],
+  "externalAzureRbac": {
+    "$comment": [
+      "★ API-MI Azure grants declared in the RUNNER repo (synthwatch/infra/main.bicep), NOT here.",
+      "They are scoped to resources that repo owns (the sandbox job, the sandbox blob container, the",
+      "artifacts account), so the assignment must live beside the resource. check-grant-coverage.mjs reads",
+      "only `azureRbac` above and parses only THIS repo's main.bicep — so these are invisible to it, and the",
+      "manifest was silently incomplete as the 'single source of truth' it claims to be. Documented here for",
+      "the same reason `postgres` is: one place lists everything, even what this repo cannot enforce.",
+      "NOT CI-ENFORCED from this repo (asserting them needs the runner repo's bicep or a live RBAC query)."
+    ],
+    "grants": [
+      {
+        "role": "Storage Blob Data Contributor",
+        "roleId": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+        "scope": "sandboxContainer (synthwatch/infra/main.bicep)",
+        "reason": "Write {token}.payload (the encrypted spec+credentials the sandbox reads) and sweep orphaned payloads. REPLACED the read-only Blob Data Reader assignment: the payload channel exists because ACA persists a jobs/start env override verbatim in job execution history, so the spec and any typed credential cannot ride the env.",
+        "neededBy": "SandboxPayloadStore (POST /preview, GET /preview/{token} stale sweep)"
+      },
+      {
+        "role": "Container Apps Jobs Operator",
+        "roleId": "b9a307c4-5aa3-4b52-ba60-2b17c136cd7b",
+        "scope": "sandboxJob (synthwatch/infra/main.bicep)",
+        "reason": "Start the synthwatch-sandbox job per preview.",
+        "neededBy": "ArmRunnerJobTrigger.StartWithEnvOverrideAsync (POST /preview)"
+      },
+      {
+        "role": "Storage Blob Delegator",
+        "roleId": "db58b8e5-c6ad-4a2a-8342-4190687cbf4a",
+        "scope": "artifactsStorage (synthwatch/infra/main.bicep)",
+        "reason": "Mint short-TTL user-delegation SAS URLs for the trace viewer.",
+        "neededBy": "BlobSasMinter (artifact SAS endpoints)"
+      }
+    ]
+  },
   "postgres": {
     "$comment": [
       "\u2605 NOW CI-ENFORCED (scripts/check-pg-grant-coverage.mjs) \u2014 this closes the gap the old comment named.",

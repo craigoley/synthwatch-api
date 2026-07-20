@@ -52,6 +52,11 @@ builder.Services.AddHttpClient();
 builder.Services.Configure<RunnerJobOptions>(builder.Configuration.GetSection("RunnerJob"));
 builder.Services.AddSingleton<IRunnerJobTrigger, ArmRunnerJobTrigger>();
 
+// The sandbox preview's {token}.payload channel — the encrypted {spec, credentials} the sandbox reads and
+// deletes, replacing the SW_SANDBOX_SPEC_B64 env override that ACA persists in job execution history.
+// Needs blobs/write + blobs/delete on the sandbox container (API MI, container-scoped Contributor).
+builder.Services.AddSingleton<SynthWatch.Api.Infrastructure.ISandboxPayloadStore, SynthWatch.Api.Infrastructure.SandboxPayloadStore>();
+
 // Trace AI Insights (slice 2): a typed HttpClient for the AOAI chat-completions REST call. Reuses the
 // SAME DefaultAzureCredential (registered above) for the cognitive-services token. INERT until AZURE_OPENAI_*
 // is configured (IsConfigured=false → the endpoint returns "not configured", never a 500).
