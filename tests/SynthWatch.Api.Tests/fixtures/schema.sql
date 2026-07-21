@@ -1418,7 +1418,7 @@ CREATE TABLE public.run_requests (
 -- At most one PENDING request per check (the coalesce the API relies on).
 CREATE UNIQUE INDEX run_requests_one_pending_per_check ON public.run_requests (check_id) WHERE (status = 'pending');
 
--- sandbox_preview (runner migration 0093) — the lifecycle + audit record for a spec preview-run
+-- sandbox_preview (runner migrations 0093, 0094) — the lifecycle + audit record for a spec preview-run
 -- (POST /api/preview). ★ Written by the API, NOT the sandbox job (the sandbox ACA job is DB-less). Stores the
 -- spec SHA-256, never the body. Mirrors runner db/schema.sql.
 CREATE TABLE public.sandbox_preview (
@@ -1433,6 +1433,9 @@ CREATE TABLE public.sandbox_preview (
     completed_at  timestamp with time zone,
     exit_code     integer,
     error         text,
+    -- 0094: per-run Tests-UI "Redact credentials from output" toggle. true = scrubbed (default);
+    -- false = the operator opted into raw output. Audit: who ran an UNREDACTED preview, and when.
+    redact_credentials boolean NOT NULL DEFAULT true,
     CONSTRAINT sandbox_preview_status_check CHECK (status IN ('running', 'done', 'failed', 'timeout'))
 );
 CREATE INDEX sandbox_preview_actor_idx ON public.sandbox_preview (actor_email, requested_at DESC);
