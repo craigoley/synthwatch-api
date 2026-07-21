@@ -126,6 +126,18 @@ public class PreviewCredentialsTests
             return Task.FromResult(true);
         }
 
+        public Task<bool> DeleteArtifactAsync(string token, string name, CancellationToken ct)
+        {
+            Events.Add($"delete-artifact:{name}");
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> DeleteResultJsonAsync(string token, CancellationToken ct)
+        {
+            Events.Add("delete-result-json");
+            return Task.FromResult(true);
+        }
+
         public readonly HashSet<string> LiveArtifacts = [];
     }
 
@@ -369,6 +381,10 @@ public class PreviewCredentialsTests
 
             await fn.SweepAbandonedPreviews(new Microsoft.Azure.Functions.Worker.TimerInfo(), default);
             Assert.DoesNotContain("delete-artifacts", store.Events);
+            // ★ And the terminal poll must NOT nuke the screenshot/trace blobs: the UI fetches those from
+            //   their own endpoints AFTER the poll returns `done`. Deleting them on the poll would 404 the
+            //   exact diagnostic the keep-the-screenshot change exists to restore (caught in review).
+            Assert.DoesNotContain(store.Events, e => e.StartsWith("delete-artifact:", StringComparison.Ordinal));
         }
         finally
         {

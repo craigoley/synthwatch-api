@@ -31,6 +31,14 @@ public interface ISandboxPayloadStore
     /// Idempotent; true only if every blob is gone (already-absent counts as gone).
     /// </summary>
     Task<bool> DeleteArtifactsAsync(string token, CancellationToken ct);
+
+    /// <summary>Delete ONE artifact ({token}/screenshot.png or {token}/trace.zip) — serve-once, per blob,
+    /// so fetching the screenshot does not destroy the trace the operator has not downloaded yet.</summary>
+    Task<bool> DeleteArtifactAsync(string token, string name, CancellationToken ct);
+
+    /// <summary>Delete only {token}.json — the polled result. Its stdout/steps carry the plaintext credential
+    /// on an unredacted run, and it has served its purpose once the terminal poll returns it.</summary>
+    Task<bool> DeleteResultJsonAsync(string token, CancellationToken ct);
 }
 
 /// <summary>
@@ -120,6 +128,29 @@ public sealed class SandboxPayloadStore : ISandboxPayloadStore
         var container = _config["SandboxBlob:Container"] ?? _jobOptions.SandboxContainerName;
         if (string.IsNullOrWhiteSpace(account)) return null;
         return new BlobClient(new Uri($"https://{account}.blob.core.windows.net/{container}/{relativePath}"), _credential);
+    }
+
+    public Task<bool> DeleteArtifactAsync(string token, string name, CancellationToken ct) =>
+        DeleteOneAsync($"{token}/{name}", token, ct);
+
+    public Task<bool> DeleteResultJsonAsync(string token, CancellationToken ct) =>
+        DeleteOneAsync($"{token}.json", token, ct);
+
+    private async Task<bool> DeleteOneAsync(string relativePath, string token, CancellationToken ct)
+    {
+        var blob = ResolvePath(relativePath);
+        if (blob is null) return false;
+        try
+        {
+            await blob.DeleteIfExistsAsync(DeleteSnapshotsOption.None, cancellationToken: ct);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best-effort: the timer sweep is the backstop, so a transient failure here is not fatal.
+            SandboxPayloadLog.DeleteFailedUnexpected(_logger, token, ex);
+            return false;
+        }
     }
 
     public async Task<bool> DeleteArtifactsAsync(string token, CancellationToken ct)
