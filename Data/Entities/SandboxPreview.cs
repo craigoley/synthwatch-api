@@ -19,4 +19,12 @@ public class SandboxPreview
     public DateTimeOffset? CompletedAt { get; set; }
     public int? ExitCode { get; set; }
     public string? Error { get; set; }
+
+    /// <summary>
+    /// Per-run "Redact credentials from output" toggle (runner migration 0094). true = credentials scrubbed
+    /// from trace/stdout/error/trace_signals (the default); false = the operator opted into RAW output.
+    /// ★ AUDIT: this is the record of WHO ran an unredacted preview and WHEN — optional redaction on a
+    /// code-execution surface is only defensible with a trail. Never nullable: absent ⇒ redacted.
+    /// </summary>
+    public bool RedactCredentials { get; set; } = true;
 }

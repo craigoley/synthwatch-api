@@ -19,6 +19,26 @@ public interface ISandboxPayloadStore
 
     /// <summary>Delete {token}.payload. Idempotent; false only on a real failure (absent counts as done).</summary>
     Task<bool> DeleteAsync(string token, CancellationToken ct);
+
+    /// <summary>
+    /// Delete the RESULT ARTIFACTS of a run — {token}.json, {token}/screenshot.png, {token}/trace.zip.
+    ///
+    /// ★ FOR REDACTION-OFF RUNS. Those artifacts contain the operator's credential in PLAINTEXT by design.
+    /// Showing it to the person who typed it is fine; leaving it in durable storage is what widens the
+    /// audience — any principal with container Read, for up to the 1-day blob-lifecycle FLOOR (Azure's
+    /// minimum granularity; there is no shorter rule available). So an OFF run's artifacts are deleted as
+    /// soon as they have been served, and swept on a timer if they are never served at all.
+    /// Idempotent; true only if every blob is gone (already-absent counts as gone).
+    /// </summary>
+    Task<bool> DeleteArtifactsAsync(string token, CancellationToken ct);
+
+    /// <summary>Delete ONE artifact ({token}/screenshot.png or {token}/trace.zip) — serve-once, per blob,
+    /// so fetching the screenshot does not destroy the trace the operator has not downloaded yet.</summary>
+    Task<bool> DeleteArtifactAsync(string token, string name, CancellationToken ct);
+
+    /// <summary>Delete only {token}.json — the polled result. Its stdout/steps carry the plaintext credential
+    /// on an unredacted run, and it has served its purpose once the terminal poll returns it.</summary>
+    Task<bool> DeleteResultJsonAsync(string token, CancellationToken ct);
 }
 
 /// <summary>
@@ -96,6 +116,64 @@ public sealed class SandboxPayloadStore : ISandboxPayloadStore
             SandboxPayloadLog.WriteFailedUnexpected(_logger, token, ex);
             return false;
         }
+    }
+
+    /// <summary>The three result blobs a run can leave behind, relative to the container.</summary>
+    private static string[] ArtifactPaths(string token) =>
+        [$"{token}.json", $"{token}/screenshot.png", $"{token}/trace.zip"];
+
+    private BlobClient? ResolvePath(string relativePath)
+    {
+        var account = _config["SandboxBlob:AccountName"] ?? _config["StorageAccountName"];
+        var container = _config["SandboxBlob:Container"] ?? _jobOptions.SandboxContainerName;
+        if (string.IsNullOrWhiteSpace(account)) return null;
+        return new BlobClient(new Uri($"https://{account}.blob.core.windows.net/{container}/{relativePath}"), _credential);
+    }
+
+    public Task<bool> DeleteArtifactAsync(string token, string name, CancellationToken ct) =>
+        DeleteOneAsync($"{token}/{name}", token, ct);
+
+    public Task<bool> DeleteResultJsonAsync(string token, CancellationToken ct) =>
+        DeleteOneAsync($"{token}.json", token, ct);
+
+    private async Task<bool> DeleteOneAsync(string relativePath, string token, CancellationToken ct)
+    {
+        var blob = ResolvePath(relativePath);
+        if (blob is null) return false;
+        try
+        {
+            await blob.DeleteIfExistsAsync(DeleteSnapshotsOption.None, cancellationToken: ct);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best-effort: the timer sweep is the backstop, so a transient failure here is not fatal.
+            SandboxPayloadLog.DeleteFailedUnexpected(_logger, token, ex);
+            return false;
+        }
+    }
+
+    public async Task<bool> DeleteArtifactsAsync(string token, CancellationToken ct)
+    {
+        var allGone = true;
+        foreach (var path in ArtifactPaths(token))
+        {
+            var blob = ResolvePath(path);
+            if (blob is null) return false;
+            try
+            {
+                await blob.DeleteIfExistsAsync(DeleteSnapshotsOption.None, cancellationToken: ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // ★ Best-effort per blob, and we keep going: a failure on the screenshot must not leave the
+                //   trace.zip (the bigger leak) behind. Returning false lets the caller keep the row eligible
+                //   for the timer sweep, which will retry.
+                SandboxPayloadLog.DeleteFailedUnexpected(_logger, token, ex);
+                allGone = false;
+            }
+        }
+        return allGone;
     }
 
     public async Task<bool> DeleteAsync(string token, CancellationToken ct)

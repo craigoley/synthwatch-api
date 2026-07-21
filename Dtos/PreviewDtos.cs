@@ -6,7 +6,13 @@ namespace SynthWatch.Api.Dtos;
 public sealed record CreatePreviewRequest(
     [property: JsonPropertyName("spec")] string? Spec,
     [property: JsonPropertyName("targetUrl")] string? TargetUrl,
-    [property: JsonPropertyName("credentials")] CreatePreviewCredentials? Credentials = null);
+    [property: JsonPropertyName("credentials")] CreatePreviewCredentials? Credentials = null,
+    /// <summary>
+    /// "Redact credentials from output" — per-run, editor/admin only. ★ DEFAULT TRUE, including when the
+    /// field is ABSENT: a client that has not been updated must not silently disable redaction. Only an
+    /// explicit `false` opts into raw output, and that choice is recorded in sandbox_preview + audit_log.
+    /// </summary>
+    [property: JsonPropertyName("redactCredentials")] bool? RedactCredentials = null);
 
 /// <summary>
 /// OPTIONAL per-run credentials the user typed in the Tests UI, so a preview can drive a login-gated flow.

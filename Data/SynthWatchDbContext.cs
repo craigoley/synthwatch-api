@@ -210,6 +210,9 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.CompletedAt).HasColumnName("completed_at");
             e.Property(x => x.ExitCode).HasColumnName("exit_code");
             e.Property(x => x.Error).HasColumnName("error");
+            // 0094 — the per-run redaction toggle. NOT NULL DEFAULT true in the DB, so an INSERT that omits
+            // it still lands as redacted; the API always sets it explicitly.
+            e.Property(x => x.RedactCredentials).HasColumnName("redact_credentials");
         });
 
         modelBuilder.Entity<AlertRoute>(e =>

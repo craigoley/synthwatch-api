@@ -52,7 +52,11 @@ public static class SandboxPayload
     /// <summary>The sealed envelope's plaintext shape. Mirrors runner sandboxPayload.ts SandboxPayload.</summary>
     public sealed record Envelope(
         [property: JsonPropertyName("spec")] string Spec,
-        [property: JsonPropertyName("credentials")] Credentials? Credentials);
+        [property: JsonPropertyName("credentials")] Credentials? Credentials,
+        // ★ A REAL JSON BOOLEAN. runner sandboxPayload.ts normalises with `!== false`, so anything that is
+        //   not literally `false` (a stringified "false", a 0, an omitted field) resolves to ON there. That
+        //   fails SAFE, but only because this side sends a genuine boolean — do not stringify it.
+        [property: JsonPropertyName("redactCredentials")] bool RedactCredentials);
 
     /// <summary>Serialize with the explicit JsonPropertyName casing above — never the ambient policy.</summary>
     private static readonly JsonSerializerOptions SerializerOptions = new()
@@ -74,12 +78,12 @@ public static class SandboxPayload
     /// CRED_ENC_KEY and is never derived from it, stored, reused across runs, or written to the database.
     /// It exists only in this method's return value, the ARM start body, and that execution's history.
     /// </summary>
-    public static Sealed Seal(string spec, Credentials? credentials)
+    public static Sealed Seal(string spec, Credentials? credentials, bool redactCredentials = true)
     {
         var key = RandomNumberGenerator.GetBytes(KeyLen);
         try
         {
-            var json = JsonSerializer.Serialize(new Envelope(spec, credentials), SerializerOptions);
+            var json = JsonSerializer.Serialize(new Envelope(spec, credentials, redactCredentials), SerializerOptions);
             return new Sealed(CredCrypto.Encrypt(json, key), Convert.ToBase64String(key));
         }
         finally

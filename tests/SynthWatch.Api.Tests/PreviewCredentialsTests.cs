@@ -115,6 +115,30 @@ public class PreviewCredentialsTests
             Live.Remove(token);
             return Task.FromResult(true);
         }
+
+        /// <summary>Result ARTIFACTS ({token}.json / screenshot / trace), distinct from the payload blob.
+        /// Recorded separately so a test can prove serve-once-then-delete fired for an UNREDACTED run —
+        /// and, just as importantly, that it did NOT fire for a redacted one.</summary>
+        public Task<bool> DeleteArtifactsAsync(string token, CancellationToken ct)
+        {
+            Events.Add("delete-artifacts");
+            LiveArtifacts.Remove(token);
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> DeleteArtifactAsync(string token, string name, CancellationToken ct)
+        {
+            Events.Add($"delete-artifact:{name}");
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> DeleteResultJsonAsync(string token, CancellationToken ct)
+        {
+            Events.Add("delete-result-json");
+            return Task.FromResult(true);
+        }
+
+        public readonly HashSet<string> LiveArtifacts = [];
     }
 
     private sealed class FakeRunnerJob : IRunnerJobTrigger
@@ -239,6 +263,128 @@ public class PreviewCredentialsTests
             var plaintext = CredCrypto.Decrypt(ciphertext, Convert.FromBase64String(job.LastEnv["SW_SANDBOX_CRED_KEY"]));
             Assert.Contains(Sentinel, plaintext, StringComparison.Ordinal);
             Assert.Contains(SentinelBypass, plaintext, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sandbox_preview WHERE actor_email LIKE '%@preview.test'; " +
+                "DELETE FROM sessions WHERE email LIKE '%@preview.test'; DELETE FROM editors WHERE email LIKE '%@preview.test';");
+        }
+    }
+
+    // ── ★ THE REDACTION TOGGLE — default ON, OFF is explicit, audited, and artifacts do not persist ──────
+
+    [SkippableFact]
+    public async Task Redaction_defaults_ON_when_the_field_is_absent_and_is_recorded_on_the_row()
+    {
+        Skip.IfNot(_pg.Available, _pg.SkipReason);
+        await using var db = _pg.NewDbContext();
+        const string tok = "swt_preview_redact_default", email = "redactdefault@preview.test";
+        await SeedEditorAsync(db, tok, email);
+        try
+        {
+            var store = new FakePayloadStore();
+            var fn = Fn(db, new AuditScope(), new FakeRunnerJob(), store);
+
+            // ★ NO redactCredentials field at all — an older dashboard build. It must NOT disable redaction.
+            var token = AcceptedToken(await fn.CreatePreview(
+                AuthJsonReq(tok, new { spec = "test('t', async () => {});" }), default));
+
+            db.ChangeTracker.Clear();
+            var row = await db.SandboxPreviews.SingleAsync(p => p.Token == token);
+            Assert.True(row.RedactCredentials, "an absent toggle must persist as REDACTED — fail safe");
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sandbox_preview WHERE actor_email LIKE '%@preview.test'; " +
+                "DELETE FROM sessions WHERE email LIKE '%@preview.test'; DELETE FROM editors WHERE email LIKE '%@preview.test';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task Redaction_OFF_is_recorded_on_the_row_and_in_the_audit_trail()
+    {
+        Skip.IfNot(_pg.Available, _pg.SkipReason);
+        await using var db = _pg.NewDbContext();
+        const string tok = "swt_preview_redact_off", email = "redactoff@preview.test";
+        await SeedEditorAsync(db, tok, email);
+        try
+        {
+            var audit = new AuditScope();
+            var store = new FakePayloadStore();
+            var fn = Fn(db, audit, new FakeRunnerJob(), store);
+
+            var token = AcceptedToken(await fn.CreatePreview(
+                AuthJsonReq(tok, new { spec = "test('t', async () => {});", redactCredentials = false }), default));
+
+            db.ChangeTracker.Clear();
+            var row = await db.SandboxPreviews.SingleAsync(p => p.Token == token);
+            Assert.False(row.RedactCredentials, "an explicit false must persist as UNREDACTED");
+
+            // ★ THE TRAIL. The row is current state and gets swept; audit_log is durable. "Who ran an
+            //   UNREDACTED preview, and when" has to remain answerable after the row is gone.
+            var recorded = audit.Diff!;
+            Assert.Equal("sandbox_preview", recorded.TargetType);
+            Assert.Equal(token, recorded.TargetId);
+            Assert.Contains("UNREDACTED", recorded.Note);
+            var after = System.Text.Json.JsonSerializer.Serialize(recorded.After);
+            Assert.Contains("redactCredentials", after);
+            Assert.Contains("false", after);
+            // ...and STILL no credential value anywhere in the audit object.
+            Assert.DoesNotContain(Sentinel, after);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM sandbox_preview WHERE actor_email LIKE '%@preview.test'; " +
+                "DELETE FROM sessions WHERE email LIKE '%@preview.test'; DELETE FROM editors WHERE email LIKE '%@preview.test';");
+        }
+    }
+
+    [SkippableFact]
+    public async Task An_abandoned_UNREDACTED_run_has_its_ARTIFACTS_swept_a_redacted_one_does_not()
+    {
+        Skip.IfNot(_pg.Available, _pg.SkipReason);
+        await using var db = _pg.NewDbContext();
+        const string tok = "swt_preview_artifact_sweep", email = "artifactsweep@preview.test";
+        await SeedEditorAsync(db, tok, email);
+        try
+        {
+            var store = new FakePayloadStore();
+            var fn = Fn(db, new AuditScope(), new FakeRunnerJob(), store);
+
+            var offToken = AcceptedToken(await fn.CreatePreview(
+                AuthJsonReq(tok, new { spec = "test('t', async () => {});", redactCredentials = false }), default));
+
+            // Nobody ever polls it — the abandoned case, which is exactly when serve-once-then-delete cannot
+            // fire and the credential would otherwise sit for the 1-day blob-lifecycle FLOOR.
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE sandbox_preview SET requested_at = now() - interval '10 minutes' WHERE token = {offToken}");
+            db.ChangeTracker.Clear();
+
+            await fn.SweepAbandonedPreviews(new Microsoft.Azure.Functions.Worker.TimerInfo(), default);
+
+            Assert.Contains("delete-artifacts", store.Events);
+            db.ChangeTracker.Clear();
+            Assert.Equal("timeout", (await db.SandboxPreviews.SingleAsync(p => p.Token == offToken)).Status);
+
+            // ★ AND THE INVERSE: a REDACTED abandoned run must NOT trigger artifact deletion. Its artifacts
+            //   are scrubbed, so the normal lifecycle is fine — deleting them would cost the operator their
+            //   diagnostic for no security gain, and would make this assertion vacuous.
+            store.Events.Clear();
+            var onToken = AcceptedToken(await fn.CreatePreview(
+                AuthJsonReq(tok, new { spec = "test('t2', async () => {});" }), default));
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE sandbox_preview SET requested_at = now() - interval '10 minutes' WHERE token = {onToken}");
+            db.ChangeTracker.Clear();
+
+            await fn.SweepAbandonedPreviews(new Microsoft.Azure.Functions.Worker.TimerInfo(), default);
+            Assert.DoesNotContain("delete-artifacts", store.Events);
+            // ★ And the terminal poll must NOT nuke the screenshot/trace blobs: the UI fetches those from
+            //   their own endpoints AFTER the poll returns `done`. Deleting them on the poll would 404 the
+            //   exact diagnostic the keep-the-screenshot change exists to restore (caught in review).
+            Assert.DoesNotContain(store.Events, e => e.StartsWith("delete-artifact:", StringComparison.Ordinal));
         }
         finally
         {

@@ -112,22 +112,29 @@ public class PreviewFunctions
     /// the delete is idempotent (DeleteIfExists), so a repeated sweep is cheap. Best-effort throughout: a
     /// failed delete leaves the lifecycle rule as the backstop and must never block a new preview.
     /// </summary>
-    private async Task SweepOrphanedPayloadsAsync(DateTimeOffset staleBefore, CancellationToken ct)
+    private async Task<int> SweepOrphanedPayloadsAsync(DateTimeOffset staleBefore, int? limit, CancellationToken ct)
     {
-        var abandoned = await _db.SandboxPreviews
+        // ★ limit == null ⇒ NO CAP. The request path passes MaxSweepPerRequest because a user is waiting on
+        //   that HTTP call; the TIMER passes null because nothing is waiting and a backlog must actually
+        //   drain. Capping the timer would recreate the bound this whole change exists to remove.
+        var query = _db.SandboxPreviews
             .Where(p => p.Status == "running" && p.RequestedAt < staleBefore)
-            .OrderBy(p => p.RequestedAt)
-            .Take(MaxSweepPerRequest)
-            .ToListAsync(ct);
-        if (abandoned.Count == 0) return;
+            .OrderBy(p => p.RequestedAt);
+        var abandoned = limit is int n ? await query.Take(n).ToListAsync(ct) : await query.ToListAsync(ct);
+        if (abandoned.Count == 0) return 0;
         foreach (var row in abandoned)
         {
             await _payloads.DeleteAsync(row.Token, ct);
+            // ★ An abandoned REDACTION-OFF run is the worst case this sweep exists for: nobody ever GET'd it,
+            //   so serve-once-then-delete never fired, and its artifacts hold a plaintext credential. Delete
+            //   them here. A redacted run's artifacts are scrubbed, so the 1-day lifecycle is fine for those.
+            if (!row.RedactCredentials) await _payloads.DeleteArtifactsAsync(row.Token, ct);
             row.Status = "timeout";
             row.CompletedAt = DateTimeOffset.UtcNow;
             row.Error = "no result within the sandbox timeout window";
         }
         await _db.SaveChangesAsync(ct);
+        return abandoned.Count;
     }
 
     private static bool CredentialsWithinBounds(SandboxPayload.Credentials c) =>
@@ -198,7 +205,7 @@ public class PreviewFunctions
         //   the split reachable for ~24h. Sweeping here means the NEXT preview by ANY user cleans up earlier
         //   orphans, so cleanup no longer depends on the abandoning client coming back.
         //   Bounded to a handful of rows so a create never turns into a long scan.
-        await SweepOrphanedPayloadsAsync(staleBefore, ct);
+        await SweepOrphanedPayloadsAsync(staleBefore, MaxSweepPerRequest, ct);
 
         var specSha = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body.Spec))).ToLowerInvariant();
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
@@ -215,14 +222,23 @@ public class PreviewFunctions
             SpecSha256 = specSha,
             TargetUrl = targetUrl,
             Status = "running",
+            // ★ DEFAULT TRUE on absent. An older client, a truncated body, or a null all mean "redact".
+            RedactCredentials = body.RedactCredentials != false,
         };
         _db.SandboxPreviews.Add(row);
         await _db.SaveChangesAsync(ct);
-        _audit.Record("sandbox_preview", token, before: null, after: new { specSha256 = specSha, targetUrl }, note: "preview-run");
+        // ★ The toggle goes in the AUDIT object too, not just the row. The row is the current state and can
+        //   be swept/deleted; audit_log is the durable trail, and "who ran an UNREDACTED preview, and when"
+        //   is exactly the question this surface has to be able to answer later. Still no credential VALUES —
+        //   the audit object remains {specSha256, targetUrl, redactCredentials}.
+        _audit.Record(
+            "sandbox_preview", token, before: null,
+            after: new { specSha256 = specSha, targetUrl, redactCredentials = row.RedactCredentials },
+            note: row.RedactCredentials ? "preview-run" : "preview-run UNREDACTED");
 
         // ★ SEAL the spec + any typed credentials under a FRESH per-run AES-256 key, and write the ciphertext
         //   to the private {token}.payload blob. The key never touches the DB and is not CRED_ENC_KEY.
-        var sealedPayload = SandboxPayload.Seal(body.Spec, credentials);
+        var sealedPayload = SandboxPayload.Seal(body.Spec, credentials, row.RedactCredentials);
         if (!await _payloads.WriteAsync(token, sealedPayload.Ciphertext, ct))
         {
             // ★ FAIL BEFORE STARTING. Starting the job now would run it with a key but no ciphertext, and the
@@ -331,7 +347,53 @@ public class PreviewFunctions
         row.Status = "done";
         row.CompletedAt = DateTimeOffset.UtcNow;
         await _db.SaveChangesAsync(ct);
+
+        // ★ SERVE-ONCE-THEN-DELETE (redaction-OFF only) — the RESULT JSON ONLY, deliberately.
+        //   `trace` is in hand and ships in this response, so {token}.json has served its purpose and for an
+        //   OFF run its stdout/steps carry the plaintext credential. Delete it now rather than wait for the
+        //   1-day blob-lifecycle FLOOR (Azure's minimum granularity; no shorter rule exists).
+        // ★ NOT the screenshot/trace blobs. The UI fetches those from /preview/{token}/screenshot and
+        //   /trace AFTER this poll returns `done` — deleting them here would 404 exactly the diagnostic the
+        //   screenshot change exists to restore. Each artifact is instead deleted by its OWN endpoint once
+        //   it has streamed (see StreamSandboxArtifactAsync).
+        // ★ HONEST ABOUT THE WEAKEST CASE: all of this only fires if somebody actually views the run. One
+        //   that is never opened is caught by the 5-minute TIMER sweep — so the real bound for an abandoned
+        //   OFF run is the sweep interval, NOT "immediately". Both cases must be stated in the UI copy.
+        // ★ After SaveChangesAsync and never fatal: a failed delete must not 500 a successful preview; the
+        //   row stays eligible for the sweep.
+        if (!row.RedactCredentials) await _payloads.DeleteResultJsonAsync(token, ct);
+
         return ApiResults.Ok(new PreviewStatusDto(token, "done", trace));
+    }
+
+    /// <summary>
+    /// ★ THE TIMER SWEEP — every 5 MINUTES. This is the REAL retention bound for an abandoned preview.
+    ///
+    /// ★ WHY IT EXISTS. Before this, the only sweep was piggybacked on the CREATE path, capped at
+    /// <see cref="MaxSweepPerRequest"/>. That gave the WEAKEST guarantee to the WORST case: an abandoned
+    /// redaction-OFF run holds a PLAINTEXT credential in its artifacts, and its cleanup depended on somebody
+    /// else happening to run a preview — and on being in the first 10 stale rows. On a quiet weekend that is
+    /// the full 1-day blob-lifecycle FLOOR (Azure's minimum granularity; no shorter rule exists). Optional
+    /// redaction on a code-execution surface is not defensible on that bound, so it is replaced with a real
+    /// one: at most ~5 minutes past the staleness window, regardless of traffic.
+    ///
+    /// ★ NO CAP HERE (limit: null). Nothing is waiting on this invocation, so a backlog must actually drain;
+    /// capping it would recreate the bound this exists to remove. The request path keeps its cap, because a
+    /// user IS waiting on that call.
+    ///
+    /// ★ The interval is the number PR3's UI copy must name — "deleted when you view the result, or within
+    /// ~5 minutes if you don't". Change it here and that copy has to change with it.
+    ///
+    /// Singleton by default (one Functions host instance runs a timer at a time); the sweep is idempotent
+    /// regardless — the status flip is what makes a row stop matching.
+    /// </summary>
+    [Function("SweepAbandonedPreviews")]
+    public async Task SweepAbandonedPreviews(
+        [TimerTrigger("0 */5 * * * *")] TimerInfo timer, CancellationToken ct)
+    {
+        var staleBefore = DateTimeOffset.UtcNow - RunningStaleAfter;
+        var swept = await SweepOrphanedPayloadsAsync(staleBefore, limit: null, ct);
+        if (swept > 0) PreviewLog.TimerSweptAbandoned(_logger, swept);
     }
 
     /// <summary>GET /api/preview/quota — the caller's live bounds (running/hourly + the caps) so the UI can show
@@ -395,6 +457,22 @@ public class PreviewFunctions
             var resp = await blob.DownloadStreamingAsync(cancellationToken: ct);
             if (attachment)
                 req.HttpContext.Response.Headers.ContentDisposition = $"attachment; filename=\"preview-{token}-{name}\"";
+
+            // ★ SERVE-ONCE-THEN-DELETE, per artifact, for redaction-OFF runs only.
+            //   An OFF run's trace/screenshot hold the operator's credential in plaintext. Showing it to the
+            //   person who typed it is fine; leaving it in durable storage for up to the 1-day lifecycle
+            //   floor is what widens the audience. So: buffer THIS artifact, delete the blob, return bytes.
+            // ★ Buffered rather than streamed, and ONLY on this path: you cannot delete a blob out from under
+            //   an in-flight FileStreamResult without risking a truncated response. A redacted run keeps the
+            //   original zero-copy streaming — the cost is paid only where it buys something.
+            var isUnredacted = await IsUnredactedRunAsync(token, ct);
+            if (isUnredacted)
+            {
+                using var buffer = new MemoryStream();
+                await resp.Value.Content.CopyToAsync(buffer, ct);
+                await _payloads.DeleteArtifactAsync(token, name, ct); // best-effort; the timer sweep retries
+                return new FileContentResult(buffer.ToArray(), contentType);
+            }
             return new FileStreamResult(resp.Value.Content, contentType); // FileStreamResult disposes the stream
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
@@ -407,6 +485,13 @@ public class PreviewFunctions
             return ApiResults.ServiceUnavailable($"Preview {name} is temporarily unavailable.");
         }
     }
+
+    /// <summary>True when this preview ran with redaction OFF — i.e. its artifacts hold a plaintext
+    /// credential and must not outlive the view. Unknown/missing token ⇒ false (treat as redacted): a
+    /// wrong guess here must not DELETE something it shouldn't.</summary>
+    private async Task<bool> IsUnredactedRunAsync(string token, CancellationToken ct) =>
+        await _db.SandboxPreviews.Where(p => p.Token == token)
+            .Select(p => (bool?)p.RedactCredentials).FirstOrDefaultAsync(ct) == false;
 
     /// <summary>Read the sandbox job's trace result from the DEDICATED sandbox container only. null = not yet
     /// written (still running). Uses the API MI (needs Blob Data Reader on the sandbox container — infra).</summary>
@@ -440,4 +525,8 @@ internal static partial class PreviewLog
     [LoggerMessage(EventId = 5101, Level = LogLevel.Warning,
         Message = "preview blob read failed (status {Status}) for token {Token} — degrading to still-polling")]
     public static partial void BlobReadFailed(ILogger logger, int status, string token, Exception ex);
+
+    [LoggerMessage(EventId = 5102, Level = LogLevel.Information,
+        Message = "timer sweep reclaimed {Count} abandoned preview(s) — payload + (unredacted) artifacts deleted")]
+    public static partial void TimerSweptAbandoned(ILogger logger, int count);
 }
