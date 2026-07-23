@@ -113,12 +113,15 @@ public record IncidentDto(
     string? CheckName,
     string? CheckKind,
     // AI root-cause analysis (incidents.rca); null when RCA is off/failed/pre-existing.
-    IncidentRca? Rca)
+    IncidentRca? Rca,
+    // WHY it closed (runner 0095). null = genuine recovery; non-null = the stopped-monitor reconcile
+    // (monitor_paused/archived/removed). Lets the dashboard explain a resolved-with-no-green timeline.
+    string? ResolutionReason)
 {
     public static IncidentDto From(Incident i, string? checkName, string? checkKind) => new(
         i.Id, i.CheckId, i.Status, i.Severity, i.OpenedAt, i.ResolvedAt,
         i.OpenedRunId, i.ResolvedRunId, i.ConsecutiveFailures, i.Summary,
-        checkName, checkKind, i.Rca);
+        checkName, checkKind, i.Rca, i.ResolutionReason);
 }
 
 /// <summary>One run in an incident's timeline (GET /api/incidents/{id}). Artifact URLs are the API
@@ -176,6 +179,8 @@ public record IncidentDetailDto(
     int ConsecutiveFailures,
     string? Summary,
     IncidentRca? Rca,
+    // WHY it closed (runner 0095). null = genuine recovery; non-null = the stopped-monitor reconcile.
+    string? ResolutionReason,
     IReadOnlyList<LocationStatusDto> PerLocation,
     IReadOnlyList<TimelineEntryDto> Timeline,
     IReadOnlyList<RecurrenceDto> Recurrence,

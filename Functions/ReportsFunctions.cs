@@ -340,6 +340,13 @@ public class ReportsFunctions
                WHERE i.opened_at >= now() - ({days} * INTERVAL '1 day')
                  -- ★ Archived-EXCLUDE (#259 parity, at the source): an archived monitor's incidents never enter MTTR.
                  AND c.archived_at IS NULL
+                 -- ★ RECOVERY-ONLY (0095): a non-null resolution_reason means the incident was CLOSED by the
+                 --   stopped-monitor reconcile (operator paused/archived/removed the check), NOT a genuine
+                 --   recovery. Its resolved_at ≈ opened_at, so it would land as a ≈0-duration incident and
+                 --   deflate the mean AND median. MTTR = mean/median time to RECOVERY, so these are not MTTR
+                 --   data at all. Filter IS NULL specifically — NOT the reason value set — so any future
+                 --   reason is excluded by default and the api stays decoupled from the runner's values.
+                 AND i.resolution_reason IS NULL
                  -- ★ Pre-prod default-EXCLUDE (arc S1c): a non-prod check's incidents never enter the prod MTTR.
                  AND coalesce(c.environment_override, c.environment, 'prod') = 'prod'
                  AND (cardinality({tags}) = 0 OR i.check_id IN (

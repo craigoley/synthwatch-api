@@ -445,6 +445,7 @@ public class SynthWatchDbContext : DbContext
             e.Property(x => x.ResolvedRunId).HasColumnName("resolved_run_id");
             e.Property(x => x.ConsecutiveFailures).HasColumnName("consecutive_failures");
             e.Property(x => x.Summary).HasColumnName("summary");
+            e.Property(x => x.ResolutionReason).HasColumnName("resolution_reason");
             var (rcaConv, rcaCmp) = JsonbColumn<IncidentRca?>();
             e.Property(x => x.Rca).HasColumnName("rca").HasColumnType("jsonb")
                 .HasConversion(rcaConv, rcaCmp);

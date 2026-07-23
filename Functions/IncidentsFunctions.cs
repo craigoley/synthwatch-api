@@ -186,7 +186,7 @@ public class IncidentsFunctions
             inc.Id, inc.CheckId, check?.Name, check?.Kind, check?.Environment, inc.Status, inc.Severity,
             inc.OpenedAt, inc.ResolvedAt,
             DurationSeconds: inc.ResolvedAt is null ? null : (inc.ResolvedAt.Value - inc.OpenedAt).TotalSeconds,
-            inc.ConsecutiveFailures, inc.Summary, inc.Rca, perLocation, timeline, recurrence, nearbyDeploys,
+            inc.ConsecutiveFailures, inc.Summary, inc.Rca, inc.ResolutionReason, perLocation, timeline, recurrence, nearbyDeploys,
             totalRuns, truncated);
 
         req.HttpContext.Response.Headers.CacheControl = "public, max-age=10";
