@@ -603,6 +603,52 @@ public class IntegrationTests
         }
     }
 
+    // ★ GET /reports/mttr — a stopped-monitor INTERVENED close (resolution_reason non-null, 0095) must NOT
+    // enter MTTR. It is a ≈0-duration close (resolved_at ≈ opened_at) and would deflate the mean AND median.
+    // This is the exact distortion the WHERE `i.resolution_reason IS NULL` filter prevents.
+    [SkippableFact]
+    public async Task Mttr_excludes_intervened_closes_reason_non_null()
+    {
+        RequireDocker();
+        await using var db = _pg.NewDbContext();
+        // rz-a: TWO genuine recoveries (60s, 120s → mean 90, median 90) + ONE intervened close: opened 2 days
+        // ago, resolved 1 SECOND later, resolution_reason='monitor_paused'. If the filter is absent, the
+        // ≈1s row drags mean→~60 and median→60. With it, MTTR sees only [60,120].
+        await db.Database.ExecuteSqlRawAsync("""
+            DO $$
+            DECLARE a bigint;
+            BEGIN
+              INSERT INTO checks (name, kind, target_url, interval_seconds) VALUES ('rz-a','http','https://rz.ex',300) RETURNING id INTO a;
+              INSERT INTO check_tags (check_id, key, value) VALUES (a,'team','rz');
+              INSERT INTO incidents (check_id, status, severity, opened_at, resolved_at, consecutive_failures, resolution_reason) VALUES
+                (a,'resolved','critical', now()-interval '5 days', now()-interval '5 days'+interval '60 seconds',  1, NULL),
+                (a,'resolved','critical', now()-interval '4 days', now()-interval '4 days'+interval '120 seconds', 1, NULL),
+                (a,'resolved','critical', now()-interval '2 days', now()-interval '2 days'+interval '1 second',    1, 'monitor_paused');
+            END $$;
+            """);
+        try
+        {
+            var reports = new ReportsFunctions(db);
+            var r = Assert.IsType<MttrReportResponseDto>(Assert.IsType<OkObjectResult>(
+                await reports.GetMttrReport(Request("?window=30d&tag=team:rz"), default)).Value!);
+            var a = r.Items.First(i => i.CheckName == "rz-a");
+
+            // ★ THE TEETH: only the 2 genuine recoveries counted; the intervened ≈1s close is absent entirely.
+            Assert.Equal(2, a.ResolvedCount);              // NOT 3
+            Assert.Equal(90d, a.MeanSeconds);              // mean of [60,120], NOT ~60
+            Assert.Equal(90d, a.MedianSeconds);            // median of [60,120], NOT 60
+            Assert.Equal(2, r.Fleet.ResolvedCount);
+            Assert.Equal(90d, r.Fleet.MeanSeconds!.Value);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM incidents WHERE check_id IN (SELECT id FROM checks WHERE name='rz-a'); " +
+                "DELETE FROM check_tags WHERE check_id IN (SELECT id FROM checks WHERE name='rz-a'); " +
+                "DELETE FROM checks WHERE name='rz-a';");
+        }
+    }
+
     // ── §D1 Monitor-Trust Scorecard ────────────────────────────────────────────────────────────────────
     // ★ B3-2 — the chip rules are the contract, and they are now DERIVED FROM DISTINCT DIMENSIONS (no
     // OR-collapse). This pure test locks the exact per-dimension boundaries the dashboard legend renders:

@@ -200,7 +200,11 @@ CREATE TABLE public.incidents (
     notify_status text,
     notify_error text,
     notify_attempts integer DEFAULT 0 NOT NULL,
+    -- 0095 (runner): NULL = genuine recovery; non-null = closed by the stopped-monitor reconcile
+    -- (monitor_paused/archived/removed). /reports/mttr excludes non-null. Mirrors runner incidents.
+    resolution_reason text,
     CONSTRAINT incidents_notify_status_chk CHECK (((notify_status IS NULL) OR (notify_status = ANY (ARRAY['sent'::text, 'failed'::text, 'skipped'::text])))),
+    CONSTRAINT incidents_resolution_reason_chk CHECK (((resolution_reason IS NULL) OR (resolution_reason = ANY (ARRAY['monitor_paused'::text, 'monitor_archived'::text, 'monitor_removed'::text])))),
     CONSTRAINT incidents_severity_check CHECK ((severity = ANY (ARRAY['critical'::text, 'warning'::text]))),
     CONSTRAINT incidents_status_check CHECK ((status = ANY (ARRAY['open'::text, 'resolved'::text])))
 );

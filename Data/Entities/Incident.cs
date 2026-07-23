@@ -28,6 +28,12 @@ public class Incident
 
     public string? Summary { get; set; }
 
+    /// <summary>WHY the incident closed (runner 0095). NULL = a genuine cross-location recovery run; non-null
+    /// = closed by the runner's stopped-monitor reconcile (monitor_paused/archived/removed). Read-only for the
+    /// API — the runner writes it. /reports/mttr excludes non-null; the dashboard uses it to explain a
+    /// resolved-with-no-green-recovery timeline.</summary>
+    public string? ResolutionReason { get; set; }
+
     // AI root-cause analysis (migration 0015; jsonb). Null when RCA is off / failed / pre-existing.
     public IncidentRca? Rca { get; set; }
 
