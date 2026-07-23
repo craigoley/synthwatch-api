@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # Schema-parity gate (M3c) — catch the "fixture drifted from the runner schema" class at CI instead of as a
 # silent coverage hole (the #129 reconcile_apply_plan miss) or a prod 500. The runner repo OWNS the schema;
-# this API's tests/fixtures/schema.sql is a hand-maintained mirror. This job asserts the mirror is faithful.
+# this API's tests/fixtures/schema.sql is a hand-maintained mirror of the objects the API READS — a CURATED
+# SUBSET, NOT a full copy of the runner schema. "Faithful" here means faithful to what the API reads, not a
+# byte-for-byte replica of runner main. Two classes of runner object are INTENTIONALLY absent and are NOT
+# expected to appear (a reader who greps runner main for a column and finds it missing here should look here):
+#   • runner-only TABLES the API never maps (e.g. runner_errors) — the DbContext-presence gate only requires
+#     MAPPED tables to exist, so an unmapped runner table is legitimately omitted.
+#   • a small VETTED ALLOWLIST of runner-internal COLUMNS on shared tables the API never maps — currently
+#     checks.baseline_screenshot_url, checks.last_burn_notified_at, incidents.rca_notified_at (see the allowlist
+#     in check_runner_column_parity). These pass GREEN BY DESIGN; they are not a gate hole.
+# (As of this writing those are the ONLY runner columns absent from the fixture: the 3 allowlisted shared-table
+#  columns + the 8 columns of the unmapped runner_errors table — every absence is accounted for, none is a bug.)
 #
 # ★ IT NEVER DIFFS THE FIXTURE FILE. ~42% of schema.sql is hand-appended blocks with cross-repo comments and
 # seed INSERTs (incident memory the CLAUDE.md mirror-pattern depends on); regenerating clobbers them. Instead
@@ -19,8 +29,9 @@
 # Opt-in (RUNNER_PARITY=1): also diff shared-table COLUMNS/constraints/functions against the CURRENT runner
 # schema, in BOTH directions:
 #   (b) FIXTURE-BEHIND (check_runner_column_parity) — the fixture must carry every column/constraint the runner
-#       defines on a shared table (the lagging-CHECK / lagging-enum class, #153 — e.g. the runner adding a status
-#       value the fixture's CHECK still rejects).
+#       defines on a shared table, EXCEPT the small vetted allowlist of runner-internal columns the API never maps
+#       (see check_runner_column_parity) (the lagging-CHECK / lagging-enum class, #153 — e.g. the runner adding a
+#       status value the fixture's CHECK still rejects).
 #   (c) MAPPING-AHEAD (check_mapping_not_ahead_of_runner) — every PHYSICAL column the API's EF model MAPS
 #       (.HasColumnName under a .ToTable in Data/SynthWatchDbContext.cs) must ALREADY exist in the runner schema.
 #       EF projects each mapped scalar into its generated SELECT, so a column mapped-and-shipped BEFORE its runner
