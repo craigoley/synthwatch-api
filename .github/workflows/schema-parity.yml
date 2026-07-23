@@ -53,8 +53,11 @@ jobs:
         run: bash scripts/check-schema-parity.sh
 
   # Runner column parity: diff the fixture's shared tables/constraints/functions against the CURRENT runner
-  # schema (db/schema.sql + idempotent migrations-on-top). A GATING check (in ci-gate's REQUIRED list) — a real
-  # fixture-vs-runner drift fails it, holding the merge, exactly the #153/#129 class this gate exists to catch.
+  # schema (db/schema.sql + idempotent migrations-on-top), in BOTH directions — FIXTURE-BEHIND (the fixture lags
+  # a runner column/CHECK) AND MAPPING-AHEAD (the DbContext maps a column runner main does not yet define, the
+  # 2026-07-23 /incidents outage class — #286 shipped a mapping before its 0095 migration deployed). A GATING check
+  # (in ci-gate's REQUIRED list) — a real drift in EITHER direction fails it, holding the merge, exactly the
+  # #153/#129 (fixture-behind) and #286 (mapping-ahead) classes this gate exists to catch.
   # #167 enabled this (RED at first), then made it precise + faithful so it lands GREEN: it closed the real
   # fixture lags (runs.location NOT NULL, reconcile_drift +redaction_mismatch, run_steps +running, the missing
   # checks_slo_target_check, the swapped-arg checks_spec_path_shape, run_requests_status_check), and taught the
