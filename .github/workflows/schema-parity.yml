@@ -41,7 +41,7 @@ jobs:
       PGPASSWORD: pg
     steps:
       - name: Checkout (synthwatch-api — the fixture + DbContext)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install psql client
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
@@ -86,13 +86,13 @@ jobs:
       RUNNER_PARITY: "1"
     steps:
       - name: Checkout (synthwatch-api — the fixture + DbContext)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The runner OWNS the schema; db/schema.sql is its source of truth. Both repos are public, so the default
       # token reads it. persist-credentials:false — read-only. Same checkout pattern as grant-coverage.yml /
       # trace-parity.yml. Tracks runner main (unpinned) so the gate reflects the CURRENT runner schema.
       - name: Checkout runner repo (db/schema.sql = the source of truth)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: craigoley/synthwatch
           path: runner-repo
