@@ -143,7 +143,7 @@ jobs:
 
       - name: Claude — diagnose + push ONE candidate fix
         if: steps.fails.outputs.go == 'true' && steps.g1.outputs.stop != 'true' && steps.fails.outputs.parity != 'true'
-        uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc  # v1
+        uses: anthropics/claude-code-action@459ad358ae43fea66bfefd0a1f8d840b4b9791fb  # v1
         env:
           GH_TOKEN: ${{ github.token }}
         with:
