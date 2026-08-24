@@ -46,7 +46,7 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -58,7 +58,7 @@ jobs:
         run: dotnet build -c Release
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
         with:
           category: "/language:${{ matrix.language }}"
           # Don't upload yet — first FILTER generated-code results (next step). For COMPILED languages
@@ -81,7 +81,7 @@ jobs:
           output: sarif-results/${{ matrix.language }}.sarif
 
       - name: Upload filtered SARIF
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
         with:
           sarif_file: sarif-results/${{ matrix.language }}.sarif
           category: "/language:${{ matrix.language }}"
