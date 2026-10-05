@@ -24,7 +24,7 @@ jobs:
 
       - name: Claude review
         id: review
-        uses: anthropics/claude-code-action@cfc3eb22bfed5c26ef66e3223c982af27e4524de # v1
+        uses: anthropics/claude-code-action@8ce9314fa9a404564fa7e954cd84f25bcba2b829 # v1
         env:
           # Authenticate the `gh` CLI used by the Bash tool (gh pr merge/comment).
           GH_TOKEN: ${{ github.token }}
